@@ -19,19 +19,19 @@
   </style>
 
   <!-- a -->
-  <text x="80" y="98" text-anchor="middle" class="letter">a</text>
+  <text x="165" y="98" text-anchor="middle" class="letter">a</text>
   <!-- l -->
-  <text x="108" y="98" text-anchor="middle" class="letter">l</text>
+  <text x="193" y="98" text-anchor="middle" class="letter">l</text>
 
   <!-- o as horizon ring, left tick meets the l -->
-  <g transform="translate(136, 76)">
+  <g transform="translate(221, 76)">
     <circle r="18" class="mark"/>
     <line x1="-26" y1="0" x2="-19" y2="0" class="mark"/>
     <line x1="19" y1="0" x2="26" y2="0" class="mark"/>
   </g>
 
   <!-- h -->
-  <text x="176" y="98" text-anchor="middle" class="letter">h</text>
+  <text x="261" y="98" text-anchor="middle" class="letter">h</text>
   <!-- a -->
-  <text x="211" y="98" text-anchor="middle" class="letter">a</text>
+  <text x="296" y="98" text-anchor="middle" class="letter">a</text>
 </svg>
