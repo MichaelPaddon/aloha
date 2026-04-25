@@ -1,0 +1,33 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    configure|abort-upgrade|abort-deconfigure|abort-remove)
+        # Create system group if not present.
+        if ! getent group aloha >/dev/null; then
+            addgroup --system aloha
+        fi
+
+        # Create system user if not present.
+        # No login shell, no home directory — service account only.
+        if ! getent passwd aloha >/dev/null; then
+            adduser --system --ingroup aloha \
+                    --no-create-home --home /nonexistent \
+                    --shell /usr/sbin/nologin \
+                    --gecos "aloha HTTP server" aloha
+        fi
+
+        # Reload systemd so it sees the new unit files.
+        if [ -d /run/systemd/system ]; then
+            systemctl --system daemon-reload >/dev/null || true
+        fi
+
+        echo ""
+        echo "aloha installed.  To start and enable on boot:"
+        echo "  sudo systemctl enable --now aloha"
+        echo ""
+        echo "Edit /etc/aloha.kdl before starting."
+        ;;
+esac
+
+#DEBHELPER#

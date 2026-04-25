@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>aloha</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+
+    :root {
+      --navy:       #1e3a5f;
+      --bg:         #f5f7fa;
+      --surface:    #ffffff;
+      --border:     #dde3eb;
+      --text:       #1a2332;
+      --muted:      #5e6e82;
+      --green:      #16a34a;
+      --accent-bg:  #edf2f8;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font-family: system-ui, -apple-system, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 2rem 1rem;
+    }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 2.5rem 2rem 2rem;
+      max-width: 400px;
+      width: 100%;
+      text-align: center;
+      box-shadow: 0 1px 12px rgba(30,58,95,0.07);
+    }
+
+    .logo {
+      width: 200px;
+      height: auto;
+      margin: 0 auto 1.25rem;
+      display: block;
+    }
+
+    .tagline {
+      color: var(--muted);
+      font-size: 0.88rem;
+      margin: 0 0 1.75rem;
+    }
+
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.45rem;
+      font-size: 0.7rem;
+      color: var(--green);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      font-weight: 700;
+      margin-bottom: 1.5rem;
+    }
+    .dot {
+      width: 6px;
+      height: 6px;
+      background: var(--green);
+      border-radius: 50%;
+      animation: pulse 2.4s ease-in-out infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1;   transform: scale(1);   }
+      50%       { opacity: 0.4; transform: scale(0.8); }
+    }
+
+    hr {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 0 0 1.5rem;
+    }
+
+    .links {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+
+    .links a {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      padding: 0.75rem 1rem;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      text-decoration: none;
+      font-size: 0.875rem;
+      transition: border-color 0.15s, background 0.15s;
+    }
+    .links a:hover {
+      border-color: var(--navy);
+      background: var(--accent-bg);
+    }
+    .links a .label { flex: 1; text-align: left; }
+    .links a .label strong { display: block; color: var(--navy); font-size: 0.875rem; }
+    .links a .label span   { font-size: 0.78rem; color: var(--muted); }
+    .links a .arrow        { color: var(--muted); font-size: 0.85rem; }
+
+    footer {
+      margin-top: 1.5rem;
+      font-size: 0.72rem;
+      color: var(--muted);
+      text-align: center;
+    }
+    footer code {
+      font-family: ui-monospace, monospace;
+      background: var(--accent-bg);
+      color: var(--navy);
+      padding: 0.1em 0.3em;
+      border-radius: 3px;
+    }
+  </style>
+</head>
+<body>
+
+<div class="card">
+  <img class="logo" src="/aloha-logo.svg" alt="aloha">
+  <p class="tagline">HTTP &amp; reverse proxy server</p>
+
+  <div class="status">
+    <span class="dot"></span>
+    Server running
+  </div>
+
+  <hr>
+
+  <ul class="links">
+    <li>
+      <a href="/config.html">
+        <span class="label">
+          <strong>Configuration reference</strong>
+          <span>All aloha.kdl options documented</span>
+        </span>
+        <span class="arrow">→</span>
+      </a>
+    </li>
+  </ul>
+</div>
+
+<footer>
+  This page is served from the <code>root</code> directory
+  configured for this vhost.
+  Replace <code>index.html</code> with your own content.
+</footer>
+
+</body>
+</html>

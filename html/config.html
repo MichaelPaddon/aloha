@@ -1,0 +1,1081 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>aloha — Configuration Reference</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+
+    :root {
+      --sidebar-w: 220px;
+      --top-h:     54px;
+
+      --bg:        #f5f7fa;
+      --surface:   #ffffff;
+      --border:    #dde3eb;
+      --text:      #1a2332;
+      --muted:     #5e6e82;
+      --accent:    #1e3a5f;
+      --accent-bg: #edf2f8;
+      --green:     #16a34a;
+      --green-bg:  #dcfce7;
+      --amber:     #b45309;
+      --amber-bg:  #fef3c7;
+      --red:       #b91c1c;
+      --red-bg:    #fee2e2;
+
+      /* Code — deep navy */
+      --code-bg:   #1a2332;
+      --code-fg:   #e8e4d8;
+      --kw:        #7fc8ff;
+      --str:       #a8d4ff;
+      --num:       #f0c848;
+      --prop:      #d4a8ff;
+      --cm:        #8898b0;
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
+                   system-ui, sans-serif;
+      font-size: 15px;
+      line-height: 1.65;
+      color: var(--text);
+      background: var(--bg);
+    }
+
+    /* ── Top bar ──────────────────────────────────────── */
+
+    .topbar {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      height: var(--top-h);
+      background: #1e3a5f;
+      border-bottom: 1px solid #162e4e;
+      display: flex;
+      align-items: center;
+      padding: 0 1.5rem;
+      gap: 0.75rem;
+      z-index: 100;
+    }
+    .topbar-logo-img {
+      height: 28px;
+      width: auto;
+      /* invert the navy strokes to white for the dark topbar */
+      filter: brightness(0) invert(1);
+      flex-shrink: 0;
+      text-decoration: none;
+      display: block;
+    }
+    .topbar-sep {
+      width: 1px;
+      height: 1.2rem;
+      background: rgba(255,255,255,0.18);
+    }
+    .topbar-title {
+      font-size: 0.82rem;
+      color: rgba(255,255,255,0.55);
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+      font-weight: 600;
+    }
+    .topbar-home {
+      margin-left: auto;
+      font-size: 0.82rem;
+      color: rgba(255,255,255,0.55);
+      text-decoration: none;
+      padding: 0.3rem 0.7rem;
+      border: 1px solid rgba(255,255,255,0.20);
+      border-radius: 6px;
+      transition: border-color 0.15s, color 0.15s;
+    }
+    .topbar-home:hover { color: #ffffff; border-color: rgba(255,255,255,0.55); }
+
+    /* ── Layout ───────────────────────────────────────── */
+
+    .shell {
+      display: flex;
+      min-height: 100vh;
+      padding-top: var(--top-h);
+    }
+
+    /* ── Sidebar ──────────────────────────────────────── */
+
+    .sidebar {
+      width: var(--sidebar-w);
+      flex-shrink: 0;
+      position: sticky;
+      top: var(--top-h);
+      height: calc(100vh - var(--top-h));
+      overflow-y: auto;
+      padding: 1.5rem 0 2rem;
+      border-right: 1px solid var(--border);
+      background: var(--surface);
+      scrollbar-width: thin;
+    }
+
+    .nav-section {
+      margin-bottom: 1.25rem;
+    }
+    .nav-heading {
+      font-size: 0.7rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+      padding: 0 1.25rem 0.35rem;
+    }
+    .nav-list {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+    }
+    .nav-list a {
+      display: block;
+      padding: 0.28rem 1.25rem;
+      font-size: 0.875rem;
+      color: var(--text);
+      text-decoration: none;
+      border-left: 3px solid transparent;
+      transition: color 0.12s, border-color 0.12s, background 0.12s;
+    }
+    .nav-list a:hover {
+      color: var(--accent);
+      background: var(--accent-bg);
+    }
+    .nav-list a.active {
+      color: var(--accent);
+      border-left-color: var(--accent);
+      background: var(--accent-bg);
+      font-weight: 600;
+    }
+    .nav-list.sub a {
+      padding-left: 2.1rem;
+      font-size: 0.83rem;
+      color: var(--muted);
+    }
+    .nav-list.sub a:hover,
+    .nav-list.sub a.active {
+      color: var(--accent);
+    }
+
+    /* ── Content ──────────────────────────────────────── */
+
+    .content {
+      flex: 1;
+      min-width: 0;
+      padding: 2.5rem 3rem 4rem;
+      max-width: 800px;
+    }
+
+    .page-header { margin-bottom: 2.5rem; }
+    .page-header h1 {
+      font-size: 1.9rem;
+      font-weight: 800;
+      margin: 0 0 0.25rem;
+      color: var(--text);
+      letter-spacing: -0.02em;
+    }
+    .page-header p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.95rem;
+    }
+
+    section { margin-bottom: 3rem; }
+
+    h2 {
+      font-size: 1.2rem;
+      font-weight: 700;
+      color: var(--text);
+      margin: 0 0 1rem;
+      padding-bottom: 0.4rem;
+      border-bottom: 2px solid var(--border);
+      scroll-margin-top: calc(var(--top-h) + 1.5rem);
+    }
+
+    h3 {
+      font-size: 0.95rem;
+      font-weight: 700;
+      color: var(--text);
+      margin: 1.75rem 0 0.6rem;
+      scroll-margin-top: calc(var(--top-h) + 1.5rem);
+    }
+
+    p { margin: 0 0 0.9rem; }
+    ul, ol { margin: 0 0 0.9rem; padding-left: 1.5rem; }
+    li { margin-bottom: 0.2rem; }
+
+    /* ── Tables ───────────────────────────────────────── */
+
+    .table-wrap {
+      overflow-x: auto;
+      margin-bottom: 1.25rem;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.875rem;
+    }
+    thead th {
+      background: var(--bg);
+      text-align: left;
+      padding: 0.55rem 0.9rem;
+      font-weight: 600;
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--muted);
+      border-bottom: 1px solid var(--border);
+    }
+    tbody tr { border-bottom: 1px solid var(--border); }
+    tbody tr:last-child { border-bottom: none; }
+    tbody tr:hover { background: var(--accent-bg); }
+    td {
+      padding: 0.55rem 0.9rem;
+      vertical-align: top;
+    }
+    td:first-child {
+      font-family: ui-monospace, "SF Mono", Consolas, monospace;
+      font-size: 0.82rem;
+      color: var(--accent);
+      white-space: nowrap;
+      width: 12em;
+    }
+    td:nth-child(2) {
+      font-size: 0.83rem;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+
+    /* ── Badges ───────────────────────────────────────── */
+
+    .badge {
+      display: inline-block;
+      font-size: 0.65rem;
+      font-weight: 700;
+      padding: 0.15em 0.5em;
+      border-radius: 20px;
+      vertical-align: middle;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+    }
+    .badge-req  { background: var(--red-bg);   color: var(--red);   }
+    .badge-opt  { background: var(--accent-bg); color: var(--accent); }
+    .badge-stub { background: var(--amber-bg);  color: var(--amber);  }
+
+    /* ── Code blocks ──────────────────────────────────── */
+
+    pre {
+      background: var(--code-bg);
+      color: var(--code-fg);
+      padding: 1.1rem 1.4rem;
+      border-radius: 8px;
+      overflow-x: auto;
+      font-size: 0.82rem;
+      line-height: 1.6;
+      margin: 0 0 1.1rem;
+      font-family: ui-monospace, "SF Mono", Consolas, monospace;
+    }
+    code {
+      font-family: ui-monospace, "SF Mono", Consolas, monospace;
+      font-size: 0.875em;
+      background: var(--accent-bg);
+      color: var(--accent);
+      padding: 0.1em 0.35em;
+      border-radius: 4px;
+    }
+    pre code { background: none; padding: 0; color: inherit; font-size: inherit; }
+
+    /* KDL syntax colours */
+    .kw   { color: var(--kw); }
+    .str  { color: var(--str); }
+    .num  { color: var(--num); }
+    .prop { color: var(--prop); }
+    .cm   { color: var(--cm); font-style: italic; }
+
+    /* ── Callouts ─────────────────────────────────────── */
+
+    .callout {
+      display: flex;
+      gap: 0.75rem;
+      padding: 0.85rem 1rem;
+      border-radius: 8px;
+      font-size: 0.875rem;
+      margin: 0 0 1.1rem;
+      border: 1px solid;
+    }
+    .callout-icon { flex-shrink: 0; font-size: 1rem; line-height: 1.65; }
+    .callout.info  { background: var(--accent-bg); border-color: #b0c4d8; color: #1a3352; }
+    .callout.warn  { background: var(--amber-bg);  border-color: #f0c040; color: #7d4e00; }
+
+    /* ── Divider ──────────────────────────────────────── */
+
+    .divider {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 2.5rem 0;
+    }
+
+    /* ── Footer ───────────────────────────────────────── */
+
+    footer {
+      font-size: 0.78rem;
+      color: var(--muted);
+      padding-top: 1.5rem;
+      border-top: 1px solid var(--border);
+    }
+
+    /* ── Responsive ───────────────────────────────────── */
+
+    @media (max-width: 768px) {
+      .sidebar { display: none; }
+      .content { padding: 1.5rem 1.25rem 3rem; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- Top bar -->
+<header class="topbar">
+  <a href="/"><img class="topbar-logo-img" src="/aloha-logo.svg" alt="aloha"></a>
+  <div class="topbar-sep"></div>
+  <span class="topbar-title">Configuration Reference</span>
+  <a class="topbar-home" href="/">← Home</a>
+</header>
+
+<div class="shell">
+
+  <!-- Sidebar navigation -->
+  <nav class="sidebar" aria-label="Page navigation">
+    <div class="nav-section">
+      <div class="nav-heading">Getting started</div>
+      <ul class="nav-list">
+        <li><a href="#overview">Overview</a></li>
+        <li><a href="#kdl-primer">KDL primer</a></li>
+      </ul>
+    </div>
+    <div class="nav-section">
+      <div class="nav-heading">Top-level nodes</div>
+      <ul class="nav-list">
+        <li><a href="#server">server</a></li>
+        <ul class="nav-list sub">
+          <li><a href="#privdrop">user / group</a></li>
+        </ul>
+        <li><a href="#listener">listener</a></li>
+        <ul class="nav-list sub">
+          <li><a href="#timeouts">timeouts</a></li>
+          <li><a href="#tls">tls</a></li>
+          <li><a href="#tls-acme">acme mode</a></li>
+          <li><a href="#tls-options">tls options</a></li>
+        </ul>
+        <li><a href="#vhost">vhost</a></li>
+        <ul class="nav-list sub">
+          <li><a href="#vhost-matching">name matching</a></li>
+        </ul>
+        <li><a href="#location">location</a></li>
+        <ul class="nav-list sub">
+          <li><a href="#handler-static">static</a></li>
+          <li><a href="#handler-proxy">proxy</a></li>
+          <li><a href="#handler-redirect">redirect</a></li>
+          <li><a href="#handler-fastcgi">fastcgi</a></li>
+        </ul>
+      </ul>
+    </div>
+    <div class="nav-section">
+      <div class="nav-heading">Reference</div>
+      <ul class="nav-list">
+        <li><a href="#example">Full example</a></li>
+      </ul>
+    </div>
+  </nav>
+
+  <!-- Main content -->
+  <main class="content">
+
+    <div class="page-header">
+      <h1>Configuration Reference</h1>
+      <p>Complete reference for <code>aloha.kdl</code></p>
+    </div>
+
+    <!-- ── Overview ── -->
+    <section id="overview">
+      <h2>Overview</h2>
+      <p>
+        aloha is configured via a single <a href="https://kdl.dev">KDL</a> file.
+        By default it looks for <code>aloha.kdl</code> in the current working directory.
+        Pass <code>--config /path/to/file.kdl</code> (or <code>-c</code>) to use a
+        different path.
+      </p>
+      <p>A minimal configuration needs one <code>listener</code> and one <code>vhost</code>:</p>
+<pre><code><span class="kw">listener</span> {
+    <span class="kw">bind</span> <span class="str">"[::]:8080"</span>
+}
+
+<span class="kw">vhost</span> <span class="str">"localhost"</span> {
+    <span class="kw">location</span> <span class="str">"/"</span> {
+        <span class="kw">static</span> {
+            <span class="kw">root</span> <span class="str">"./public"</span>
+        }
+    }
+}</code></pre>
+      <div class="callout info">
+        <span class="callout-icon">ℹ</span>
+        <span>
+          Fields marked <span class="badge badge-req">required</span> must be present.
+          <span class="badge badge-opt">optional</span> fields have defaults or can be omitted.
+          <span class="badge badge-stub">stub</span> fields are parsed but not yet acted on.
+        </span>
+      </div>
+    </section>
+
+    <!-- ── KDL primer ── -->
+    <section id="kdl-primer">
+      <h2>KDL quick primer</h2>
+      <p>KDL nodes have the form <code>node-name arg prop="value" { child … }</code>.</p>
+      <ul>
+        <li><strong>Arguments</strong> are positional values after the node name:
+            <code>vhost "example.com"</code> or <code>tls "acme"</code></li>
+        <li><strong>Properties</strong> are named <code>key=value</code> pairs
+            (used for variation selectors)</li>
+        <li><strong>Children</strong> live inside <code>{&nbsp;}</code>, one per line:
+            <code>bind "[::]:8080"</code></li>
+        <li>Line comments start with <code>//</code></li>
+        <li>The null literal is written <code>null</code></li>
+      </ul>
+    </section>
+
+    <hr class="divider">
+
+    <!-- ── server ── -->
+    <section id="server">
+      <h2><code>server</code></h2>
+      <p>Global server settings. The entire node is optional.</p>
+<pre><code><span class="kw">server</span> {
+    <span class="kw">workers</span>   <span class="num">4</span>
+    <span class="kw">state-dir</span> <span class="str">"/var/lib/aloha"</span>
+    <span class="cm">// Global TLS defaults (see tls options below)</span>
+    <span class="kw">tls</span> {
+        <span class="kw">min-version</span> <span class="str">"1.2"</span>
+    }
+}</code></pre>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Child node</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>workers</td><td>integer</td><td>CPU count</td>
+              <td>Tokio worker thread count.
+                  <span class="badge badge-stub">stub</span>
+                  Parsed but not applied; Tokio defaults to one thread per CPU.</td>
+            </tr>
+            <tr>
+              <td>state-dir</td><td>path</td><td>—</td>
+              <td>Directory for persistent runtime state: ACME account keys and issued
+                  certificates. Required when any listener uses
+                  <code>tls "acme"</code>.</td>
+            </tr>
+            <tr>
+              <td>user</td><td>string</td><td>—</td>
+              <td><span class="badge badge-opt">optional</span>
+                  Unix username to switch to after all sockets are bound.
+                  Only effective when started as root; silently ignored otherwise.
+                  Logging a warning when omitted while running as root.</td>
+            </tr>
+            <tr>
+              <td>group</td><td>string</td><td><em>user's primary group</em></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Unix group to switch to. Defaults to the primary GID of
+                  <code>user</code> from <code>/etc/passwd</code>.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3 id="privdrop">Privilege drop</h3>
+      <p>
+        When aloha is started as root (needed to bind ports 80 and 443), set
+        <code>user</code> to drop privileges immediately after all sockets are
+        bound, before accepting any connections. The syscall sequence is
+        <code>setgroups</code> → <code>setgid</code> → <code>setuid</code>.
+      </p>
+<pre><code><span class="kw">server</span> { <span class="kw">user</span> <span class="str">"www-data"</span> }                  <span class="cm">// group from /etc/passwd</span>
+<span class="kw">server</span> { <span class="kw">user</span> <span class="str">"aloha"</span>; <span class="kw">group</span> <span class="str">"aloha"</span> }   <span class="cm">// explicit group</span></code></pre>
+      <div class="callout info">
+        <span class="callout-icon">ℹ</span>
+        <span>The systemd unit shipped in the Debian package uses
+        <code>DynamicUser=yes</code> and <code>AmbientCapabilities=CAP_NET_BIND_SERVICE</code>
+        instead — privilege drop is handled by systemd and
+        <code>user</code>/<code>group</code> are not needed in that deployment.</span>
+      </div>
+
+      <p>
+        A <code>tls</code> child inside <code>server</code> sets global TLS defaults
+        inherited by every TLS listener that does not supply its own
+        <code>tls</code> block. See <a href="#tls-options">tls options</a>.
+      </p>
+    </section>
+
+    <!-- ── listener ── -->
+    <section id="listener">
+      <h2><code>listener</code></h2>
+      <p>
+        Opens a TCP socket and begins accepting connections. At least one is required.
+        Use separate listeners for plain HTTP and HTTPS.
+      </p>
+<pre><code><span class="cm">// Plain HTTP — falls back to first vhost when Host doesn't match</span>
+<span class="kw">listener</span> {
+    <span class="kw">bind</span> <span class="str">"[::]:8080"</span>
+}
+
+<span class="cm">// Explicit default; unrecognised hosts are served by "example.com"</span>
+<span class="kw">listener</span> {
+    <span class="kw">bind</span>          <span class="str">"[::]:8443"</span>
+    <span class="kw">default-vhost</span> <span class="str">"example.com"</span>
+    <span class="kw">tls</span> <span class="str">"file"</span> {
+        <span class="kw">cert</span> <span class="str">"/etc/aloha/cert.pem"</span>
+        <span class="kw">key</span>  <span class="str">"/etc/aloha/key.pem"</span>
+    }
+}
+
+<span class="cm">// null disables the fallback — unrecognised hosts get a 404</span>
+<span class="kw">listener</span> {
+    <span class="kw">bind</span>          <span class="str">"[::]:80"</span>
+    <span class="kw">default-vhost</span> <span class="num">null</span>
+}
+
+<span class="cm">// systemd socket activation (fd 3 = first socket passed by systemd)</span>
+<span class="kw">listener</span> {
+    <span class="kw">fd</span> <span class="num">3</span>
+}</code></pre>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Child node</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>bind</td><td>string</td><td>—</td>
+              <td>Address and port to listen on, e.g. <code>"[::]:8080"</code> or
+                  <code>"0.0.0.0:443"</code>. Mutually exclusive with
+                  <code>fd</code>; exactly one must be present.</td>
+            </tr>
+            <tr>
+              <td>fd</td><td>integer</td><td>—</td>
+              <td>Adopt an already-open file descriptor as the listening socket.
+                  Used for systemd socket activation. Mutually exclusive with
+                  <code>bind</code>.</td>
+            </tr>
+            <tr>
+              <td>default-vhost</td><td>string | <code>null</code></td><td><em>first vhost</em></td>
+              <td>Vhost used when no <code>Host</code> header matches.
+                  Omit to fall back to the first vhost defined in the config.
+                  Set to <code>null</code> to return 404 for unrecognised hosts.
+                  Must reference a <code>vhost</code> primary name or alias
+                  (including <code>~</code>-prefixed regex names).</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- tls -->
+      <!-- tls -->
+      <h3 id="timeouts"><code>timeouts</code> child node</h3>
+      <p>
+        Optional connection and request timeout settings. All values are in whole seconds.
+        Omit any field (or the entire <code>timeouts</code> node) for no limit.
+      </p>
+<pre><code><span class="kw">listener</span> {
+    <span class="kw">bind</span> <span class="str">"[::]:8080"</span>
+    <span class="kw">timeouts</span> {
+        <span class="kw">request-header</span> <span class="num">30</span>
+        <span class="kw">handler</span>        <span class="num">60</span>
+        <span class="kw">keepalive</span>      <span class="num">75</span>
+    }
+}</code></pre>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Child node</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>request-header</td><td>integer (seconds)</td><td>unlimited</td>
+              <td><span class="badge badge-opt">optional</span>
+                  Maximum time to wait for a complete request line and headers.
+                  Connections that don't deliver headers within this window are
+                  closed. Protects against Slowloris-style attacks.</td>
+            </tr>
+            <tr>
+              <td>handler</td><td>integer (seconds)</td><td>unlimited</td>
+              <td><span class="badge badge-opt">optional</span>
+                  Maximum time a request handler may run before it is
+                  cancelled and a <code>408 Request Timeout</code> is returned.</td>
+            </tr>
+            <tr>
+              <td>keepalive</td><td>integer (seconds)</td><td>unlimited</td>
+              <td><span class="badge badge-opt">optional</span>
+                  HTTP/1.1 keep-alive behaviour. Set to <code>0</code> to disable
+                  keep-alive entirely. Non-zero idle-timeout enforcement is
+                  planned for a future release.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3 id="tls"><code>tls</code> — certificate mode</h3>
+      <p>
+        Add a <code>tls</code> child to make the listener speak HTTPS.
+        Pass the certificate source as the first argument. Omit it for
+        self-signed (inferred), or pass <code>"file"</code> or
+        <code>"acme"</code> explicitly.
+      </p>
+<pre><code><span class="cm">// Self-signed — ephemeral, generated at startup (development only)</span>
+<span class="kw">tls</span>
+
+<span class="cm">// PEM files from disk</span>
+<span class="kw">tls</span> <span class="str">"file"</span> {
+    <span class="kw">cert</span> <span class="str">"/etc/aloha/cert.pem"</span>
+    <span class="kw">key</span>  <span class="str">"/etc/aloha/key.pem"</span>
+}
+
+<span class="cm">// ACME / Let's Encrypt</span>
+<span class="kw">tls</span> <span class="str">"acme"</span> {
+    <span class="kw">domain</span> <span class="str">"example.com"</span>
+    <span class="kw">domain</span> <span class="str">"www.example.com"</span>
+    <span class="kw">email</span>  <span class="str">"admin@example.com"</span>
+}</code></pre>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Argument / child</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><em>(argument)</em></td>
+              <td><code>"self-signed"</code><br><code>"file"</code><br><code>"acme"</code></td>
+              <td><em>inferred</em></td>
+              <td>Certificate source. Inferred when omitted:
+                  <code>"file"</code> if <code>cert</code> and <code>key</code>
+                  children are present, <code>"self-signed"</code> otherwise.</td>
+            </tr>
+            <tr>
+              <td>cert</td><td>path (child)</td><td>—</td>
+              <td>PEM certificate chain. Required for <code>"file"</code>.</td>
+            </tr>
+            <tr>
+              <td>key</td><td>path (child)</td><td>—</td>
+              <td>PEM private key. Required alongside <code>cert</code>.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout warn">
+        <span class="callout-icon">⚠</span>
+        <span>The <code>"self-signed"</code> certificate is regenerated on every start and is
+        not trusted by browsers. Use <code>"file"</code> or <code>"acme"</code>
+        for production.</span>
+      </div>
+      <div class="callout info">
+        <span class="callout-icon">ℹ</span>
+        <span>HTTP/1.1 and HTTP/2 are both supported on TLS listeners; protocol selection
+        is automatic via ALPN.</span>
+      </div>
+
+      <!-- acme -->
+      <h3 id="tls-acme">ACME / Let's Encrypt</h3>
+      <p>
+        With <code>tls "acme"</code>, aloha obtains and renews a certificate via
+        the ACME HTTP-01 challenge. A plain HTTP listener must be running to answer
+        challenge requests. Requires <code>state-dir</code> in the
+        <a href="#server"><code>server</code></a> block.
+      </p>
+<pre><code><span class="kw">listener</span> {
+    <span class="kw">bind</span> <span class="str">"[::]:443"</span>
+    <span class="kw">tls</span> <span class="str">"acme"</span> {
+        <span class="kw">domain</span> <span class="str">"example.com"</span>
+        <span class="kw">domain</span> <span class="str">"www.example.com"</span>
+        <span class="kw">email</span>  <span class="str">"admin@example.com"</span>
+    }
+}</code></pre>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Child node</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>domain</td><td>string (repeatable)</td><td>—</td>
+              <td><span class="badge badge-req">required</span>
+                  Domain name to include as a Subject Alternative Name.
+                  At least one is required. The first domain also doubles
+                  as the storage key unless <code>name</code> is set.</td>
+            </tr>
+            <tr>
+              <td>email</td><td>string</td><td>—</td>
+              <td><span class="badge badge-opt">optional</span>
+                  Contact address registered with the ACME provider.
+                  Recommended so Let's Encrypt can send expiry warnings.</td>
+            </tr>
+            <tr>
+              <td>name</td><td>string</td><td><em>first domain</em></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Storage subdirectory name under <code>state-dir</code> for
+                  this certificate's account key and cert files.</td>
+            </tr>
+            <tr>
+              <td>staging</td><td>boolean</td><td><code>false</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Use the Let's Encrypt staging server. Staging certificates
+                  are untrusted but do not count against rate limits — useful
+                  for testing the ACME flow.</td>
+            </tr>
+            <tr>
+              <td>server</td><td>URL</td><td><em>Let's Encrypt</em></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Override the ACME directory URL.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- tls options -->
+      <h3 id="tls-options">TLS protocol options</h3>
+      <p>
+        These child nodes can appear in any <code>tls</code> block — either inside a
+        <code>listener</code> or inside the global <code>server</code> block.
+        Per-listener values override the global defaults.
+      </p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Child node</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>min-version</td>
+              <td><code>"1.2"</code> | <code>"1.3"</code></td>
+              <td><code>"1.2"</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Minimum TLS protocol version to accept.</td>
+            </tr>
+            <tr>
+              <td>cipher</td><td>string (repeatable)</td><td><em>provider defaults</em></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Restrict the allowed cipher suites by name. When absent the
+                  TLS provider's built-in defaults are used.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+<pre><code><span class="kw">server</span> {
+    <span class="cm">// Applied to every TLS listener unless overridden</span>
+    <span class="kw">tls</span> {
+        <span class="kw">min-version</span> <span class="str">"1.2"</span>
+        <span class="kw">cipher</span> <span class="str">"TLS13_AES_256_GCM_SHA384"</span>
+        <span class="kw">cipher</span> <span class="str">"TLS13_CHACHA20_POLY1305_SHA256"</span>
+    }
+}</code></pre>
+    </section>
+
+    <!-- ── vhost ── -->
+    <section id="vhost">
+      <h2><code>vhost</code></h2>
+      <p>
+        Maps one or more hostnames to a set of URL routing rules.
+        Requests are matched against the <code>Host</code> header (port suffix stripped).
+        At least one is required.
+      </p>
+
+      <h3 id="vhost-matching">Name matching</h3>
+      <p>
+        The first argument is the primary name; <code>alias</code> adds extra names.
+        Both support two matching modes:
+      </p>
+      <ul>
+        <li><strong>Exact literal</strong> — the default. The full hostname must match exactly.</li>
+        <li><strong>Regex</strong> — prefix the name with <code>~</code>. The remainder is
+            compiled as a regular expression anchored at both ends (<code>^…$</code>).
+            Invalid patterns are caught at startup.</li>
+      </ul>
+      <p>For each request, matching proceeds in this order:</p>
+      <ol>
+        <li>Exact literal match — all literal names, O(1).</li>
+        <li>Regex patterns — in config declaration order; first match wins.</li>
+        <li>Listener <code>default-vhost</code> fallback.</li>
+      </ol>
+<pre><code><span class="cm">// Exact match for the bare domain and an alias</span>
+<span class="kw">vhost</span> <span class="str">"example.com"</span> {
+    <span class="kw">alias</span> <span class="str">"www.example.com"</span>
+    <span class="cm">// ... locations ...</span>
+}
+
+<span class="cm">// Regex — matches any subdomain of example.com</span>
+<span class="cm">// Literal "example.com" above takes priority for exact matches.</span>
+<span class="kw">vhost</span> <span class="str">"~.+\.example\.com"</span> {
+    <span class="cm">// ... locations ...</span>
+}
+
+<span class="cm">// Mix: exact primary name, regex alias</span>
+<span class="kw">vhost</span> <span class="str">"example.com"</span> {
+    <span class="kw">alias</span> <span class="str">"~.+\.example\.com"</span>
+    <span class="cm">// ... locations ...</span>
+}</code></pre>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Child</th><th>Argument</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>alias</td>
+              <td>name <span class="badge badge-opt">repeatable</span></td>
+              <td>Additional hostname or regex pattern (same syntax as the
+                  primary name) that maps to this vhost.</td>
+            </tr>
+            <tr>
+              <td>location</td>
+              <td>path prefix <span class="badge badge-req">≥ 1</span></td>
+              <td>URL routing rule. Tested in config order; first prefix match wins.
+                  See <a href="#location">location</a>.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ── location ── -->
+    <section id="location">
+      <h2><code>location</code></h2>
+      <p>
+        Maps a URL path prefix to a handler. Locations inside a vhost are tested in
+        declaration order — the first one whose prefix matches the request path wins.
+        Each location contains exactly one handler node.
+      </p>
+
+      <!-- static -->
+      <h3 id="handler-static">Handler: <code>static</code></h3>
+      <p>Serves files from a local directory.</p>
+<pre><code><span class="kw">location</span> <span class="str">"/assets/"</span> {
+    <span class="kw">static</span> {
+        <span class="kw">root</span>         <span class="str">"/var/www/assets"</span>
+        <span class="kw">strip-prefix</span> <span class="num">true</span>
+        <span class="kw">index-file</span>   <span class="str">"index.html"</span>
+        <span class="kw">index-file</span>   <span class="str">"index.htm"</span>
+    }
+}</code></pre>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Child node</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>root</td><td>path</td><td>—</td>
+              <td><span class="badge badge-req">required</span>
+                  Filesystem directory to serve. Path traversal outside
+                  <code>root</code> is blocked.</td>
+            </tr>
+            <tr>
+              <td>strip-prefix</td><td>boolean</td><td><code>false</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Remove the matched location prefix before resolving the file path.
+                  With <code>location "/assets/"</code> and <code>strip-prefix true</code>,
+                  a request for <code>/assets/app.js</code> maps to
+                  <code>{root}/app.js</code>.</td>
+            </tr>
+            <tr>
+              <td>index-file</td><td>string (repeatable)</td>
+              <td><code>"index.html"</code>, <code>"index.htm"</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Filenames tried in order for directory requests.
+                  Returns 403 if none exist.
+                  Supplying any <code>index-file</code> children replaces the
+                  built-in defaults entirely.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- proxy -->
+      <h3 id="handler-proxy">Handler: <code>proxy</code> <span class="badge badge-stub">stub</span></h3>
+      <p>Reverse-proxies requests to an upstream HTTP server. Not yet implemented — returns 502.</p>
+<pre><code><span class="kw">location</span> <span class="str">"/api/"</span> {
+    <span class="kw">proxy</span> {
+        <span class="kw">upstream</span> <span class="str">"http://127.0.0.1:3000"</span>
+    }
+}</code></pre>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Child node</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>upstream</td><td>URL</td><td>—</td>
+              <td><span class="badge badge-req">required</span>
+                  Base URL of the upstream server.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- redirect -->
+      <h3 id="handler-redirect">Handler: <code>redirect</code></h3>
+      <p>Returns an HTTP redirect response.</p>
+<pre><code><span class="kw">location</span> <span class="str">"/old/"</span> {
+    <span class="kw">redirect</span> {
+        <span class="kw">to</span>   <span class="str">"/new/"</span>
+        <span class="kw">code</span> <span class="num">301</span>
+    }
+}</code></pre>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Child node</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>to</td><td>URL or path</td><td>—</td>
+              <td><span class="badge badge-req">required</span>
+                  Destination written to the <code>Location</code> header.</td>
+            </tr>
+            <tr>
+              <td>code</td><td>integer</td><td><code>301</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  HTTP status code, e.g. <code>301</code> (permanent)
+                  or <code>302</code> (temporary).</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- fastcgi -->
+      <h3 id="handler-fastcgi">Handler: <code>fastcgi</code> <span class="badge badge-stub">stub</span></h3>
+      <p>Forwards requests to a FastCGI process. Not yet implemented — returns 502.</p>
+<pre><code><span class="kw">location</span> <span class="str">"/php/"</span> {
+    <span class="kw">fastcgi</span> {
+        <span class="kw">socket</span> <span class="str">"unix:/run/php/fpm.sock"</span>
+        <span class="kw">index</span>  <span class="str">"index.php"</span>
+    }
+}</code></pre>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Child node</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>socket</td><td>string</td><td>—</td>
+              <td><span class="badge badge-req">required</span>
+                  FastCGI socket address.
+                  Use <code>unix:/path</code> for a Unix domain socket or
+                  <code>tcp:host:port</code> for TCP.</td>
+            </tr>
+            <tr>
+              <td>index</td><td>string</td><td>—</td>
+              <td><span class="badge badge-opt">optional</span>
+                  Default script name for directory requests,
+                  e.g. <code>"index.php"</code>.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <hr class="divider">
+
+    <!-- ── Full example ── -->
+    <section id="example">
+      <h2>Full example</h2>
+<pre><code><span class="cm">// aloha.kdl</span>
+
+<span class="kw">server</span> {
+    <span class="kw">workers</span>   <span class="num">4</span>
+    <span class="kw">state-dir</span> <span class="str">"/var/lib/aloha"</span>
+}
+
+<span class="cm">// Plain HTTP — falls back to "example.com" for unknown hosts</span>
+<span class="kw">listener</span> {
+    <span class="kw">bind</span>          <span class="str">"[::]:80"</span>
+    <span class="kw">default-vhost</span> <span class="str">"example.com"</span>
+}
+
+<span class="cm">// HTTPS with a Let's Encrypt certificate</span>
+<span class="kw">listener</span> {
+    <span class="kw">bind</span>          <span class="str">"[::]:443"</span>
+    <span class="kw">default-vhost</span> <span class="str">"example.com"</span>
+    <span class="kw">tls</span> <span class="str">"acme"</span> {
+        <span class="kw">domain</span> <span class="str">"example.com"</span>
+        <span class="kw">domain</span> <span class="str">"www.example.com"</span>
+        <span class="kw">email</span>  <span class="str">"admin@example.com"</span>
+    }
+}
+
+<span class="cm">// Main site — exact match for the bare domain and www</span>
+<span class="kw">vhost</span> <span class="str">"example.com"</span> {
+    <span class="kw">alias</span> <span class="str">"www.example.com"</span>
+
+    <span class="cm">// Legacy redirect</span>
+    <span class="kw">location</span> <span class="str">"/old/"</span> {
+        <span class="kw">redirect</span> {
+            <span class="kw">to</span>   <span class="str">"/new/"</span>
+            <span class="kw">code</span> <span class="num">301</span>
+        }
+    }
+
+    <span class="cm">// API reverse-proxy (stub)</span>
+    <span class="kw">location</span> <span class="str">"/api/"</span> {
+        <span class="kw">proxy</span> {
+            <span class="kw">upstream</span> <span class="str">"http://127.0.0.1:3000"</span>
+        }
+    }
+
+    <span class="cm">// PHP application via FastCGI (stub)</span>
+    <span class="kw">location</span> <span class="str">"/app/"</span> {
+        <span class="kw">fastcgi</span> {
+            <span class="kw">socket</span> <span class="str">"unix:/run/php/fpm.sock"</span>
+            <span class="kw">index</span>  <span class="str">"index.php"</span>
+        }
+    }
+
+    <span class="cm">// Catch-all static files</span>
+    <span class="kw">location</span> <span class="str">"/"</span> {
+        <span class="kw">static</span> {
+            <span class="kw">root</span>       <span class="str">"/var/www/example.com"</span>
+            <span class="kw">index-file</span> <span class="str">"index.html"</span>
+        }
+    }
+}
+
+<span class="cm">// Regex vhost — matches *.example.com</span>
+<span class="cm">// Literal "example.com" above wins for exact matches.</span>
+<span class="kw">vhost</span> <span class="str">"~.+\.example\.com"</span> {
+    <span class="kw">location</span> <span class="str">"/"</span> {
+        <span class="kw">static</span> {
+            <span class="kw">root</span>       <span class="str">"/var/www/wildcard"</span>
+            <span class="kw">index-file</span> <span class="str">"index.html"</span>
+        }
+    }
+}</code></pre>
+    </section>
+
+    <footer>aloha &mdash; configuration reference</footer>
+  </main>
+</div>
+
+<script>
+  // Highlight the sidebar link for whichever section is currently in view.
+  (function () {
+    const links = document.querySelectorAll('.nav-list a');
+    const targets = Array.from(links)
+      .map(a => document.querySelector(a.getAttribute('href')))
+      .filter(Boolean);
+
+    const activate = (el) => {
+      links.forEach(a => a.classList.remove('active'));
+      const link = document.querySelector(
+        `.nav-list a[href="#${el.id}"]`
+      );
+      if (link) link.classList.add('active');
+    };
+
+    const observer = new IntersectionObserver(
+      entries => {
+        for (const e of entries) {
+          if (e.isIntersecting) { activate(e.target); break; }
+        }
+      },
+      { rootMargin: '-54px 0px -60% 0px', threshold: 0 }
+    );
+    targets.forEach(t => observer.observe(t));
+  })();
+</script>
+
+</body>
+</html>

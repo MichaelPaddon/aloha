@@ -1,0 +1,180 @@
+// aloha.kdl -- annotated reference configuration
+//
+// Run with:  aloha [--config aloha.kdl]
+// Defaults to aloha.kdl in the working directory when --config is omitted.
+
+// --- Server-wide settings ---
+
+// Privilege drop: started as root to bind port 80/443, then drops to
+// user/group immediately after sockets are bound.  group defaults to
+// the user's primary group.  Omitting user while root triggers a warning.
+//
+// state-dir is required when any listener uses tls "acme" -- omitting
+// it produces: "server.state-dir is required when any listener uses
+// tls \"acme\""
+//
+// Global TLS floor (optional) -- inherited by every TLS listener that
+// does not supply its own tls block.
+server {
+    user "aloha"
+    // group "aloha"     // defaults to user's primary group
+    // state-dir "/var/lib/aloha"
+    // tls {
+    //     min-version "1.2"
+    //     cipher "TLS13_AES_256_GCM_SHA384"
+    //     cipher "TLS13_CHACHA20_POLY1305_SHA256"
+    //     cipher "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"
+    // }
+}
+
+// --- Listeners ---
+//
+// Each listener needs exactly one of:
+//   bind "<addr>:<port>"   -- open a TCP socket
+//   fd <n>                 -- inherit a socket from systemd
+//
+// default-vhost chooses the virtual host used when no Host header
+// matches.  Omit it to fall back to the first vhost defined below;
+// set it to null to return 404 for unrecognised hosts instead.
+
+// Plain HTTP on port 80.
+// Required for ACME / Let's Encrypt HTTP-01 challenges -- Let's Encrypt
+// makes a request to http://<domain>/.well-known/acme-challenge/...
+// to verify domain ownership before issuing a certificate.
+listener {
+    bind "[::]:80"
+}
+
+// HTTPS -- ephemeral self-signed cert.
+// Useful for development or when a real cert is not yet available.
+listener {
+    bind "[::]:443"
+    tls
+}
+
+// HTTPS -- explicit PEM cert/key (production)
+// listener {
+//     bind "[::]:443"
+//     tls "file" {
+//         cert "/etc/aloha/cert.pem"
+//         key  "/etc/aloha/key.pem"
+//     }
+// }
+
+// HTTPS -- ACME / Let's Encrypt.
+// Requires the port-80 listener above (HTTP-01 challenge) and
+// state-dir in the server block (see above).
+//
+// If the initial certificate acquisition fails, aloha falls back to a
+// self-signed certificate and retries at retry-interval (default 3600s).
+// 3600s keeps well within Let's Encrypt's rate limit of 5 failed
+// validations per account per hostname per hour.
+// listener {
+//     bind "[::]:443"
+//     tls "acme" {
+//         domain "example.com"
+//         domain "www.example.com"
+//         email "admin@example.com"
+//         // retry-interval 3600
+//     }
+// }
+
+// HTTPS -- ACME staging server (for testing the ACME flow)
+// listener {
+//     bind "[::]:443"
+//     tls "acme" {
+//         domain "example.com"
+//         staging true
+//     }
+// }
+
+// Listener with explicit timeout settings
+// listener {
+//     bind "[::]:80"
+//     timeouts {
+//         request-header 30   // seconds to wait for headers (Slowloris protection)
+//         handler 60          // seconds before slow handler gets a 408
+//         keepalive 75        // idle keep-alive timeout; 0 disables keep-alive
+//     }
+// }
+
+// Systemd socket activation -- adopt the fd passed by systemd
+// (sockets start at fd 3; use sd_listen_fds(3) for the count)
+// listener {
+//     fd 3
+// }
+
+// --- Virtual hosts ---
+//
+// Vhost names are matched against the Host request header.
+//
+// Plain string: exact match.
+//   vhost "example.com" { ... }
+//
+// Leading ~: treated as a regular expression (anchored at both ends).
+//   vhost "~.+\.example\.com" { ... }
+//
+// Matching order per request:
+//   1. Exact literal match (all literal vhosts, O(1)).
+//   2. Regex patterns in config declaration order.
+//   3. Listener default-vhost fallback.
+//
+// alias adds extra names (literal or regex) that map to the same vhost.
+
+vhost "localhost" {
+    // Serve static files from /var/www/aloha
+    location "/" {
+        static {
+            root "/var/www/aloha"
+            index-file "index.html"
+            index-file "index.htm"
+        }
+    }
+}
+
+// Exact vhost with an alias and multiple location types
+// vhost "example.com" {
+//     alias "www.example.com"
+//
+//     // Redirect bare domain to www
+//     // (put more-specific paths before the catch-all "/")
+//     location "/old-section/" {
+//         redirect {
+//             to "/new-section/"
+//             code 301
+//         }
+//     }
+//
+//     // Reverse-proxy the API to a backend
+//     location "/api/" {
+//         proxy {
+//             upstream "http://127.0.0.1:3000"
+//         }
+//     }
+//
+//     // PHP via FastCGI
+//     location "/php/" {
+//         fastcgi {
+//             socket "unix:/run/php/php-fpm.sock"
+//             index "index.php"
+//         }
+//     }
+//
+//     // Static files for everything else
+//     location "/" {
+//         static {
+//             root "/var/www/example"
+//             index-file "index.html"
+//         }
+//     }
+// }
+
+// Regex vhost -- matches any subdomain of example.com
+// vhost "~.+\.example\.com" {
+//     location "/" {
+//         static {
+//             root "/var/www/wildcard"
+//             index-file "index.html"
+//         }
+//     }
+// }
