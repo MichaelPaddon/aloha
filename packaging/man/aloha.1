@@ -1,0 +1,154 @@
+.TH ALOHA 1 "2026-04-25" "aloha 0.1.0" "User Commands"
+.
+.SH NAME
+aloha \- HTTP server and reverse proxy
+.
+.SH SYNOPSIS
+.B aloha
+.RB [ \-c
+.IR file ]
+.
+.SH DESCRIPTION
+.B aloha
+is a lightweight HTTP/HTTPS server and reverse proxy.
+It supports virtual host routing, automatic TLS via Let\(aqs Encrypt,
+static file serving, HTTP redirects, and configurable timeouts.
+.PP
+Configuration is read from a KDL file (default:
+.I aloha.kdl
+in the working directory).
+All sockets are bound before privileges are dropped, so
+.B aloha
+can be started as root to bind ports 80 and 443 and will then switch
+to an unprivileged user as specified in the configuration.
+.
+.SH OPTIONS
+.TP
+.BI \-c " file" ", " \-\-config " file"
+Read configuration from
+.I file
+instead of the default
+.IR aloha.kdl .
+.TP
+.BR \-h ", " \-\-help
+Print a short usage summary and exit.
+.
+.SH CONFIGURATION
+Configuration is written in KDL.
+The top-level nodes are:
+.PP
+.RS 4
+.TP
+.B server
+Global settings: privilege drop user/group, state directory for ACME
+certificates, and global TLS defaults.
+.TP
+.B listener
+Opens a TCP socket (via
+.B bind
+or an inherited file descriptor via
+.BR fd )
+and begins accepting connections.
+Each listener optionally has a
+.B tls
+child (self-signed, PEM file, or ACME/Let\(aqs Encrypt)
+and a
+.B timeouts
+child.
+.TP
+.B vhost
+Maps one or more hostnames to URL routing rules.
+Names are matched against the
+.B Host
+request header; a leading
+.B ~
+treats the name as a regular expression.
+.TP
+.B location
+Maps a URL path prefix to a handler:
+.BR static ,
+.BR proxy ,
+.BR redirect ,
+or
+.BR fastcgi .
+.RE
+.PP
+See
+.BR aloha.kdl (5)
+for the full configuration reference.
+.
+.SH FILES
+.TP
+.I /etc/aloha.kdl
+Default system-wide configuration file when
+.B aloha
+is installed as a service.
+.TP
+.I /var/lib/aloha/
+Default state directory for ACME account keys and issued certificates
+(set via
+.B server state\-dir
+in the configuration).
+.TP
+.I /var/www/aloha/
+Default document root served by the packaged configuration.
+.
+.SH ENVIRONMENT
+.TP
+.B RUST_LOG
+Controls log verbosity.
+The default is
+.BR aloha=info .
+Examples:
+.BR aloha=debug ,
+.BR aloha=trace .
+See
+.UR https://docs.rs/tracing\-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html
+.UE
+for the full filter syntax.
+.
+.SH SIGNALS
+.TP
+.BR SIGINT ", " SIGTERM
+Initiates shutdown.
+In-flight requests are aborted; graceful drain is not yet implemented.
+.
+.SH EXAMPLES
+Start with the default configuration file in the current directory:
+.PP
+.RS 4
+.EX
+aloha
+.EE
+.RE
+.PP
+Start with an explicit configuration file:
+.PP
+.RS 4
+.EX
+aloha \-\-config /etc/aloha.kdl
+.EE
+.RE
+.PP
+Run with debug logging enabled:
+.PP
+.RS 4
+.EX
+RUST_LOG=aloha=debug aloha \-\-config /etc/aloha.kdl
+.EE
+.RE
+.
+.SH SEE ALSO
+.BR systemctl (1),
+.BR kdl (5)
+.PP
+Full configuration reference:
+.UR https://github.com/mwp/aloha/blob/main/CONFIGURATION.md
+.UE
+.
+.SH BUGS
+Graceful shutdown (draining in-flight requests) is not yet implemented.
+The reverse proxy and FastCGI handlers are stubs that return 502.
+.
+.SH AUTHOR
+Michael Paddon <6d7770@gmail.com>
