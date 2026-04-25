@@ -1,6 +1,9 @@
-# aloha
+<div align="center">
+  <img src="html/aloha-logo.svg" alt="aloha" width="320">
+  <p>A lightweight HTTP server and reverse proxy written in Rust that just works.</p>
+</div>
 
-A lightweight HTTP server and reverse proxy written in Rust that just works.
+---
 
 - Virtual host routing — exact and regex hostname matching
 - Automatic TLS via Let's Encrypt (ACME HTTP-01)
