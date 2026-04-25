@@ -46,8 +46,9 @@ Configuration defaults to `aloha.kdl` in the working directory.
 
 ## Configuration
 
-Configuration is written in [KDL](https://kdl.dev).  The annotated reference
-configuration in `aloha.kdl` documents every option.
+Configuration is written in [KDL](https://kdl.dev).
+See the **[Configuration Reference](CONFIGURATION.md)** for the full option
+reference, or browse the annotated `aloha.kdl` for a quick overview.
 
 Minimal example — static files over plain HTTP:
 
