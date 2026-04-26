@@ -260,6 +260,72 @@ Maps a URL path prefix to a handler. Locations inside a vhost are tested in
 declaration order — the first one whose prefix matches the request path wins.
 Each location contains exactly one handler node.
 
+### `auth` — access control
+
+Add an `auth` block to require authentication before a location is served.
+
+```kdl
+location "/admin/" {
+    auth {
+        // Allow rules — OR semantics: any one satisfied rule grants access.
+        group "admin" "superuser"  // in admin OR superuser
+        user  "alice"              // OR: exactly alice
+
+        // Deny rules — take precedence over allow rules.
+        deny {
+            group "suspended"      // blocked even if in admin
+        }
+    }
+    static { root "/var/www/admin" }
+}
+
+location "/members/" {
+    auth {
+        authenticated              // any logged-in user
+    }
+    static { root "/var/www/members" }
+}
+```
+
+#### Allow rules
+
+| Node             | Arguments    | Description |
+|------------------|--------------|-------------|
+| `authenticated`  | —            | Any authenticated user is accepted. |
+| `user`           | name …       | Accept if the username matches any of the listed names. |
+| `group`          | name …       | Accept if the user is a member of any of the listed groups. |
+
+Multiple arguments on `user` or `group` are OR-combined within that node.
+Multiple rule nodes are also OR-combined: any one satisfied rule grants access.
+
+#### Deny rules (optional)
+
+Place a `deny { … }` child block to explicitly reject matching users even if
+they would satisfy an allow rule. Deny takes precedence.
+
+The same node types (`authenticated`, `user`, `group`) are valid inside `deny`.
+
+```kdl
+auth {
+    authenticated           // allow any logged-in user
+    deny {
+        user "mallory"      // …except this one
+        group "suspended"   // …and no suspended-group members
+    }
+}
+```
+
+#### Responses
+
+- **401 Unauthorized** — request carries no credentials (anonymous).
+- **403 Forbidden** — credentials present but the user is denied or not allowed.
+
+> **Note:** Authentication mechanisms (HTTP Basic auth, OAuth, …) are not yet
+> implemented. Until one is configured every request is treated as anonymous,
+> so a location with `auth` will return 401 for all requests.
+
+---
+
 ### Handler: `static`
 
 Serves files from a local directory.

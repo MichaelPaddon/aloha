@@ -1,3 +1,4 @@
+use crate::auth::AuthPolicy;
 use crate::config::{Config, ListenerConfig, VHostConfig};
 use crate::handler::Handler;
 use hyper::Request;
@@ -9,6 +10,7 @@ use std::sync::Arc;
 pub struct Route {
     pub handler: Arc<Handler>,
     pub matched_prefix: String,
+    pub auth_policy: Option<AuthPolicy>,
 }
 
 // Runtime representation of a virtual host, with handlers pre-built.
@@ -19,6 +21,7 @@ struct VHost {
 struct Location {
     path: String,
     handler: Arc<Handler>,
+    auth_policy: Option<AuthPolicy>,
 }
 
 pub struct Router {
@@ -93,6 +96,7 @@ impl Router {
                 return Some(Route {
                     handler: loc.handler.clone(),
                     matched_prefix: loc.path.clone(),
+                    auth_policy: loc.auth_policy.clone(),
                 });
             }
         }
@@ -144,6 +148,7 @@ fn build_vhost(vcfg: &VHostConfig) -> anyhow::Result<VHost> {
         locations.push(Location {
             path: loc.path.clone(),
             handler,
+            auth_policy: loc.auth.clone(),
         });
     }
     Ok(VHost { locations })

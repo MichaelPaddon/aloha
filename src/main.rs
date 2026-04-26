@@ -1,4 +1,5 @@
 mod acme;
+mod auth;
 mod config;
 mod error;
 mod handler;
@@ -109,6 +110,7 @@ async fn main() -> anyhow::Result<()> {
     let state = Arc::new(AppState {
         router,
         acme_challenges: challenges.clone(),
+        authenticator: Arc::new(auth::AnonymousAuthenticator),
     });
 
     let mut handles = Vec::new();

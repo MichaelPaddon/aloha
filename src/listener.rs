@@ -1,6 +1,7 @@
 use crate::acme::ChallengeMap;
+use crate::auth::{AuthDecision, Authenticator};
 use crate::config::{ListenerConfig, Timeouts};
-use crate::error::{bytes_body, response_404, BoxBody};
+use crate::error::{bytes_body, response_401, response_403, response_404, BoxBody};
 use crate::router::Router;
 use arc_swap::ArcSwap;
 use bytes::Bytes;
@@ -23,6 +24,7 @@ pub struct AppState {
     // /.well-known/acme-challenge/{token}.  Populated by AcmeManager
     // during certificate issuance; empty otherwise.
     pub acme_challenges: ChallengeMap,
+    pub authenticator: Arc<dyn Authenticator>,
 }
 
 // One AlohaService is cloned per accepted connection.
@@ -84,6 +86,21 @@ impl hyper::service::Service<Request<Incoming>> for AlohaService {
             let serve_fut = async {
                 match state.router.route(&req, &bind) {
                     Some(route) => {
+                        if let Some(policy) = &route.auth_policy {
+                            let principal = state
+                                .authenticator
+                                .authenticate(&req)
+                                .await;
+                            match policy.evaluate(&principal) {
+                                AuthDecision::Allow => {}
+                                AuthDecision::Unauthenticated => {
+                                    return response_401();
+                                }
+                                AuthDecision::Deny => {
+                                    return response_403();
+                                }
+                            }
+                        }
                         route
                             .handler
                             .serve(&req, &route.matched_prefix)

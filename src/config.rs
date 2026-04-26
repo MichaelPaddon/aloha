@@ -1,3 +1,4 @@
+use crate::auth::{AuthPolicy, AuthRule};
 use anyhow::{anyhow, bail, Context};
 use kdl::{KdlDocument, KdlNode};
 use miette::Diagnostic as _;
@@ -146,6 +147,8 @@ pub struct LocationConfig {
     // URL path prefix; locations are tested in config order.
     pub path: String,
     pub handler: HandlerConfig,
+    // None = open; Some = require authentication matching the policy.
+    pub auth: Option<AuthPolicy>,
 }
 
 #[derive(Debug)]
@@ -530,7 +533,127 @@ fn parse_location(node: &KdlNode, src: &str, name: &str) -> anyhow::Result<Locat
             anyhow!("{name}:{line}: location '{path}' has no handler node")
         })?;
     let handler = parse_handler(handler_node, src, name, &path)?;
-    Ok(LocationConfig { path, handler })
+    let auth = children
+        .iter()
+        .find(|n| n.name().value() == "auth")
+        .map(|n| parse_auth_policy(n, src, name))
+        .transpose()?;
+    Ok(LocationConfig { path, handler, auth })
+}
+
+// Auth rules use node names as rule types — idiomatic KDL avoids
+// bare identifiers as values (only strings, numbers, bools are valid).
+//
+//   auth {
+//       group "admin" "superuser"  // in admin OR superuser
+//       user  "alice"              // OR: exactly alice
+//       authenticated              // OR: any logged-in user
+//       deny {
+//           user "mallory"         // ban this user despite allow rules
+//       }
+//   }
+fn parse_auth_policy(
+    node: &KdlNode,
+    src: &str,
+    name: &str,
+) -> anyhow::Result<AuthPolicy> {
+    let line = node_line(src, node);
+    let children =
+        node.children().map(|d| d.nodes()).unwrap_or_default();
+    let mut allow = Vec::new();
+    let mut deny = Vec::new();
+    for child in children {
+        let child_line = node_line(src, child);
+        match child.name().value() {
+            "deny" => {
+                parse_auth_rules(child, src, name, &mut deny)?;
+            }
+            kind => {
+                parse_auth_rule_node(
+                    kind,
+                    child,
+                    child_line,
+                    name,
+                    &mut allow,
+                )?;
+            }
+        }
+    }
+    if allow.is_empty() {
+        bail!("{name}:{line}: auth block has no allow rules");
+    }
+    Ok(AuthPolicy { allow, deny })
+}
+
+// Parse rule nodes from a `deny { … }` or the top-level `auth { … }` block.
+fn parse_auth_rules(
+    node: &KdlNode,
+    src: &str,
+    name: &str,
+    out: &mut Vec<AuthRule>,
+) -> anyhow::Result<()> {
+    let children =
+        node.children().map(|d| d.nodes()).unwrap_or_default();
+    for child in children {
+        let child_line = node_line(src, child);
+        parse_auth_rule_node(
+            child.name().value(),
+            child,
+            child_line,
+            name,
+            out,
+        )?;
+    }
+    Ok(())
+}
+
+// Parse a single rule node (e.g. `group "admin" "superuser"`) and
+// push one `AuthRule` per argument into `out`.  Multiple arguments
+// expand to multiple OR-combined rules.
+fn parse_auth_rule_node(
+    kind: &str,
+    node: &KdlNode,
+    line: usize,
+    name: &str,
+    out: &mut Vec<AuthRule>,
+) -> anyhow::Result<()> {
+    match kind {
+        "authenticated" => out.push(AuthRule::Authenticated),
+        "user" => {
+            let names = req_arg_strs(node, "user", line, name)?;
+            out.extend(names.into_iter().map(AuthRule::User));
+        }
+        "group" => {
+            let names = req_arg_strs(node, "group", line, name)?;
+            out.extend(names.into_iter().map(AuthRule::Group));
+        }
+        other => bail!(
+            "{name}:{line}: unknown auth rule '{other}'; \
+             expected 'authenticated', 'user', or 'group'"
+        ),
+    }
+    Ok(())
+}
+
+// Collect one or more string arguments from a node, erroring if none.
+fn req_arg_strs(
+    node: &KdlNode,
+    kind: &str,
+    line: usize,
+    name: &str,
+) -> anyhow::Result<Vec<String>> {
+    let mut vals = Vec::new();
+    let mut i = 0;
+    while let Some(v) = arg_str(node, i) {
+        vals.push(v);
+        i += 1;
+    }
+    if vals.is_empty() {
+        bail!(
+            "{name}:{line}: '{kind}' needs at least one argument"
+        );
+    }
+    Ok(vals)
 }
 
 fn parse_handler(
@@ -1514,6 +1637,262 @@ mod tests {
         .unwrap();
         assert_eq!(cfg.server.user.as_deref(), Some("www-data"));
         assert!(cfg.server.group.is_none());
+    }
+
+    // ── auth blocks ───────────────────────────────────────────────
+
+    #[test]
+    fn auth_group_rule_parses() {
+        let cfg = Config::parse(
+            r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/admin/" {
+                    auth {
+                        group "admin"
+                    }
+                    static {
+                        root "/var/www/admin"
+                    }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        let auth = cfg.vhosts[0].locations[0].auth.as_ref().unwrap();
+        assert_eq!(auth.allow.len(), 1);
+        assert!(matches!(
+            &auth.allow[0],
+            AuthRule::Group(g) if g == "admin"
+        ));
+    }
+
+    #[test]
+    fn auth_multiple_rules_parse() {
+        let cfg = Config::parse(
+            r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/secret/" {
+                    auth {
+                        group "admin"
+                        user "alice"
+                    }
+                    static {
+                        root "/var/www/secret"
+                    }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        let auth = cfg.vhosts[0].locations[0].auth.as_ref().unwrap();
+        assert_eq!(auth.allow.len(), 2);
+        assert!(matches!(&auth.allow[0], AuthRule::Group(g) if g == "admin"));
+        assert!(matches!(&auth.allow[1], AuthRule::User(u) if u == "alice"));
+    }
+
+    #[test]
+    fn auth_authenticated_rule_parses() {
+        let cfg = Config::parse(
+            r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/members/" {
+                    auth {
+                        authenticated
+                    }
+                    static {
+                        root "/var/www/members"
+                    }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        let auth = cfg.vhosts[0].locations[0].auth.as_ref().unwrap();
+        assert!(matches!(&auth.allow[0], AuthRule::Authenticated));
+    }
+
+    #[test]
+    fn auth_absent_means_open() {
+        let cfg = Config::parse(
+            r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    static {
+                        root "."
+                    }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        assert!(cfg.vhosts[0].locations[0].auth.is_none());
+    }
+
+    #[test]
+    fn auth_empty_block_is_error() {
+        let result = Config::parse(
+            r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    auth {
+                    }
+                    static {
+                        root "."
+                    }
+                }
+            }
+            "#,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn auth_unknown_require_type_is_error() {
+        let result = Config::parse(
+            r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    auth {
+                        role "admin"
+                    }
+                    static {
+                        root "."
+                    }
+                }
+            }
+            "#,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn auth_multi_arg_group_expands_to_or_rules() {
+        let cfg = Config::parse(
+            r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    auth {
+                        group "admin" "superuser"
+                    }
+                    static {
+                        root "."
+                    }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        let auth = cfg.vhosts[0].locations[0].auth.as_ref().unwrap();
+        assert_eq!(auth.allow.len(), 2);
+        assert!(matches!(&auth.allow[0], AuthRule::Group(g) if g == "admin"));
+        assert!(
+            matches!(&auth.allow[1], AuthRule::Group(g) if g == "superuser")
+        );
+    }
+
+    #[test]
+    fn auth_multi_arg_user_expands_to_or_rules() {
+        let cfg = Config::parse(
+            r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    auth {
+                        user "alice" "bob"
+                    }
+                    static {
+                        root "."
+                    }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        let auth = cfg.vhosts[0].locations[0].auth.as_ref().unwrap();
+        assert_eq!(auth.allow.len(), 2);
+        assert!(matches!(&auth.allow[0], AuthRule::User(u) if u == "alice"));
+        assert!(matches!(&auth.allow[1], AuthRule::User(u) if u == "bob"));
+    }
+
+    #[test]
+    fn auth_deny_block_parses() {
+        let cfg = Config::parse(
+            r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    auth {
+                        group "users"
+                        deny {
+                            user "mallory"
+                            group "suspended"
+                        }
+                    }
+                    static {
+                        root "."
+                    }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        let auth = cfg.vhosts[0].locations[0].auth.as_ref().unwrap();
+        assert_eq!(auth.allow.len(), 1);
+        assert!(matches!(&auth.allow[0], AuthRule::Group(g) if g == "users"));
+        assert_eq!(auth.deny.len(), 2);
+        assert!(matches!(&auth.deny[0], AuthRule::User(u) if u == "mallory"));
+        assert!(
+            matches!(&auth.deny[1], AuthRule::Group(g) if g == "suspended")
+        );
+    }
+
+    #[test]
+    fn auth_deny_without_allow_is_error() {
+        let result = Config::parse(
+            r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    auth {
+                        deny {
+                            user "mallory"
+                        }
+                    }
+                    static {
+                        root "."
+                    }
+                }
+            }
+            "#,
+        );
+        assert!(result.is_err());
     }
 
     #[test]

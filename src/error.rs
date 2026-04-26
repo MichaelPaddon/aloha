@@ -27,6 +27,13 @@ fn html_response(
         .expect("known-valid status and header")
 }
 
+pub fn response_401() -> HttpResponse {
+    html_response(
+        StatusCode::UNAUTHORIZED,
+        "<h1>401 Unauthorized</h1>",
+    )
+}
+
 pub fn response_400() -> HttpResponse {
     html_response(
         StatusCode::BAD_REQUEST,
