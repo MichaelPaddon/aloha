@@ -21,6 +21,8 @@ use clap::Parser;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
+use tokio::sync::watch;
+use tokio::task::JoinSet;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -113,7 +115,9 @@ async fn main() -> anyhow::Result<()> {
         authenticator: Arc::new(auth::AnonymousAuthenticator),
     });
 
-    let mut handles = Vec::new();
+    // Shutdown channel: false = running, true = drain and exit.
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let mut handles: JoinSet<()> = JoinSet::new();
 
     // Split pre-bound sockets into plain-HTTP and TLS groups.
     let (plain_bound, tls_bound): (Vec<_>, Vec<_>) =
@@ -123,13 +127,14 @@ async fn main() -> anyhow::Result<()> {
     // challenge requests can be served before we start ACME flows.
     for (cfg, socket) in plain_bound {
         let state = state.clone();
-        handles.push(tokio::spawn(async move {
+        let rx = shutdown_rx.clone();
+        handles.spawn(async move {
             if let Err(e) =
-                listener::run_plain(cfg, socket, state).await
+                listener::run_plain(cfg, socket, state, rx).await
             {
                 tracing::error!("HTTP listener error: {e:#}");
             }
-        }));
+        });
     }
 
     // Phase 3: build TLS acceptors (ACME may do network I/O here)
@@ -215,21 +220,48 @@ async fn main() -> anyhow::Result<()> {
             };
 
         let state = state.clone();
-        handles.push(tokio::spawn(async move {
+        let rx = shutdown_rx.clone();
+        handles.spawn(async move {
             if let Err(e) =
-                listener::run_tls(cfg, socket, state, acceptor)
+                listener::run_tls(cfg, socket, state, acceptor, rx)
                     .await
             {
                 tracing::error!("TLS listener error: {e:#}");
             }
-        }));
+        });
     }
 
-    tokio::signal::ctrl_c().await.context("ctrl-c signal")?;
-    tracing::info!("shutting down");
-    for h in handles {
-        h.abort();
+    // ── Wait for a shutdown signal ─────────────────────────────────
+    //
+    // On Unix we handle both SIGTERM (systemd stop) and SIGINT (ctrl-c).
+    // On other platforms only ctrl-c is available.
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm = signal(SignalKind::terminate())
+            .context("failed to install SIGTERM handler")?;
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = sigterm.recv() => {}
+        }
     }
+    #[cfg(not(unix))]
+    tokio::signal::ctrl_c().await.context("ctrl-c signal")?;
+
+    tracing::info!("shutdown: signalling listeners");
+    let _ = shutdown_tx.send(true);
+
+    // Wait for all listener tasks (each drains its own connections).
+    let drain_secs = 30u64;
+    tracing::info!("shutdown: draining (up to {drain_secs} s)");
+    let drain = async { while handles.join_next().await.is_some() {} };
+    if tokio::time::timeout(Duration::from_secs(drain_secs), drain)
+        .await
+        .is_err()
+    {
+        tracing::warn!("shutdown: drain timeout; exiting");
+    }
+    tracing::info!("shutdown: complete");
     Ok(())
 }
 

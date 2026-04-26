@@ -110,8 +110,9 @@ for the full filter syntax.
 .SH SIGNALS
 .TP
 .BR SIGINT ", " SIGTERM
-Initiates shutdown.
-In-flight requests are aborted; graceful drain is not yet implemented.
+Initiates graceful shutdown.
+Listening sockets stop accepting new connections; in-flight requests are
+given up to 30 seconds to complete before the process exits.
 .
 .SH EXAMPLES
 Start with the default configuration file in the current directory:
@@ -147,8 +148,7 @@ Full configuration reference:
 .UE
 .
 .SH BUGS
-Graceful shutdown (draining in-flight requests) is not yet implemented.
-The reverse proxy and FastCGI handlers are stubs that return 502.
+HTTPS backends are not yet supported by the reverse proxy handler.
 .
 .SH AUTHOR
 Michael Paddon <6d7770@gmail.com>

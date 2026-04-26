@@ -17,8 +17,14 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
+use tokio::sync::watch;
+use tokio::task::JoinSet;
 use tokio_rustls::TlsAcceptor;
 use tracing::debug;
+
+// Maximum time to wait for in-flight requests to finish after the
+// shutdown signal is sent before giving up and exiting anyway.
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct AppState {
     pub router: Arc<Router>,
@@ -220,26 +226,45 @@ pub async fn run_plain(
     cfg: ListenerConfig,
     listener: TcpListener,
     state: Arc<AppState>,
+    mut shutdown: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     let name = cfg.local_name();
     tracing::info!(bind = %name, "listening (HTTP)");
+    let mut connections: JoinSet<()> = JoinSet::new();
+
     loop {
-        let (stream, peer_addr) = listener.accept().await?;
-        let io = TokioIo::new(stream);
-        let svc = AlohaService {
-            state: state.clone(),
-            bind: name.clone(),
-            peer_addr,
-            timeouts: cfg.timeouts.clone(),
-        };
-        tokio::spawn(async move {
-            debug!(%peer_addr, "accepted connection");
-            let builder = make_builder(&svc.timeouts);
-            if let Err(e) = builder.serve_connection(io, svc).await {
-                debug!(%peer_addr, "connection closed: {e}");
+        tokio::select! {
+            accept = listener.accept() => {
+                match accept {
+                    Ok((stream, peer_addr)) => {
+                        let io = TokioIo::new(stream);
+                        let svc = AlohaService {
+                            state: state.clone(),
+                            bind: name.clone(),
+                            peer_addr,
+                            timeouts: cfg.timeouts.clone(),
+                        };
+                        let conn_shutdown = shutdown.clone();
+                        connections.spawn(serve_connection(
+                            io, svc, conn_shutdown, peer_addr,
+                        ));
+                    }
+                    Err(e) => {
+                        tracing::error!(bind = %name, "accept error: {e}");
+                    }
+                }
             }
-        });
+            // Reap completed connections to prevent unbounded growth.
+            Some(_) = connections.join_next(),
+                if !connections.is_empty() => {}
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() { break; }
+            }
+        }
     }
+
+    drain_connections(&name, connections).await;
+    Ok(())
 }
 
 // Acceptor is pre-built by main (possibly via AcmeManager) and passed
@@ -249,39 +274,118 @@ pub async fn run_tls(
     listener: TcpListener,
     state: Arc<AppState>,
     acceptor: Arc<ArcSwap<TlsAcceptor>>,
+    mut shutdown: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     let name = cfg.local_name();
     tracing::info!(bind = %name, "listening (HTTPS)");
+    let mut connections: JoinSet<()> = JoinSet::new();
+
     loop {
-        let (stream, peer_addr) = listener.accept().await?;
-        // load_full() cheaply clones the inner Arc for this connection,
-        // picking up any cert that was hot-swapped since the last accept.
-        let acc = acceptor.load_full();
-        let state = state.clone();
-        let bind = name.clone();
-        let svc_timeouts = cfg.timeouts.clone();
-        tokio::spawn(async move {
-            // Complete the TLS handshake inside the task so a slow
-            // or failing client does not block the accept loop.
-            let tls_stream = match acc.accept(stream).await {
-                Ok(s) => s,
-                Err(e) => {
-                    debug!(%peer_addr, "TLS handshake failed: {e}");
-                    return;
+        tokio::select! {
+            accept = listener.accept() => {
+                match accept {
+                    Ok((stream, peer_addr)) => {
+                        // load_full() cheaply clones the inner Arc,
+                        // picking up any cert hot-swapped since last accept.
+                        let acc = acceptor.load_full();
+                        let state = state.clone();
+                        let bind = name.clone();
+                        let svc_timeouts = cfg.timeouts.clone();
+                        let conn_shutdown = shutdown.clone();
+                        connections.spawn(async move {
+                            // TLS handshake inside the task so a slow
+                            // client doesn't block the accept loop.
+                            let tls_stream = match acc.accept(stream).await {
+                                Ok(s) => s,
+                                Err(e) => {
+                                    debug!(%peer_addr, "TLS handshake failed: {e}");
+                                    return;
+                                }
+                            };
+                            debug!(%peer_addr, "TLS accepted");
+                            let io = TokioIo::new(tls_stream);
+                            let svc = AlohaService {
+                                state,
+                                bind,
+                                peer_addr,
+                                timeouts: svc_timeouts,
+                            };
+                            serve_connection(io, svc, conn_shutdown, peer_addr)
+                                .await;
+                        });
+                    }
+                    Err(e) => {
+                        tracing::error!(bind = %name, "accept error: {e}");
+                    }
                 }
-            };
-            debug!(%peer_addr, "TLS accepted");
-            let io = TokioIo::new(tls_stream);
-            let svc = AlohaService {
-                state,
-                bind,
-                peer_addr,
-                timeouts: svc_timeouts,
-            };
-            let builder = make_builder(&svc.timeouts);
-            if let Err(e) = builder.serve_connection(io, svc).await {
-                debug!(%peer_addr, "TLS connection closed: {e}");
             }
-        });
+            Some(_) = connections.join_next(),
+                if !connections.is_empty() => {}
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() { break; }
+            }
+        }
+    }
+
+    drain_connections(&name, connections).await;
+    Ok(())
+}
+
+// Serve a single connection, initiating graceful shutdown on signal.
+//
+// On shutdown, hyper's graceful_shutdown() stops the connection from
+// accepting new requests while allowing the current request to finish.
+async fn serve_connection<I>(
+    io: I,
+    svc: AlohaService,
+    mut shutdown: watch::Receiver<bool>,
+    peer_addr: SocketAddr,
+) where
+    I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
+{
+    // If shutdown was already signalled before this task started, skip
+    // the connection rather than starting and immediately aborting.
+    if *shutdown.borrow() {
+        return;
+    }
+    debug!(%peer_addr, "accepted connection");
+    let builder = make_builder(&svc.timeouts);
+    let conn = builder.serve_connection(io, svc);
+    tokio::pin!(conn);
+
+    let mut graceful = false;
+    loop {
+        tokio::select! {
+            result = conn.as_mut() => {
+                if let Err(e) = result {
+                    debug!(%peer_addr, "connection closed: {e}");
+                }
+                break;
+            }
+            // Only arm this branch until we've initiated shutdown once.
+            _ = shutdown.changed(), if !graceful => {
+                if *shutdown.borrow() {
+                    conn.as_mut().graceful_shutdown();
+                    graceful = true;
+                }
+            }
+        }
+    }
+}
+
+// Wait for all in-flight connections to finish, with a hard timeout.
+async fn drain_connections(name: &str, mut connections: JoinSet<()>) {
+    let n = connections.len();
+    if n > 0 {
+        tracing::info!(bind = %name, connections = n, "draining");
+    }
+    let drain = async { while connections.join_next().await.is_some() {} };
+    if tokio::time::timeout(DRAIN_TIMEOUT, drain).await.is_err() {
+        tracing::warn!(
+            bind = %name,
+            "drain timeout after {}s; {} connection(s) abandoned",
+            DRAIN_TIMEOUT.as_secs(),
+            connections.len(),
+        );
     }
 }
