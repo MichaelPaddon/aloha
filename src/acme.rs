@@ -262,16 +262,12 @@ impl AcmeManager {
             .provision(&self.config.domains, &self.challenges)
             .await?;
 
-        let dir = self.cert_dir();
-        tokio::fs::create_dir_all(&dir)
-            .await
-            .context("creating cert directory")?;
-        tokio::fs::write(dir.join("cert.pem"), &cert_pem)
-            .await
-            .context("writing cert.pem")?;
-        tokio::fs::write(dir.join("key.pem"), key_pem)
-            .await
-            .context("writing key.pem")?;
+        atomic_write_cert_dir(
+            &self.cert_dir(),
+            cert_pem.as_bytes(),
+            key_pem.as_bytes(),
+        )
+        .await?;
 
         // Warn if the cert's notBefore is in the future (typically a
         // sign of clock skew between the server and the CA).  We serve
@@ -282,6 +278,58 @@ impl AcmeManager {
 
         Ok(())
     }
+}
+
+// ── Atomic cert directory writer ──────────────────────────────────
+
+// Write cert_pem + key_pem into a staging directory, then move it
+// over `dir` in two renames.
+//
+// This guarantees that readers never see a cert/key mismatch: either
+// the old pair is intact or the new pair is, never a mix.  Linux's
+// rename(2) cannot move a directory over a non-empty one, so we shift
+// the live dir aside first.  The two-rename gap is a few microseconds;
+// a crash there causes build_acceptor to fail on restart, which
+// triggers a clean ACME reacquisition rather than serving mismatched
+// files.
+async fn atomic_write_cert_dir(
+    dir: &std::path::Path,
+    cert_pem: &[u8],
+    key_pem: &[u8],
+) -> anyhow::Result<()> {
+    let parent = dir.parent().context("cert dir has no parent")?;
+    let name = dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .context("cert dir name is not valid UTF-8")?;
+    let staging = parent.join(format!("{name}.new"));
+    let old = parent.join(format!("{name}.old"));
+
+    // Remove any leftover staging dir from a prior interrupted attempt.
+    tokio::fs::remove_dir_all(&staging).await.ok();
+    tokio::fs::create_dir_all(&staging)
+        .await
+        .context("creating staging directory")?;
+    tokio::fs::write(staging.join("cert.pem"), cert_pem)
+        .await
+        .context("writing cert.pem to staging")?;
+    tokio::fs::write(staging.join("key.pem"), key_pem)
+        .await
+        .context("writing key.pem to staging")?;
+
+    // Shift the live directory aside, then move staging into place.
+    if dir.exists() {
+        tokio::fs::remove_dir_all(&old).await.ok();
+        tokio::fs::rename(dir, &old)
+            .await
+            .context("moving live cert dir aside")?;
+    }
+    tokio::fs::rename(&staging, dir)
+        .await
+        .context("moving staging cert dir into place")?;
+    tokio::fs::remove_dir_all(&old).await.ok();
+
+    Ok(())
 }
 
 // ── Real ACME provisioner (instant-acme / Let's Encrypt) ─────────
@@ -839,6 +887,76 @@ mod tests {
             "cert was not renewed: expiry in {}d",
             (expiry - now) / 86400
         );
+    }
+
+    // ── atomic_write_cert_dir ────────────────────────────────────
+
+    #[tokio::test]
+    async fn atomic_write_creates_dir_on_first_run() {
+        let base = tempfile::tempdir().unwrap();
+        let cert_dir = base.path().join("certs").join("example.com");
+
+        atomic_write_cert_dir(
+            &cert_dir,
+            b"CERT",
+            b"KEY",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read(cert_dir.join("cert.pem")).unwrap(),
+            b"CERT"
+        );
+        assert_eq!(
+            std::fs::read(cert_dir.join("key.pem")).unwrap(),
+            b"KEY"
+        );
+    }
+
+    #[tokio::test]
+    async fn atomic_write_replaces_existing_dir() {
+        let base = tempfile::tempdir().unwrap();
+        let cert_dir = base.path().join("certs").join("example.com");
+
+        // First write
+        atomic_write_cert_dir(&cert_dir, b"CERT1", b"KEY1")
+            .await
+            .unwrap();
+
+        // Second write — should replace atomically
+        atomic_write_cert_dir(&cert_dir, b"CERT2", b"KEY2")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read(cert_dir.join("cert.pem")).unwrap(),
+            b"CERT2"
+        );
+        assert_eq!(
+            std::fs::read(cert_dir.join("key.pem")).unwrap(),
+            b"KEY2"
+        );
+    }
+
+    #[tokio::test]
+    async fn atomic_write_cleans_up_staging_and_old_dirs() {
+        let base = tempfile::tempdir().unwrap();
+        let cert_dir = base.path().join("certs").join("example.com");
+        let staging = base.path().join("certs").join("example.com.new");
+        let old = base.path().join("certs").join("example.com.old");
+
+        // Seed a leftover staging dir to verify it is cleaned up.
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join("stale"), b"x").unwrap();
+
+        atomic_write_cert_dir(&cert_dir, b"CERT", b"KEY")
+            .await
+            .unwrap();
+
+        // Staging and old dirs must be gone after a clean run.
+        assert!(!staging.exists(), ".new dir should be removed");
+        assert!(!old.exists(), ".old dir should be removed");
     }
 
     #[tokio::test]
