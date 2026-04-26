@@ -388,6 +388,7 @@
           <li><a href="#handler-proxy">proxy</a></li>
           <li><a href="#handler-redirect">redirect</a></li>
           <li><a href="#handler-fastcgi">fastcgi</a></li>
+          <li><a href="#handler-status">status</a></li>
         </ul>
       </ul>
     </div>
@@ -1186,6 +1187,36 @@
         <code>CONTENT_LENGTH</code>, and all <code>HTTP_*</code> headers.
         <code>REMOTE_ADDR</code> is set to <code>0.0.0.0</code>; use
         <code>X-Forwarded-For</code> in a proxy deployment.
+      </p>
+      <!-- status -->
+      <h3 id="handler-status">Handler: <code>status</code></h3>
+      <p>
+        Serves a built-in status page at the configured location.
+        No child nodes are required. Access control can be applied via the
+        usual <code>auth</code> block.
+      </p>
+<pre><code><span class="kw">location</span> <span class="str">"/_status"</span> {
+    <span class="kw">status</span>
+}</code></pre>
+      <p>
+        <strong>HTML output</strong> (default) — a self-contained page that
+        auto-refreshes every 10 seconds, showing:
+      </p>
+      <ul>
+        <li>Uptime, total requests, active (in-flight) requests</li>
+        <li>Request rate: last 5 s, 1-minute, 5-minute, 15-minute averages</li>
+        <li>Status code distribution (2xx / 3xx / 4xx / 5xx)</li>
+        <li>Latency histogram (6 buckets from &lt;1 ms to ≥1 s)</li>
+        <li>Resident memory in MiB (Linux only)</li>
+      </ul>
+      <p>
+        <strong>JSON output</strong> — send
+        <code>Accept: application/json</code> to receive a machine-readable
+        JSON object with the same fields.
+      </p>
+      <p>
+        Rates are computed from a 15-minute ring buffer updated every 5 s.
+        They converge toward accurate values as the buffer fills after startup.
       </p>
     </section>
 

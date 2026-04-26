@@ -511,6 +511,35 @@ is set to `0.0.0.0`; use `X-Forwarded-For` in a proxy deployment.
 
 ---
 
+### Handler: `status`
+
+Serves a built-in status page at the configured location. The page shows
+current server health and historical load data.
+
+```kdl
+location "/_status" {
+    status
+}
+```
+
+No child nodes. Access control can be applied via the usual `auth` block.
+
+**HTML output** (default): a self-contained page that auto-refreshes every
+10 seconds, showing:
+- Uptime and total/active request counts
+- Request rate (last 5 s, 1/5/15-minute averages)
+- Status code distribution (2xx / 3xx / 4xx / 5xx)
+- Latency histogram (6 buckets from <1 ms to ≥1 s)
+- Resident memory in MiB (Linux only)
+
+**JSON output**: send `Accept: application/json` to receive a
+machine-readable JSON object with the same data.
+
+Rates are computed from a 15-minute ring buffer updated every 5 seconds.
+The displayed rates converge toward accurate values as the buffer fills.
+
+---
+
 ## Response compression
 
 aloha automatically compresses responses when the client sends an

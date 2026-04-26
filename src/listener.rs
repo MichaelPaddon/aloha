@@ -2,6 +2,7 @@ use crate::acme::ChallengeMap;
 use crate::auth::{AuthDecision, Authenticator};
 use crate::compress;
 use crate::config::{ListenerConfig, TcpProxyConfig, Timeouts};
+use crate::metrics::Metrics;
 use crate::proxy_proto;
 use crate::error::{
     bytes_body, response_401, response_403, response_404, BoxBody,
@@ -35,6 +36,7 @@ pub struct AppState {
     // during certificate issuance; empty otherwise.
     pub acme_challenges: ChallengeMap,
     pub authenticator: Arc<dyn Authenticator>,
+    pub metrics: Arc<Metrics>,
 }
 
 // One AlohaService is cloned per accepted connection.
@@ -84,6 +86,8 @@ impl hyper::service::Service<Request<Incoming>> for AlohaService {
                 .and_then(|v| v.to_str().ok())
                 .map(ToOwned::to_owned);
 
+            state.metrics.inc_active();
+
             // ACME HTTP-01 challenge interception.
             // Let's Encrypt validates by fetching this path on port 80.
             if let Some(token) =
@@ -101,7 +105,13 @@ impl hyper::service::Service<Request<Incoming>> for AlohaService {
                         .header("Content-Type", "text/plain")
                         .body(bytes_body(Bytes::from(body)))
                         .expect("known-valid status and header");
-                    log_access(&method, &path, &resp, peer, start);
+                    let ms = start.elapsed().as_millis();
+                    state.metrics.dec_active();
+                    state.metrics.record(
+                        resp.status().as_u16(), ms,
+                    );
+                    log_access(&method, &path, resp.status().as_u16(),
+                               ms, peer);
                     return Ok(resp);
                 }
             }
@@ -161,7 +171,11 @@ impl hyper::service::Service<Request<Incoming>> for AlohaService {
             let resp =
                 compress::maybe_compress(resp, encoding).await;
 
-            log_access(&method, &path, &resp, peer, start);
+            let status = resp.status().as_u16();
+            let ms = start.elapsed().as_millis();
+            state.metrics.dec_active();
+            state.metrics.record(status, ms);
+            log_access(&method, &path, status, ms, peer);
             Ok(resp)
         })
     }
@@ -170,15 +184,13 @@ impl hyper::service::Service<Request<Incoming>> for AlohaService {
 // Emit one access-log line per completed request at INFO level.
 // Fields are structured so log aggregators can parse them; the
 // human-readable format is also easy to read with plain `grep`.
-fn log_access<B>(
+fn log_access(
     method: &hyper::Method,
     path: &str,
-    resp: &Response<B>,
+    status: u16,
+    ms: u128,
     peer: SocketAddr,
-    start: Instant,
 ) {
-    let status = resp.status().as_u16();
-    let ms = start.elapsed().as_millis();
     tracing::info!(
         %peer,
         %method,

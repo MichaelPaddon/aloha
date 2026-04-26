@@ -3,13 +3,16 @@ pub mod fcgi;
 pub mod proxy;
 pub mod scgi;
 pub mod static_files;
+pub mod status;
 #[cfg(unix)]
 pub mod cgi;
 
 use crate::config::HandlerConfig;
 use crate::error::{response_redirect, HttpResponse};
+use crate::metrics::Metrics;
 use hyper::body::Incoming;
 use hyper::Request;
+use std::sync::Arc;
 
 pub enum Handler {
     Static(static_files::StaticHandler),
@@ -17,12 +20,16 @@ pub enum Handler {
     Redirect { to: String, code: u16 },
     FastCgi(fcgi::FcgiHandler),
     Scgi(scgi::ScgiHandler),
+    Status(status::StatusHandler),
     #[cfg(unix)]
     Cgi(cgi::CgiHandler),
 }
 
 impl Handler {
-    pub fn from_config(cfg: &HandlerConfig) -> anyhow::Result<Self> {
+    pub fn from_config(
+        cfg: &HandlerConfig,
+        metrics: &Arc<Metrics>,
+    ) -> anyhow::Result<Self> {
         match cfg {
             HandlerConfig::Static { root, index_files, strip_prefix } => {
                 Ok(Handler::Static(static_files::StaticHandler::new(
@@ -32,7 +39,9 @@ impl Handler {
                 )))
             }
             HandlerConfig::Proxy { upstream, strip_prefix } => {
-                Ok(Handler::Proxy(proxy::ProxyHandler::new(upstream, *strip_prefix)?))
+                Ok(Handler::Proxy(
+                    proxy::ProxyHandler::new(upstream, *strip_prefix)?
+                ))
             }
             HandlerConfig::Redirect { to, code } => {
                 Ok(Handler::Redirect { to: to.clone(), code: *code })
@@ -50,6 +59,11 @@ impl Handler {
                     root,
                     index.clone(),
                 )))
+            }
+            HandlerConfig::Status => {
+                Ok(Handler::Status(
+                    status::StatusHandler::new(metrics.clone())
+                ))
             }
             HandlerConfig::Cgi { root } => {
                 #[cfg(unix)]
@@ -71,6 +85,7 @@ impl Handler {
             Handler::Redirect { to, code } => response_redirect(to, *code),
             Handler::FastCgi(h) => h.serve(req, matched_prefix).await,
             Handler::Scgi(h)    => h.serve(req, matched_prefix).await,
+            Handler::Status(h)  => h.serve(req, matched_prefix).await,
             #[cfg(unix)]
             Handler::Cgi(h) => h.serve(req, matched_prefix).await,
         }

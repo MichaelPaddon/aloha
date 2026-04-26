@@ -196,6 +196,7 @@ pub enum HandlerConfig {
     Cgi {
         root: String,
     },
+    Status,
 }
 
 // ── Config loading ────────────────────────────────────────────────
@@ -586,7 +587,8 @@ fn parse_location(node: &KdlNode, src: &str, name: &str) -> anyhow::Result<Locat
         .find(|n| {
             matches!(
                 n.name().value(),
-                "static" | "proxy" | "redirect" | "fastcgi" | "scgi" | "cgi"
+                "static" | "proxy" | "redirect"
+                | "fastcgi" | "scgi" | "cgi" | "status"
             )
         })
         .ok_or_else(|| {
@@ -779,6 +781,7 @@ fn parse_handler(
                 .with_context(|| format!("{name}:{line}"))?;
             Ok(HandlerConfig::Cgi { root })
         }
+        "status" => Ok(HandlerConfig::Status),
         other => bail!(
             "{name}:{line}: unknown handler '{other}' \
              in location '{location_path}'"
@@ -1372,6 +1375,27 @@ mod tests {
         .unwrap();
         // tcp-proxy listeners bypass HTTP; default_vhost should be None.
         assert!(cfg.listeners[0].default_vhost.is_none());
+    }
+
+    #[test]
+    fn status_handler_parses() {
+        let cfg = Config::parse(
+            r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/_status" {
+                    status
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        assert!(matches!(
+            cfg.vhosts[0].locations[0].handler,
+            HandlerConfig::Status
+        ));
     }
 
     #[test]

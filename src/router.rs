@@ -1,6 +1,7 @@
 use crate::auth::AuthPolicy;
 use crate::config::{Config, ListenerConfig, VHostConfig};
 use crate::handler::Handler;
+use crate::metrics::Metrics;
 use hyper::Request;
 use hyper::body::Incoming;
 use regex::Regex;
@@ -35,7 +36,10 @@ pub struct Router {
 }
 
 impl Router {
-    pub fn new(config: &Config) -> anyhow::Result<Self> {
+    pub fn new(
+        config: &Config,
+        metrics: &Arc<Metrics>,
+    ) -> anyhow::Result<Self> {
         let mut vhosts: HashMap<String, Arc<VHost>> = HashMap::new();
         let mut patterns: Vec<(Regex, Arc<VHost>)> = Vec::new();
         // Keyed by the raw config string, including the `~` prefix for
@@ -46,7 +50,7 @@ impl Router {
             HashMap::new();
 
         for vcfg in &config.vhosts {
-            let vhost = Arc::new(build_vhost(vcfg)?);
+            let vhost = Arc::new(build_vhost(vcfg, metrics)?);
 
             let all_names =
                 std::iter::once(&vcfg.name).chain(vcfg.aliases.iter());
@@ -143,10 +147,15 @@ fn strip_port(host: &str) -> &str {
     host.split(':').next().unwrap_or(host)
 }
 
-fn build_vhost(vcfg: &VHostConfig) -> anyhow::Result<VHost> {
+fn build_vhost(
+    vcfg: &VHostConfig,
+    metrics: &Arc<Metrics>,
+) -> anyhow::Result<VHost> {
     let mut locations = Vec::with_capacity(vcfg.locations.len());
     for loc in &vcfg.locations {
-        let handler = Arc::new(Handler::from_config(&loc.handler)?);
+        let handler = Arc::new(
+            Handler::from_config(&loc.handler, metrics)?
+        );
         locations.push(Location {
             path: loc.path.clone(),
             handler,
@@ -162,6 +171,11 @@ mod tests {
 
     fn make_config(kdl: &str) -> Config {
         Config::parse(kdl).unwrap()
+    }
+
+    fn make_router(config: &Config) -> Router {
+        let metrics = Arc::new(crate::metrics::Metrics::new());
+        Router::new(config, &metrics).unwrap()
     }
 
     // Route a synthetic request and return the matched location prefix,
@@ -211,7 +225,7 @@ mod tests {
             }
             "#,
         );
-        let router = Router::new(&config).unwrap();
+        let router = make_router(&config);
         assert_eq!(
             route_str(&router, "a.com", "/index.html", "0.0.0.0:80"),
             Some("/".into())
@@ -246,7 +260,7 @@ mod tests {
             }
             "#,
         );
-        let router = Router::new(&config).unwrap();
+        let router = make_router(&config);
         assert_eq!(
             route_str(&router, "unknown.com", "/", "0.0.0.0:80"),
             Some("/".into())
@@ -269,7 +283,7 @@ mod tests {
             }
             "#,
         );
-        let router = Router::new(&config).unwrap();
+        let router = make_router(&config);
         assert_eq!(
             route_str(&router, "foo.example.com", "/", "0.0.0.0:80"),
             Some("/".into())
@@ -295,7 +309,7 @@ mod tests {
             }
             "#,
         );
-        let router = Router::new(&config).unwrap();
+        let router = make_router(&config);
         assert_eq!(
             route_str(
                 &router,
@@ -328,7 +342,7 @@ mod tests {
             }
             "#,
         );
-        let router = Router::new(&config).unwrap();
+        let router = make_router(&config);
         // Literal match wins.
         assert_eq!(
             route_str(
@@ -372,7 +386,7 @@ mod tests {
             }
             "#,
         );
-        let router = Router::new(&config).unwrap();
+        let router = make_router(&config);
         assert_eq!(
             route_str(
                 &router,
@@ -400,7 +414,7 @@ mod tests {
             }
             "#,
         );
-        let router = Router::new(&config).unwrap();
+        let router = make_router(&config);
         assert_eq!(
             route_str(&router, "sub.example.com", "/", "0.0.0.0:80"),
             Some("/".into())
@@ -429,7 +443,7 @@ mod tests {
             }
             "#,
         );
-        let router = Router::new(&config).unwrap();
+        let router = make_router(&config);
         // "other.org" does not match the regex — falls back to the default.
         assert_eq!(
             route_str(&router, "other.org", "/", "0.0.0.0:80"),
@@ -465,7 +479,7 @@ mod tests {
             }
             "#,
         );
-        let router = Router::new(&config).unwrap();
+        let router = make_router(&config);
         // Literal match wins for exact.com.
         assert_eq!(
             route_str(&router, "exact.com", "/exact/", "0.0.0.0:80"),
@@ -519,7 +533,7 @@ mod tests {
             }
             "#,
         );
-        let router = Router::new(&config).unwrap();
+        let router = make_router(&config);
         assert_eq!(
             route_str(&router, "example.com", "/docs/readme", "0.0.0.0:80"),
             Some("/docs/".into())
@@ -545,7 +559,7 @@ mod tests {
             }
             "#,
         );
-        let router = Router::new(&config).unwrap();
+        let router = make_router(&config);
         // Pass None for host — simulates a request with no Host header.
         let vhost = router.resolve_vhost(None, "0.0.0.0:80");
         assert!(vhost.is_some(), "no Host header should fall back to default");

@@ -2,6 +2,7 @@ mod acme;
 mod auth;
 mod compress;
 mod config;
+mod metrics;
 mod error;
 mod handler;
 mod listener;
@@ -104,8 +105,12 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Create metrics before the router so StatusHandler can hold a
+    // clone of the Arc, and AppState can record per-request data.
+    let metrics = Arc::new(metrics::Metrics::new());
+
     let router = Arc::new(
-        Router::new(&config).context("building router")?,
+        Router::new(&config, &metrics).context("building router")?,
     );
 
     // Phase 1: create shared ACME challenge map and app state.
@@ -115,7 +120,12 @@ async fn main() -> anyhow::Result<()> {
         router,
         acme_challenges: challenges.clone(),
         authenticator: Arc::new(auth::AnonymousAuthenticator),
+        metrics: metrics.clone(),
     });
+
+    // Background task: advance the request-rate ring buffer every 5 s.
+    // Not tracked in `handles` — it carries no state worth draining.
+    tokio::spawn(metrics.clone().tick_loop());
 
     // Shutdown channel: false = running, true = drain and exit.
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
