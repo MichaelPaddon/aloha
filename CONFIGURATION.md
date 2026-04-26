@@ -29,6 +29,7 @@ vhost "localhost" {
 KDL nodes have the form `node-name arg prop="value" { child … }`.
 
 - **Arguments** are positional values after the node name: `vhost "example.com"` or `tls "acme"`
+- **Properties** are named `key=value` pairs after the node name
 - **Children** live inside `{ }`, one per line: `bind "[::]:8080"`
 - Line comments start with `//`
 - The null literal is written `null`

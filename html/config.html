@@ -380,6 +380,7 @@
         </ul>
         <li><a href="#location">location</a></li>
         <ul class="nav-list sub">
+          <li><a href="#auth">auth</a></li>
           <li><a href="#handler-static">static</a></li>
           <li><a href="#handler-proxy">proxy</a></li>
           <li><a href="#handler-redirect">redirect</a></li>
@@ -457,8 +458,8 @@
       <h2><code>server</code></h2>
       <p>Global server settings. The entire node is optional.</p>
 <pre><code><span class="kw">server</span> {
-    <span class="kw">workers</span>   <span class="num">4</span>
     <span class="kw">state-dir</span> <span class="str">"/var/lib/aloha"</span>
+    <span class="kw">user</span>      <span class="str">"aloha"</span>
     <span class="cm">// Global TLS defaults (see tls options below)</span>
     <span class="kw">tls</span> {
         <span class="kw">min-version</span> <span class="str">"1.2"</span>
@@ -468,12 +469,6 @@
         <table>
           <thead><tr><th>Child node</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
           <tbody>
-            <tr>
-              <td>workers</td><td>integer</td><td>CPU count</td>
-              <td>Tokio worker thread count.
-                  <span class="badge badge-stub">stub</span>
-                  Parsed but not applied; Tokio defaults to one thread per CPU.</td>
-            </tr>
             <tr>
               <td>state-dir</td><td>path</td><td>—</td>
               <td>Directory for persistent runtime state: ACME account keys and issued
@@ -506,14 +501,6 @@
       </p>
 <pre><code><span class="kw">server</span> { <span class="kw">user</span> <span class="str">"www-data"</span> }                  <span class="cm">// group from /etc/passwd</span>
 <span class="kw">server</span> { <span class="kw">user</span> <span class="str">"aloha"</span>; <span class="kw">group</span> <span class="str">"aloha"</span> }   <span class="cm">// explicit group</span></code></pre>
-      <div class="callout info">
-        <span class="callout-icon">ℹ</span>
-        <span>The systemd unit shipped in the Debian package uses
-        <code>DynamicUser=yes</code> and <code>AmbientCapabilities=CAP_NET_BIND_SERVICE</code>
-        instead — privilege drop is handled by systemd and
-        <code>user</code>/<code>group</code> are not needed in that deployment.</span>
-      </div>
-
       <p>
         A <code>tls</code> child inside <code>server</code> sets global TLS defaults
         inherited by every TLS listener that does not supply its own
@@ -581,8 +568,6 @@
         </table>
       </div>
 
-      <!-- tls -->
-      <!-- tls -->
       <h3 id="timeouts"><code>timeouts</code> child node</h3>
       <p>
         Optional connection and request timeout settings. All values are in whole seconds.
@@ -732,6 +717,12 @@
               <td><span class="badge badge-opt">optional</span>
                   Override the ACME directory URL.</td>
             </tr>
+            <tr>
+              <td>retry-interval</td><td>integer (seconds)</td><td><code>3600</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Seconds between retry attempts when certificate
+                  acquisition fails.</td>
+            </tr>
           </tbody>
         </table>
       </div>
@@ -845,6 +836,65 @@
         declaration order — the first one whose prefix matches the request path wins.
         Each location contains exactly one handler node.
       </p>
+
+      <!-- auth -->
+      <h3 id="auth"><code>auth</code> — access control</h3>
+      <p>
+        Add an <code>auth</code> block to a location to require authentication
+        before the handler is invoked.
+      </p>
+<pre><code><span class="kw">location</span> <span class="str">"/admin/"</span> {
+    <span class="kw">auth</span> {
+        <span class="cm">// Allow rules — OR semantics: any one grants access.</span>
+        <span class="kw">group</span> <span class="str">"admin"</span> <span class="str">"superuser"</span>  <span class="cm">// in admin OR superuser</span>
+        <span class="kw">user</span>  <span class="str">"alice"</span>              <span class="cm">// OR: exactly alice</span>
+
+        <span class="cm">// Deny rules — take precedence over allow rules.</span>
+        <span class="kw">deny</span> {
+            <span class="kw">group</span> <span class="str">"suspended"</span>      <span class="cm">// blocked even if in admin</span>
+        }
+    }
+    <span class="kw">static</span> { <span class="kw">root</span> <span class="str">"/var/www/admin"</span> }
+}</code></pre>
+      <p>
+        The <code>auth</code> block contains allow rules and an optional
+        <code>deny</code> child block. Allow rules use OR semantics — any one
+        satisfied rule grants access. Deny rules take precedence: a user
+        matching a deny rule is rejected even if they would satisfy an allow rule.
+      </p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Allow / deny rule</th><th>Arguments</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>authenticated</td><td>—</td>
+              <td>Any authenticated user is accepted (or denied, inside
+                  <code>deny { }</code>).</td>
+            </tr>
+            <tr>
+              <td>user</td><td>name …</td>
+              <td>Match if the principal's username equals any of the listed names.
+                  Multiple names are OR-combined.</td>
+            </tr>
+            <tr>
+              <td>group</td><td>name …</td>
+              <td>Match if the principal is a member of any of the listed groups.
+                  Multiple names are OR-combined.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Responses when access is denied:</p>
+      <ul>
+        <li><strong>401 Unauthorized</strong> — request carries no credentials (anonymous).</li>
+        <li><strong>403 Forbidden</strong> — authenticated but denied or not allowed.</li>
+      </ul>
+      <div class="callout warn">
+        <span class="callout-icon">⚠</span>
+        <span>Authentication mechanisms (HTTP Basic auth, OAuth, …) are not yet
+        implemented. Until one is configured every request is treated as anonymous,
+        so a location with <code>auth</code> will return 401 for all requests.</span>
+      </div>
 
       <!-- static -->
       <h3 id="handler-static">Handler: <code>static</code></h3>
@@ -976,8 +1026,8 @@
 <pre><code><span class="cm">// aloha.kdl</span>
 
 <span class="kw">server</span> {
-    <span class="kw">workers</span>   <span class="num">4</span>
     <span class="kw">state-dir</span> <span class="str">"/var/lib/aloha"</span>
+    <span class="kw">user</span>      <span class="str">"aloha"</span>
 }
 
 <span class="cm">// Plain HTTP — falls back to "example.com" for unknown hosts</span>
