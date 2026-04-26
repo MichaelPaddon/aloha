@@ -146,8 +146,8 @@ server {
 ## Building packages
 
 ```
-make deb   # target/debian/aloha_<version>_<arch>.deb
-make rpm   # target/generate-rpm/aloha-<version>-1.<arch>.rpm
+cargo deb           # target/debian/aloha_<version>_<arch>.deb
+cargo generate-rpm  # target/generate-rpm/aloha-<version>-1.<arch>.rpm
 ```
 
 Requires `cargo-deb` / `cargo-generate-rpm` (`cargo install cargo-deb cargo-generate-rpm`).
