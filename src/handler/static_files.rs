@@ -436,12 +436,42 @@ mod tests {
     }
 
     #[test]
+    fn safe_join_root_path_returns_root() {
+        let root = Path::new("/var/www");
+        // Requesting "/" maps to the root directory itself.
+        assert_eq!(
+            safe_join(root, "/"),
+            Some(PathBuf::from("/var/www"))
+        );
+    }
+
+    #[test]
+    fn safe_join_single_dot_segment_allowed() {
+        // "." is not ".." so it should not be rejected.
+        let root = Path::new("/var/www");
+        assert!(safe_join(root, "/./index.html").is_some());
+    }
+
+    #[test]
     fn percent_decode_basics() {
         assert_eq!(
             percent_decode("/hello%20world"),
             "/hello world"
         );
         assert_eq!(percent_decode("/foo%2Fbar"), "/foo/bar");
+    }
+
+    #[test]
+    fn percent_decode_invalid_sequence_passed_through() {
+        // %GG is not valid hex — bytes passed through as-is.
+        assert_eq!(percent_decode("/%GGfile"), "/%GGfile");
+    }
+
+    #[test]
+    fn percent_decode_trailing_percent_passed_through() {
+        // Trailing % with fewer than 2 hex digits is passed through.
+        assert_eq!(percent_decode("/file%"), "/file%");
+        assert_eq!(percent_decode("/file%2"), "/file%2");
     }
 
     fn parse(range_hdr: &str, file_len: u64)
@@ -526,5 +556,32 @@ mod tests {
     #[test]
     fn range_last_byte() {
         assert_eq!(parse("bytes=99-99", 100), Some(Ok((99, 99))));
+    }
+
+    #[test]
+    fn range_suffix_larger_than_file_clamps_to_start() {
+        // bytes=-200 on a 100-byte file is equivalent to bytes=0-99.
+        assert_eq!(parse("bytes=-200", 100), Some(Ok((0, 99))));
+    }
+
+    #[test]
+    fn range_suffix_zero_is_error() {
+        // bytes=-0 is semantically invalid (requests zero bytes).
+        assert_eq!(parse("bytes=-0", 100), Some(Err(())));
+    }
+
+    #[test]
+    fn range_start_at_file_length_is_error() {
+        // bytes=100- on a 100-byte file: start (100) > end (99) → error.
+        assert_eq!(parse("bytes=100-", 100), Some(Err(())));
+    }
+
+    #[test]
+    fn range_non_bytes_unit_returns_none() {
+        // Only "bytes=" is recognised; other units are ignored.
+        assert_eq!(
+            parse_range_header_str("items=0-9", 100),
+            None
+        );
     }
 }

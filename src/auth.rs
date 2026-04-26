@@ -273,4 +273,35 @@ mod tests {
             AuthDecision::Unauthenticated
         );
     }
+
+    #[test]
+    fn multiple_deny_rules_any_one_sufficient() {
+        // Both a user rule and a group rule in deny; either alone denies.
+        let p = auth(
+            vec![AuthRule::Authenticated],
+            vec![
+                AuthRule::User("mallory".into()),
+                AuthRule::Group("banned".into()),
+            ],
+        );
+        // Matches the user deny rule.
+        assert_eq!(
+            p.evaluate(&Principal::Authenticated(identity("mallory", &[]))),
+            AuthDecision::Deny
+        );
+        // Matches the group deny rule.
+        assert_eq!(
+            p.evaluate(&Principal::Authenticated(
+                identity("eve", &["banned"])
+            )),
+            AuthDecision::Deny
+        );
+        // Matches neither deny rule → allow.
+        assert_eq!(
+            p.evaluate(&Principal::Authenticated(
+                identity("alice", &["users"])
+            )),
+            AuthDecision::Allow
+        );
+    }
 }

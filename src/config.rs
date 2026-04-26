@@ -1896,6 +1896,178 @@ mod tests {
     }
 
     #[test]
+    fn auth_deny_multi_arg_expands() {
+        let cfg = Config::parse(
+            r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    auth {
+                        authenticated
+                        deny {
+                            user "mallory" "eve"
+                        }
+                    }
+                    static {
+                        root "."
+                    }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        let auth = cfg.vhosts[0].locations[0].auth.as_ref().unwrap();
+        assert_eq!(auth.deny.len(), 2);
+        assert!(matches!(&auth.deny[0], AuthRule::User(u) if u == "mallory"));
+        assert!(matches!(&auth.deny[1], AuthRule::User(u) if u == "eve"));
+    }
+
+    #[test]
+    fn auth_group_missing_arg_is_error() {
+        let result = Config::parse(
+            r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    auth {
+                        group
+                    }
+                    static {
+                        root "."
+                    }
+                }
+            }
+            "#,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn auth_user_missing_arg_is_error() {
+        let result = Config::parse(
+            r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    auth {
+                        user
+                    }
+                    static {
+                        root "."
+                    }
+                }
+            }
+            "#,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn auth_deny_unknown_rule_is_error() {
+        let result = Config::parse(
+            r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    auth {
+                        authenticated
+                        deny {
+                            role "admin"
+                        }
+                    }
+                    static {
+                        root "."
+                    }
+                }
+            }
+            "#,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn auth_mixed_allow_rule_types() {
+        let cfg = Config::parse(
+            r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    auth {
+                        authenticated
+                        user "alice"
+                        group "admin"
+                    }
+                    static {
+                        root "."
+                    }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        let auth = cfg.vhosts[0].locations[0].auth.as_ref().unwrap();
+        assert_eq!(auth.allow.len(), 3);
+        assert!(matches!(&auth.allow[0], AuthRule::Authenticated));
+        assert!(matches!(&auth.allow[1], AuthRule::User(u) if u == "alice"));
+        assert!(matches!(&auth.allow[2], AuthRule::Group(g) if g == "admin"));
+        assert!(auth.deny.is_empty());
+    }
+
+    #[test]
+    fn location_no_handler_is_error() {
+        let result = Config::parse(
+            r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                }
+            }
+            "#,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn redirect_302() {
+        let cfg = Config::parse(
+            r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/temp/" {
+                    redirect {
+                        to "/new/"
+                        code 302
+                    }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        if let HandlerConfig::Redirect { to, code } =
+            &cfg.vhosts[0].locations[0].handler
+        {
+            assert_eq!(code, &302u16);
+            assert_eq!(to, "/new/");
+        } else {
+            panic!("expected Redirect handler");
+        }
+    }
+
+    #[test]
     fn server_user_defaults_to_none() {
         let cfg = Config::parse(
             r#"

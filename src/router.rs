@@ -427,6 +427,64 @@ mod tests {
     }
 
     #[test]
+    fn location_prefix_order_first_match_wins() {
+        // "/docs/" is declared before "/"; a request to /docs/foo must
+        // match "/docs/" and not fall through to "/".
+        let config = make_config(
+            r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "example.com" {
+                location "/docs/" {
+                    static { root "/docs"; }
+                }
+                location "/" {
+                    static { root "/www"; }
+                }
+            }
+            "#,
+        );
+        let router = Router::new(&config).unwrap();
+        assert_eq!(
+            route_str(&router, "example.com", "/docs/readme", "0.0.0.0:80"),
+            Some("/docs/".into())
+        );
+        assert_eq!(
+            route_str(&router, "example.com", "/index.html", "0.0.0.0:80"),
+            Some("/".into())
+        );
+    }
+
+    #[test]
+    fn absent_host_header_uses_default_vhost() {
+        let config = make_config(
+            r#"
+            listener {
+                bind "0.0.0.0:80"
+                default-vhost "fallback.com"
+            }
+            vhost "fallback.com" {
+                location "/" {
+                    static { root "/var/www/fallback"; }
+                }
+            }
+            "#,
+        );
+        let router = Router::new(&config).unwrap();
+        // Pass None for host — simulates a request with no Host header.
+        let vhost = router.resolve_vhost(None, "0.0.0.0:80");
+        assert!(vhost.is_some(), "no Host header should fall back to default");
+        let path = vhost.and_then(|vh| {
+            vh.locations
+                .iter()
+                .find(|l| "/".starts_with(l.path.as_str()))
+                .map(|l| l.path.clone())
+        });
+        assert_eq!(path, Some("/".into()));
+    }
+
+    #[test]
     fn strip_port_ipv4() {
         assert_eq!(strip_port("example.com:8080"), "example.com");
         assert_eq!(strip_port("example.com"), "example.com");
