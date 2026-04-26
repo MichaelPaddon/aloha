@@ -1,5 +1,6 @@
 mod acme;
 mod auth;
+mod compress;
 mod config;
 mod error;
 mod handler;

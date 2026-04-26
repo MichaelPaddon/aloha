@@ -511,6 +511,31 @@ is set to `0.0.0.0`; use `X-Forwarded-For` in a proxy deployment.
 
 ---
 
+## Response compression
+
+aloha automatically compresses responses when the client sends an
+`Accept-Encoding` header that includes `br` (brotli) or `gzip`.
+Brotli is preferred when both are accepted.
+
+Compression is applied to text-based content types:
+`text/*`, `application/json`, `application/javascript`,
+`application/xml`, `application/xhtml+xml`, `application/wasm`,
+`application/manifest+json`, `image/svg+xml`.
+
+Responses smaller than 1 KB, responses that already carry a
+`Content-Encoding` header, and binary formats (images, video, audio,
+archives) are passed through unmodified.
+
+When compression is applied, aloha removes the `Content-Length` header
+and adds:
+```
+Content-Encoding: gzip    (or br)
+Vary: Accept-Encoding
+```
+
+There is no per-location configuration; compression is always on for
+eligible responses.
+
 ## Full example
 
 ```kdl

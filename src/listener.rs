@@ -1,5 +1,6 @@
 use crate::acme::ChallengeMap;
 use crate::auth::{AuthDecision, Authenticator};
+use crate::compress;
 use crate::config::{ListenerConfig, TcpProxyConfig, Timeouts};
 use crate::proxy_proto;
 use crate::error::{
@@ -74,6 +75,15 @@ impl hyper::service::Service<Request<Incoming>> for AlohaService {
             // needing a separate parameter through the call stack.
             req.extensions_mut().insert(peer);
 
+            // Read Accept-Encoding before the request is consumed by
+            // the handler.  The encoding is applied to the response
+            // after the handler returns, outside the handler timeout.
+            let accept_encoding = req
+                .headers()
+                .get(hyper::header::ACCEPT_ENCODING)
+                .and_then(|v| v.to_str().ok())
+                .map(ToOwned::to_owned);
+
             // ACME HTTP-01 challenge interception.
             // Let's Encrypt validates by fetching this path on port 80.
             if let Some(token) =
@@ -144,6 +154,12 @@ impl hyper::service::Service<Request<Incoming>> for AlohaService {
             } else {
                 serve_fut.await
             };
+
+            let encoding = accept_encoding
+                .as_deref()
+                .and_then(compress::negotiate);
+            let resp =
+                compress::maybe_compress(resp, encoding).await;
 
             log_access(&method, &path, &resp, peer, start);
             Ok(resp)

@@ -394,6 +394,7 @@
     <div class="nav-section">
       <div class="nav-heading">Reference</div>
       <ul class="nav-list">
+        <li><a href="#compression">Response compression</a></li>
         <li><a href="#example">Full example</a></li>
       </ul>
     </div>
@@ -1170,6 +1171,41 @@
     </section>
 
     <hr class="divider">
+
+    <!-- ── Response compression ── -->
+    <section id="compression">
+      <h2>Response compression</h2>
+      <p>
+        aloha automatically compresses responses when the client sends an
+        <code>Accept-Encoding</code> header that includes
+        <code>br</code> (brotli) or <code>gzip</code>.
+        Brotli is preferred when both are accepted.
+      </p>
+      <p>Compression is applied to text-based content types:</p>
+      <ul>
+        <li><code>text/*</code></li>
+        <li><code>application/json</code></li>
+        <li><code>application/javascript</code></li>
+        <li><code>application/xml</code>, <code>application/xhtml+xml</code></li>
+        <li><code>application/wasm</code></li>
+        <li><code>application/manifest+json</code></li>
+        <li><code>image/svg+xml</code></li>
+      </ul>
+      <p>
+        Responses smaller than 1 KB, responses that already carry a
+        <code>Content-Encoding</code> header, and binary formats
+        (images, video, audio, archives) are passed through unmodified.
+      </p>
+      <p>When compression is applied, aloha adds:</p>
+<pre><code>Content-Encoding: gzip    (or br)
+Vary: Accept-Encoding</code></pre>
+      <p>
+        and removes the <code>Content-Length</code> header (the compressed
+        size differs from the original).
+        There is no per-location configuration; compression is always
+        enabled for eligible responses.
+      </p>
+    </section>
 
     <!-- ── Full example ── -->
     <section id="example">
