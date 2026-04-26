@@ -12,7 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 hyper              = { version = "1",    features = ["http1", "http2", "server"] }
-hyper-util         = { version = "0.1",  features = ["tokio", "server", "server-auto"] }
+hyper-util         = { version = "0.1",  features = ["tokio", "server", "server-auto", "client", "client-legacy"] }
 http-body-util     = "0.1"
 bytes              = "1"
 rustls             = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }

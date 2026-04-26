@@ -160,6 +160,7 @@ pub enum HandlerConfig {
     },
     Proxy {
         upstream: String,
+        strip_prefix: bool,
     },
     Redirect {
         to: String,
@@ -696,7 +697,9 @@ fn parse_handler(
         "proxy" => {
             let upstream = req_child_str(node, "upstream")
                 .with_context(|| format!("{name}:{line}"))?;
-            Ok(HandlerConfig::Proxy { upstream })
+            let strip_prefix =
+                child_bool(node, "strip-prefix").unwrap_or(false);
+            Ok(HandlerConfig::Proxy { upstream, strip_prefix })
         }
         "redirect" => {
             let to = req_child_str(node, "to")

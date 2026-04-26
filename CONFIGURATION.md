@@ -392,21 +392,29 @@ Directory requests (paths ending in `/`) return 404. The script must be
 executable. A non-zero exit status is logged as a warning; the response is
 still returned if it parses correctly.
 
-### Handler: `proxy` *(stub)*
+### Handler: `proxy`
 
-Reverse-proxies requests to an upstream HTTP server. Not yet implemented — returns 502.
+Reverse-proxies requests to an upstream HTTP server. Connection pooling
+is per-location; connections to the upstream are reused across requests.
 
 ```kdl
 location "/api/" {
     proxy {
-        upstream "http://127.0.0.1:3000"
+        upstream     "http://127.0.0.1:3000"
+        strip-prefix true
     }
 }
 ```
 
 | Child node | Type | Default | Description |
 |---|---|---|---|
-| `upstream` | URL | — | **Required.** Base URL of the upstream server. |
+| `upstream` | URL | — | **Required.** Base URL of the upstream server. Only `http` scheme is supported; HTTPS backends are not yet implemented. |
+| `strip-prefix` | boolean | `false` | Remove the matched location prefix from the request path before forwarding. With `location "/api/"` and `strip-prefix true`, `/api/users` is forwarded as `/users`. |
+
+The proxy sets `X-Forwarded-For` (appending the client IP to any
+existing chain), `X-Real-IP`, and `Host` (set to the upstream authority).
+Hop-by-hop headers (`Connection`, `Transfer-Encoding`, etc.) are stripped
+from both the forwarded request and the backend response.
 
 ### Handler: `redirect`
 

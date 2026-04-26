@@ -50,7 +50,7 @@ impl hyper::service::Service<Request<Incoming>> for AlohaService {
                 + Send>,
     >;
 
-    fn call(&self, req: Request<Incoming>) -> Self::Future {
+    fn call(&self, mut req: Request<Incoming>) -> Self::Future {
         let state = self.state.clone();
         let bind = self.bind.clone();
         let peer = self.peer_addr;
@@ -62,6 +62,10 @@ impl hyper::service::Service<Request<Incoming>> for AlohaService {
             let start = Instant::now();
             let method = req.method().clone();
             let path = req.uri().path().to_owned();
+            // Attach the peer address as a typed extension so handlers
+            // (e.g. the reverse proxy) can add X-Forwarded-For without
+            // needing a separate parameter through the call stack.
+            req.extensions_mut().insert(peer);
 
             // ACME HTTP-01 challenge interception.
             // Let's Encrypt validates by fetching this path on port 80.

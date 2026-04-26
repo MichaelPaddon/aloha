@@ -1002,11 +1002,13 @@
       </div>
 
       <!-- proxy -->
-      <h3 id="handler-proxy">Handler: <code>proxy</code> <span class="badge badge-stub">stub</span></h3>
-      <p>Reverse-proxies requests to an upstream HTTP server. Not yet implemented — returns 502.</p>
+      <h3 id="handler-proxy">Handler: <code>proxy</code></h3>
+      <p>Reverse-proxies requests to an upstream HTTP server.
+         Connection pooling is per-location; connections are reused across requests.</p>
 <pre><code><span class="kw">location</span> <span class="str">"/api/"</span> {
     <span class="kw">proxy</span> {
-        <span class="kw">upstream</span> <span class="str">"http://127.0.0.1:3000"</span>
+        <span class="kw">upstream</span>     <span class="str">"http://127.0.0.1:3000"</span>
+        <span class="kw">strip-prefix</span> <span class="num">true</span>
     }
 }</code></pre>
       <div class="table-wrap">
@@ -1016,11 +1018,26 @@
             <tr>
               <td>upstream</td><td>URL</td><td>—</td>
               <td><span class="badge badge-req">required</span>
-                  Base URL of the upstream server.</td>
+                  Base URL of the upstream. Only <code>http</code> scheme is
+                  supported; HTTPS backends are not yet implemented.</td>
+            </tr>
+            <tr>
+              <td>strip-prefix</td><td>boolean</td><td><code>false</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Remove the matched location prefix before forwarding.
+                  With <code>location "/api/"</code> and
+                  <code>strip-prefix true</code>, <code>/api/users</code>
+                  is forwarded as <code>/users</code>.</td>
             </tr>
           </tbody>
         </table>
       </div>
+      <p>
+        The proxy sets <code>X-Forwarded-For</code> (appending the client IP
+        to any existing chain), <code>X-Real-IP</code>, and
+        <code>Host</code> (set to the upstream authority). Hop-by-hop headers
+        are stripped from both the forwarded request and the backend response.
+      </p>
 
       <!-- redirect -->
       <h3 id="handler-redirect">Handler: <code>redirect</code></h3>

@@ -31,8 +31,8 @@ impl Handler {
                     *strip_prefix,
                 )))
             }
-            HandlerConfig::Proxy { upstream } => {
-                Ok(Handler::Proxy(proxy::ProxyHandler::new(upstream)))
+            HandlerConfig::Proxy { upstream, strip_prefix } => {
+                Ok(Handler::Proxy(proxy::ProxyHandler::new(upstream, *strip_prefix)?))
             }
             HandlerConfig::Redirect { to, code } => {
                 Ok(Handler::Redirect { to: to.clone(), code: *code })
