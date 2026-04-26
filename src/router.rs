@@ -38,8 +38,10 @@ impl Router {
     pub fn new(config: &Config) -> anyhow::Result<Self> {
         let mut vhosts: HashMap<String, Arc<VHost>> = HashMap::new();
         let mut patterns: Vec<(Regex, Arc<VHost>)> = Vec::new();
-        // Keyed by raw config string (including `~` for regex names);
-        // used below to resolve default-vhost references.
+        // Keyed by the raw config string, including the `~` prefix for
+        // regex names.  Regex names are never inserted into the `vhosts`
+        // literal map, so this is the only place they can be found when
+        // resolving a `default-vhost` reference at construction time.
         let mut by_config_key: HashMap<String, Arc<VHost>> =
             HashMap::new();
 
@@ -406,6 +408,78 @@ mod tests {
         assert_eq!(
             route_str(&router, "example.com", "/", "0.0.0.0:80"),
             Some("/".into())
+        );
+    }
+
+    #[test]
+    fn regex_vhost_as_implicit_default() {
+        // When the only vhost has a regex name, it becomes the implicit
+        // default (first vhost).  A host that does not match the regex
+        // must still be served by the default — the regex name must be
+        // resolved to an Arc<VHost> at startup, not matched at request time.
+        let config = make_config(
+            r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost r"~.+\.example\.com" {
+                location "/" {
+                    static { root "."; }
+                }
+            }
+            "#,
+        );
+        let router = Router::new(&config).unwrap();
+        // "other.org" does not match the regex — falls back to the default.
+        assert_eq!(
+            route_str(&router, "other.org", "/", "0.0.0.0:80"),
+            Some("/".into())
+        );
+        // Hosts that do match the regex are also served (via regex path).
+        assert_eq!(
+            route_str(&router, "sub.example.com", "/", "0.0.0.0:80"),
+            Some("/".into())
+        );
+    }
+
+    #[test]
+    fn regex_vhost_as_explicit_default() {
+        // An explicit `default-vhost` that names a regex vhost must work:
+        // the lookup uses the raw "~..." string as a key, which exists in
+        // by_config_key even though the name is absent from the literal map.
+        let config = make_config(
+            r#"
+            listener {
+                bind "0.0.0.0:80"
+                default-vhost r"~.+\.example\.com"
+            }
+            vhost "exact.com" {
+                location "/exact/" {
+                    static { root "/exact"; }
+                }
+            }
+            vhost r"~.+\.example\.com" {
+                location "/wild/" {
+                    static { root "/wild"; }
+                }
+            }
+            "#,
+        );
+        let router = Router::new(&config).unwrap();
+        // Literal match wins for exact.com.
+        assert_eq!(
+            route_str(&router, "exact.com", "/exact/", "0.0.0.0:80"),
+            Some("/exact/".into())
+        );
+        // Regex match wins for *.example.com.
+        assert_eq!(
+            route_str(&router, "foo.example.com", "/wild/", "0.0.0.0:80"),
+            Some("/wild/".into())
+        );
+        // Unrecognised host falls back to the explicit default (regex vhost).
+        assert_eq!(
+            route_str(&router, "other.org", "/wild/", "0.0.0.0:80"),
+            Some("/wild/".into())
         );
     }
 
