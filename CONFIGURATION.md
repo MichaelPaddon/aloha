@@ -348,6 +348,50 @@ location "/assets/" {
 | `strip-prefix` | boolean            | `false`                          | Remove the matched location prefix before resolving the file path. With `location "/assets/"` and `strip-prefix true`, `/assets/app.js` maps to `{root}/app.js`. |
 | `index-file`   | string (repeatable)| `"index.html"`, `"index.htm"`    | Filenames tried in order for directory requests. Returns 403 if none exist. Supplying any `index-file` children replaces the defaults entirely. |
 
+### Handler: `scgi`
+
+Forwards requests to an SCGI application server (Gunicorn, uWSGI, etc.).
+The SCGI protocol is similar to FastCGI but uses a simpler netstring encoding
+with no record framing.
+
+```kdl
+location "/" {
+    scgi {
+        socket "unix:/run/myapp.sock"
+        root   "/var/www/html"
+        index  "index.py"
+    }
+}
+```
+
+| Child node | Type   | Default | Description |
+|---|---|---|---|
+| `socket` | string | —       | **Required.** SCGI socket: `unix:/path` or `tcp:host:port`. |
+| `root`   | path   | —       | **Required.** Document root for `SCRIPT_FILENAME`. |
+| `index`  | string | —       | Default script appended to directory requests. |
+
+### Handler: `cgi`
+
+Executes a CGI script as a child process. One process is forked per request;
+the script receives the request body on stdin and writes a CGI response to
+stdout. Unix only.
+
+```kdl
+location "/cgi-bin/" {
+    cgi {
+        root "/usr/lib/cgi-bin"
+    }
+}
+```
+
+| Child node | Type | Default | Description |
+|---|---|---|---|
+| `root` | path | — | **Required.** Directory containing CGI scripts. The request path is mapped directly to a file under this directory. Path traversal is blocked. |
+
+Directory requests (paths ending in `/`) return 404. The script must be
+executable. A non-zero exit status is logged as a warning; the response is
+still returned if it parses correctly.
+
 ### Handler: `proxy` *(stub)*
 
 Reverse-proxies requests to an upstream HTTP server. Not yet implemented — returns 502.

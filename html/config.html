@@ -382,6 +382,8 @@
         <ul class="nav-list sub">
           <li><a href="#auth">auth</a></li>
           <li><a href="#handler-static">static</a></li>
+          <li><a href="#handler-scgi">scgi</a></li>
+          <li><a href="#handler-cgi">cgi</a></li>
           <li><a href="#handler-proxy">proxy</a></li>
           <li><a href="#handler-redirect">redirect</a></li>
           <li><a href="#handler-fastcgi">fastcgi</a></li>
@@ -933,6 +935,67 @@
                   Returns 403 if none exist.
                   Supplying any <code>index-file</code> children replaces the
                   built-in defaults entirely.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- scgi -->
+      <h3 id="handler-scgi">Handler: <code>scgi</code></h3>
+      <p>Forwards requests to an SCGI application server (Gunicorn, uWSGI, etc.)
+         using the Simple Common Gateway Interface protocol.</p>
+<pre><code><span class="kw">location</span> <span class="str">"/"</span> {
+    <span class="kw">scgi</span> {
+        <span class="kw">socket</span> <span class="str">"unix:/run/myapp.sock"</span>
+        <span class="kw">root</span>   <span class="str">"/var/www/html"</span>
+        <span class="kw">index</span>  <span class="str">"index.py"</span>
+    }
+}</code></pre>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Child node</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>socket</td><td>string</td><td>—</td>
+              <td><span class="badge badge-req">required</span>
+                  SCGI socket address.
+                  Use <code>unix:/path</code> or <code>tcp:host:port</code>.</td>
+            </tr>
+            <tr>
+              <td>root</td><td>path</td><td>—</td>
+              <td><span class="badge badge-req">required</span>
+                  Document root for <code>SCRIPT_FILENAME</code>.</td>
+            </tr>
+            <tr>
+              <td>index</td><td>string</td><td>—</td>
+              <td><span class="badge badge-opt">optional</span>
+                  Default script appended to directory requests.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- cgi -->
+      <h3 id="handler-cgi">Handler: <code>cgi</code> <span class="badge badge-opt">Unix only</span></h3>
+      <p>Executes a CGI script as a child process per request. The script
+         receives the request body on stdin and writes a CGI response to stdout.</p>
+<pre><code><span class="kw">location</span> <span class="str">"/cgi-bin/"</span> {
+    <span class="kw">cgi</span> {
+        <span class="kw">root</span> <span class="str">"/usr/lib/cgi-bin"</span>
+    }
+}</code></pre>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Child node</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>root</td><td>path</td><td>—</td>
+              <td><span class="badge badge-req">required</span>
+                  Directory containing CGI scripts. The request path maps
+                  directly to a file under this directory.
+                  Path traversal is blocked.
+                  Directory requests (paths ending in <code>/</code>)
+                  return 404.</td>
             </tr>
           </tbody>
         </table>

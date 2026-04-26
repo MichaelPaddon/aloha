@@ -170,6 +170,14 @@ pub enum HandlerConfig {
         root: String,
         index: Option<String>,
     },
+    Scgi {
+        socket: String,
+        root: String,
+        index: Option<String>,
+    },
+    Cgi {
+        root: String,
+    },
 }
 
 // ── Config loading ────────────────────────────────────────────────
@@ -527,7 +535,7 @@ fn parse_location(node: &KdlNode, src: &str, name: &str) -> anyhow::Result<Locat
         .find(|n| {
             matches!(
                 n.name().value(),
-                "static" | "proxy" | "redirect" | "fastcgi"
+                "static" | "proxy" | "redirect" | "fastcgi" | "scgi" | "cgi"
             )
         })
         .ok_or_else(|| {
@@ -704,6 +712,19 @@ fn parse_handler(
                 .with_context(|| format!("{name}:{line}"))?;
             let index = child_str(node, "index");
             Ok(HandlerConfig::FastCgi { socket, root, index })
+        }
+        "scgi" => {
+            let socket = req_child_str(node, "socket")
+                .with_context(|| format!("{name}:{line}"))?;
+            let root = req_child_str(node, "root")
+                .with_context(|| format!("{name}:{line}"))?;
+            let index = child_str(node, "index");
+            Ok(HandlerConfig::Scgi { socket, root, index })
+        }
+        "cgi" => {
+            let root = req_child_str(node, "root")
+                .with_context(|| format!("{name}:{line}"))?;
+            Ok(HandlerConfig::Cgi { root })
         }
         other => bail!(
             "{name}:{line}: unknown handler '{other}' \
@@ -1164,6 +1185,64 @@ mod tests {
             locs[3].handler,
             HandlerConfig::FastCgi { .. }
         ));
+    }
+
+    #[test]
+    fn scgi_handler_parses() {
+        let cfg = Config::parse(
+            r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    scgi {
+                        socket "unix:/run/myapp.sock"
+                        root   "/var/www/html"
+                        index  "index.py"
+                    }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        assert!(matches!(
+            cfg.vhosts[0].locations[0].handler,
+            HandlerConfig::Scgi { .. }
+        ));
+        if let HandlerConfig::Scgi { socket, root, index } =
+            &cfg.vhosts[0].locations[0].handler
+        {
+            assert_eq!(socket, "unix:/run/myapp.sock");
+            assert_eq!(root, "/var/www/html");
+            assert_eq!(index.as_deref(), Some("index.py"));
+        }
+    }
+
+    #[test]
+    fn cgi_handler_parses() {
+        let cfg = Config::parse(
+            r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/cgi-bin/" {
+                    cgi {
+                        root "/usr/lib/cgi-bin"
+                    }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        assert!(matches!(
+            cfg.vhosts[0].locations[0].handler,
+            HandlerConfig::Cgi { .. }
+        ));
+        if let HandlerConfig::Cgi { root } = &cfg.vhosts[0].locations[0].handler {
+            assert_eq!(root, "/usr/lib/cgi-bin");
+        }
     }
 
     #[test]
