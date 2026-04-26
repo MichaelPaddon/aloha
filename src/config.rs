@@ -585,7 +585,6 @@ fn parse_auth_policy(
     Ok(AuthPolicy { allow, deny })
 }
 
-// Parse rule nodes from a `deny { … }` or the top-level `auth { … }` block.
 fn parse_auth_rules(
     node: &KdlNode,
     src: &str,
@@ -607,9 +606,9 @@ fn parse_auth_rules(
     Ok(())
 }
 
-// Parse a single rule node (e.g. `group "admin" "superuser"`) and
-// push one `AuthRule` per argument into `out`.  Multiple arguments
-// expand to multiple OR-combined rules.
+// Multiple arguments on `group` and `user` nodes each become a
+// separate OR rule, so `group "admin" "superuser"` is equivalent
+// to two `group` nodes.
 fn parse_auth_rule_node(
     kind: &str,
     node: &KdlNode,
@@ -635,23 +634,16 @@ fn parse_auth_rule_node(
     Ok(())
 }
 
-// Collect one or more string arguments from a node, erroring if none.
 fn req_arg_strs(
     node: &KdlNode,
     kind: &str,
     line: usize,
     name: &str,
 ) -> anyhow::Result<Vec<String>> {
-    let mut vals = Vec::new();
-    let mut i = 0;
-    while let Some(v) = arg_str(node, i) {
-        vals.push(v);
-        i += 1;
-    }
+    let vals: Vec<String> =
+        (0..).map_while(|i| arg_str(node, i)).collect();
     if vals.is_empty() {
-        bail!(
-            "{name}:{line}: '{kind}' needs at least one argument"
-        );
+        bail!("{name}:{line}: '{kind}' needs at least one argument");
     }
     Ok(vals)
 }

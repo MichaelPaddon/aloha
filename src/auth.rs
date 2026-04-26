@@ -15,24 +15,20 @@ pub enum Principal {
 
 #[derive(Clone, Debug)]
 pub enum AuthRule {
-    // Any authenticated user, regardless of group membership.
     Authenticated,
-    // Principal's username must match exactly.
     User(String),
-    // Principal must be a member of this group.
     Group(String),
 }
 
 /// Outcome of evaluating an `AuthPolicy` against a `Principal`.
 #[derive(Debug, PartialEq)]
 pub enum AuthDecision {
-    /// Access is granted.
     Allow,
-    /// An explicit deny rule matched, or the principal is authenticated
-    /// but does not satisfy any allow rule.  Returns 403.
+    /// Explicit deny rule matched, or authenticated but no allow rule
+    /// satisfied.  Returns 403.
     Deny,
-    /// The request carries no identity.  The client should authenticate
-    /// and retry.  Returns 401.
+    /// Request carries no identity; client should authenticate.
+    /// Returns 401.
     Unauthenticated,
 }
 
@@ -49,9 +45,9 @@ pub struct AuthPolicy {
 impl AuthPolicy {
     pub fn evaluate(&self, principal: &Principal) -> AuthDecision {
         let id = match principal {
-            // No identity present — challenge the client to authenticate.
-            // Deny rules are not checked: anonymous has no identity to
-            // match against user/group/authenticated rules.
+            // Deny rules are not checked for anonymous: there is no
+            // identity to match, and the correct response is a 401
+            // challenge rather than a 403.
             Principal::Anonymous => return AuthDecision::Unauthenticated,
             Principal::Authenticated(id) => id,
         };
@@ -74,18 +70,14 @@ fn rule_matches(rule: &AuthRule, id: &Identity) -> bool {
     }
 }
 
-/// Pluggable authentication mechanism.
-///
-/// Implementations inspect the request (headers, cookies, tokens)
-/// and return the caller's identity.  `AnonymousAuthenticator` is the
-/// default until a real mechanism is configured.
+/// Pluggable authentication mechanism.  `AnonymousAuthenticator` is
+/// the default until a real mechanism is configured.
 #[async_trait]
 pub trait Authenticator: Send + Sync {
     async fn authenticate(&self, req: &Request<Incoming>) -> Principal;
 }
 
-/// Always returns `Principal::Anonymous`.
-/// Replaced by a real implementation once auth config is wired up.
+/// Always anonymous — replaced once a real auth mechanism is wired up.
 pub struct AnonymousAuthenticator;
 
 #[async_trait]
@@ -240,21 +232,18 @@ mod tests {
 
     #[test]
     fn deny_authenticated_blocks_all_logged_in_users() {
-        // "deny authenticated" with no deny-bypassing allow is unusual
-        // but parseable; useful if the allow rules are only for specific
-        // anonymous-visible paths and this test validates the logic.
+        // deny { authenticated } overrides allow rules for all users,
+        // including those that would otherwise match an allow rule.
         let p = auth(
             vec![AuthRule::User("service-account".into())],
             vec![AuthRule::Authenticated],
         );
-        // Everyone who is authenticated gets denied...
         assert_eq!(
             p.evaluate(&Principal::Authenticated(
                 identity("service-account", &[])
             )),
             AuthDecision::Deny
         );
-        // ...and anonymous gets challenged
         assert_eq!(
             p.evaluate(&Principal::Anonymous),
             AuthDecision::Unauthenticated

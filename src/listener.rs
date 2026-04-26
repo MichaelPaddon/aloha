@@ -1,7 +1,9 @@
 use crate::acme::ChallengeMap;
 use crate::auth::{AuthDecision, Authenticator};
 use crate::config::{ListenerConfig, Timeouts};
-use crate::error::{bytes_body, response_401, response_403, response_404, BoxBody};
+use crate::error::{
+    bytes_body, response_401, response_403, response_404, BoxBody,
+};
 use crate::router::Router;
 use arc_swap::ArcSwap;
 use bytes::Bytes;
