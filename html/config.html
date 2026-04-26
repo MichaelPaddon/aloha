@@ -492,6 +492,13 @@
                   Unix group to switch to. Defaults to the primary GID of
                   <code>user</code> from <code>/etc/passwd</code>.</td>
             </tr>
+            <tr>
+              <td>tls</td><td>block</td><td>—</td>
+              <td><span class="badge badge-opt">optional</span>
+                  Global TLS defaults inherited by every TLS listener that
+                  does not supply its own <code>tls</code> block.
+                  See <a href="#tls-options">TLS protocol options</a>.</td>
+            </tr>
           </tbody>
         </table>
       </div>
@@ -601,6 +608,14 @@
     <span class="kw">tcp-proxy</span> {
         <span class="kw">upstream</span>       <span class="str">"db.internal:5432"</span>
         <span class="kw">proxy-protocol</span> <span class="str">"v2"</span>
+    }
+}
+
+<span class="cm">// Plain tunnel without PROXY protocol</span>
+<span class="kw">listener</span> {
+    <span class="kw">bind</span> <span class="str">"[::]:6379"</span>
+    <span class="kw">tcp-proxy</span> {
+        <span class="kw">upstream</span> <span class="str">"cache.internal:6379"</span>
     }
 }</code></pre>
       <div class="table-wrap">
@@ -1056,6 +1071,10 @@
           </tbody>
         </table>
       </div>
+      <p>
+        The script must be executable. A non-zero exit status is logged as
+        a warning; the response is still returned if it parses correctly.
+      </p>
 
       <!-- proxy -->
       <h3 id="handler-proxy">Handler: <code>proxy</code></h3>
@@ -1185,7 +1204,7 @@
       <ul>
         <li><code>text/*</code></li>
         <li><code>application/json</code></li>
-        <li><code>application/javascript</code></li>
+        <li><code>application/javascript</code>, <code>application/ecmascript</code></li>
         <li><code>application/xml</code>, <code>application/xhtml+xml</code></li>
         <li><code>application/wasm</code></li>
         <li><code>application/manifest+json</code></li>
@@ -1246,17 +1265,18 @@ Vary: Accept-Encoding</code></pre>
         }
     }
 
-    <span class="cm">// API reverse-proxy (stub)</span>
+    <span class="cm">// API reverse-proxy</span>
     <span class="kw">location</span> <span class="str">"/api/"</span> {
         <span class="kw">proxy</span> {
             <span class="kw">upstream</span> <span class="str">"http://127.0.0.1:3000"</span>
         }
     }
 
-    <span class="cm">// PHP application via FastCGI (stub)</span>
+    <span class="cm">// PHP application via FastCGI</span>
     <span class="kw">location</span> <span class="str">"/app/"</span> {
         <span class="kw">fastcgi</span> {
             <span class="kw">socket</span> <span class="str">"unix:/run/php/fpm.sock"</span>
+            <span class="kw">root</span>   <span class="str">"/var/www/html"</span>
             <span class="kw">index</span>  <span class="str">"index.php"</span>
         }
     }

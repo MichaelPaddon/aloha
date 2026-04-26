@@ -519,8 +519,8 @@ Brotli is preferred when both are accepted.
 
 Compression is applied to text-based content types:
 `text/*`, `application/json`, `application/javascript`,
-`application/xml`, `application/xhtml+xml`, `application/wasm`,
-`application/manifest+json`, `image/svg+xml`.
+`application/ecmascript`, `application/xml`, `application/xhtml+xml`,
+`application/wasm`, `application/manifest+json`, `image/svg+xml`.
 
 Responses smaller than 1 KB, responses that already carry a
 `Content-Encoding` header, and binary formats (images, video, audio,
@@ -573,6 +573,14 @@ vhost "example.com" {
 
     location "/api/" {
         proxy { upstream "http://127.0.0.1:3000" }
+    }
+
+    location "/app/" {
+        fastcgi {
+            socket "unix:/run/php/fpm.sock"
+            root   "/var/www/html"
+            index  "index.php"
+        }
     }
 
     location "/" {
