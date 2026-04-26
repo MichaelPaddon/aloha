@@ -80,3 +80,72 @@ pub fn response_redirect(to: &str, code: u16) -> HttpResponse {
         .body(bytes_body(Bytes::new()))
         .expect("caller-validated redirect code and URL")
 }
+
+// ── Tests ─────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn response_401_status_and_type() {
+        let r = response_401();
+        assert_eq!(r.status(), 401);
+        assert_eq!(
+            r.headers().get("content-type").unwrap(),
+            "text/html; charset=utf-8"
+        );
+    }
+
+    #[test]
+    fn response_400_status() {
+        assert_eq!(response_400().status(), 400);
+    }
+
+    #[test]
+    fn response_403_status() {
+        assert_eq!(response_403().status(), 403);
+    }
+
+    #[test]
+    fn response_404_status() {
+        assert_eq!(response_404().status(), 404);
+    }
+
+    #[test]
+    fn response_500_status() {
+        assert_eq!(response_500().status(), 500);
+    }
+
+    #[test]
+    fn response_502_status() {
+        assert_eq!(response_502().status(), 502);
+    }
+
+    #[test]
+    fn response_416_status_and_content_range() {
+        let r = response_416(1234);
+        assert_eq!(r.status(), 416);
+        assert_eq!(
+            r.headers().get("content-range").unwrap(),
+            "bytes */1234"
+        );
+    }
+
+    #[test]
+    fn response_redirect_sets_location_and_code() {
+        let r = response_redirect("/new/path", 301);
+        assert_eq!(r.status(), 301);
+        assert_eq!(r.headers().get("location").unwrap(), "/new/path");
+    }
+
+    #[test]
+    fn response_redirect_302() {
+        let r = response_redirect("https://example.com/", 302);
+        assert_eq!(r.status(), 302);
+        assert_eq!(
+            r.headers().get("location").unwrap(),
+            "https://example.com/"
+        );
+    }
+}

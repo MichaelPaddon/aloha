@@ -1,4 +1,4 @@
-use crate::error::{bytes_body, BoxBody, HttpResponse};
+use crate::error::{bytes_body, HttpResponse};
 use bytes::Bytes;
 use http_body_util::BodyExt;
 use hyper::header::{self, HeaderValue};

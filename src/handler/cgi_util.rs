@@ -216,4 +216,148 @@ mod tests {
         assert_eq!(split_host_port("[::1]:9000"), ("[::1]", "9000"));
         assert_eq!(split_host_port("[::1]"), ("[::1]", "80"));
     }
+
+    // ── find_subsequence / find_header_boundary ──────────────────
+
+    #[test]
+    fn find_subsequence_at_start() {
+        assert_eq!(find_subsequence(b"hello world", b"hello"), Some(0));
+    }
+
+    #[test]
+    fn find_subsequence_in_middle() {
+        assert_eq!(find_subsequence(b"hello world", b"world"), Some(6));
+    }
+
+    #[test]
+    fn find_subsequence_absent() {
+        assert_eq!(find_subsequence(b"hello world", b"xyz"), None);
+    }
+
+    #[test]
+    fn find_header_boundary_crlf() {
+        let data = b"Content-Type: text/html\r\n\r\nbody";
+        let (hdrs, body) = find_header_boundary(data).unwrap();
+        assert_eq!(hdrs, b"Content-Type: text/html");
+        assert_eq!(body, b"body");
+    }
+
+    #[test]
+    fn find_header_boundary_lf_only() {
+        let data = b"Content-Type: text/plain\n\nbody";
+        let (hdrs, body) = find_header_boundary(data).unwrap();
+        assert_eq!(hdrs, b"Content-Type: text/plain");
+        assert_eq!(body, b"body");
+    }
+
+    #[test]
+    fn find_header_boundary_prefers_crlf() {
+        // \r\n\r\n appears before \n\n — the CRLF split takes priority.
+        let data = b"A: 1\r\n\r\nB: 2\n\nbody";
+        let (_, body) = find_header_boundary(data).unwrap();
+        assert_eq!(body, b"B: 2\n\nbody");
+    }
+
+    #[test]
+    fn find_header_boundary_missing() {
+        assert!(find_header_boundary(b"no separator here").is_none());
+    }
+
+    // ── build_cgi_env ────────────────────────────────────────────
+
+    fn parts(method: &str, uri: &str, headers: &[(&str, &str)])
+        -> hyper::http::request::Parts
+    {
+        let mut b = hyper::Request::builder()
+            .method(method)
+            .uri(uri);
+        for (k, v) in headers {
+            b = b.header(*k, *v);
+        }
+        let (parts, _) = b.body(()).unwrap().into_parts();
+        parts
+    }
+
+    fn env_map(env: Vec<(String, String)>)
+        -> std::collections::HashMap<String, String>
+    {
+        env.into_iter().collect()
+    }
+
+    #[test]
+    fn build_cgi_env_basic_get() {
+        let p = parts("GET", "/foo/bar", &[("host", "example.com")]);
+        let m = env_map(build_cgi_env(&p, "/var/www", "/", &None, b""));
+        assert_eq!(m["REQUEST_METHOD"], "GET");
+        assert_eq!(m["SCRIPT_NAME"],    "/foo/bar");
+        assert_eq!(m["SCRIPT_FILENAME"], "/var/www/foo/bar");
+        assert_eq!(m["QUERY_STRING"],   "");
+        assert_eq!(m["REQUEST_URI"],    "/foo/bar");
+        assert_eq!(m["SERVER_NAME"],    "example.com");
+        assert_eq!(m["SERVER_PORT"],    "80");
+        assert_eq!(m["GATEWAY_INTERFACE"], "CGI/1.1");
+    }
+
+    #[test]
+    fn build_cgi_env_query_string() {
+        let p = parts("GET", "/search?q=hello&page=2",
+                       &[("host", "example.com")]);
+        let m = env_map(build_cgi_env(&p, "/var/www", "/", &None, b""));
+        assert_eq!(m["QUERY_STRING"], "q=hello&page=2");
+        assert_eq!(m["REQUEST_URI"],  "/search?q=hello&page=2");
+    }
+
+    #[test]
+    fn build_cgi_env_directory_with_index() {
+        let p = parts("GET", "/blog/", &[("host", "example.com")]);
+        let m = env_map(build_cgi_env(
+            &p, "/var/www", "/", &Some("index.php".into()), b"",
+        ));
+        assert_eq!(m["SCRIPT_NAME"],    "/blog/index.php");
+        assert_eq!(m["SCRIPT_FILENAME"], "/var/www/blog/index.php");
+    }
+
+    #[test]
+    fn build_cgi_env_directory_without_index() {
+        let p = parts("GET", "/blog/", &[("host", "example.com")]);
+        let m = env_map(build_cgi_env(&p, "/var/www", "/", &None, b""));
+        assert_eq!(m["SCRIPT_NAME"], "/blog/");
+    }
+
+    #[test]
+    fn build_cgi_env_http_headers_translated() {
+        let p = parts("GET", "/", &[
+            ("host",           "example.com"),
+            ("accept",         "text/html"),
+            ("x-custom-thing", "foobar"),
+        ]);
+        let m = env_map(build_cgi_env(&p, "/var/www", "/", &None, b""));
+        assert_eq!(m["HTTP_ACCEPT"],        "text/html");
+        assert_eq!(m["HTTP_X_CUSTOM_THING"], "foobar");
+    }
+
+    #[test]
+    fn build_cgi_env_content_length_is_actual_body_size() {
+        // Header says 999 but the real body is 2 bytes.
+        // CONTENT_LENGTH must reflect the actual body.
+        let p = parts("POST", "/submit", &[
+            ("host",           "example.com"),
+            ("content-type",   "application/json"),
+            ("content-length", "999"),
+        ]);
+        let m = env_map(build_cgi_env(&p, "/var/www", "/", &None, b"{}"));
+        assert_eq!(m["CONTENT_TYPE"],   "application/json");
+        assert_eq!(m["CONTENT_LENGTH"], "2");
+        // content-type and content-length must not appear as HTTP_* vars
+        assert!(!m.contains_key("HTTP_CONTENT_TYPE"));
+        assert!(!m.contains_key("HTTP_CONTENT_LENGTH"));
+    }
+
+    #[test]
+    fn build_cgi_env_ipv6_host() {
+        let p = parts("GET", "/", &[("host", "[::1]:8080")]);
+        let m = env_map(build_cgi_env(&p, "/var/www", "/", &None, b""));
+        assert_eq!(m["SERVER_NAME"], "[::1]");
+        assert_eq!(m["SERVER_PORT"], "8080");
+    }
 }

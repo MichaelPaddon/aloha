@@ -205,3 +205,89 @@ pub fn load_cert_and_key(
 
     Ok((cert_chain, key))
 }
+
+// ── Tests ─────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::TlsVersion;
+
+    fn install_provider() {
+        rustls::crypto::aws_lc_rs::default_provider()
+            .install_default()
+            .ok();
+    }
+
+    // ── name_to_cipher_suite ─────────────────────────────────────
+
+    #[test]
+    fn known_tls13_cipher_names_parse() {
+        for name in &[
+            "TLS13_AES_256_GCM_SHA384",
+            "TLS13_AES_128_GCM_SHA256",
+            "TLS13_CHACHA20_POLY1305_SHA256",
+        ] {
+            assert!(
+                name_to_cipher_suite(name).is_ok(),
+                "{name} should parse"
+            );
+        }
+    }
+
+    #[test]
+    fn known_tls12_cipher_names_parse() {
+        for name in &[
+            "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
+            "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+            "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+            "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+            "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256",
+        ] {
+            assert!(
+                name_to_cipher_suite(name).is_ok(),
+                "{name} should parse"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_cipher_name_is_error() {
+        assert!(name_to_cipher_suite("RC4_MD5").is_err());
+        assert!(name_to_cipher_suite("").is_err());
+    }
+
+    // ── protocol_versions ────────────────────────────────────────
+
+    #[test]
+    fn no_min_version_includes_tls12_and_tls13() {
+        let versions = protocol_versions(None);
+        assert_eq!(versions.len(), 2);
+    }
+
+    #[test]
+    fn min_tls12_includes_both_versions() {
+        let versions = protocol_versions(Some(TlsVersion::Tls12));
+        assert_eq!(versions.len(), 2);
+    }
+
+    #[test]
+    fn min_tls13_includes_only_tls13() {
+        let versions = protocol_versions(Some(TlsVersion::Tls13));
+        assert_eq!(versions.len(), 1);
+        assert_eq!(
+            versions[0].version,
+            rustls::ProtocolVersion::TLSv1_3
+        );
+    }
+
+    // ── build_self_signed ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn self_signed_acceptor_builds_without_error() {
+        install_provider();
+        let opts = TlsOptions::default();
+        let result = build_self_signed(&opts);
+        assert!(result.is_ok());
+    }
+}

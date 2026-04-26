@@ -301,4 +301,85 @@ mod tests {
             b"Content-Type: text/plain\r\n\r\nbody"
         );
     }
+
+    #[test]
+    fn parse_fcgi_stdout_stops_at_end_request() {
+        // Data after FCGI_END_REQUEST must be ignored.
+        let mut data = build_record(FCGI_STDOUT, b"before");
+        data.extend(build_record(FCGI_END_REQUEST, &[0u8; 8]));
+        data.extend(build_record(FCGI_STDOUT, b"after"));
+        assert_eq!(parse_fcgi_stdout(&data).unwrap(), b"before");
+    }
+
+    #[test]
+    fn parse_fcgi_stdout_unknown_type_is_skipped() {
+        let mut data = build_record(99, b"ignored");
+        data.extend(build_record(FCGI_STDOUT, b"kept"));
+        data.extend(build_record(FCGI_END_REQUEST, &[0u8; 8]));
+        assert_eq!(parse_fcgi_stdout(&data).unwrap(), b"kept");
+    }
+
+    #[test]
+    fn parse_fcgi_stdout_truncated_record_is_error() {
+        // A record that claims more content than we have.
+        let mut bad = build_record(FCGI_STDOUT, b"hello");
+        bad.truncate(bad.len() - 3); // chop off end of content
+        assert!(parse_fcgi_stdout(&bad).is_err());
+    }
+
+    #[test]
+    fn encode_length_short_uses_one_byte() {
+        let mut buf = Vec::new();
+        encode_length(&mut buf, 0);
+        assert_eq!(buf, &[0]);
+        buf.clear();
+        encode_length(&mut buf, 127);
+        assert_eq!(buf, &[127]);
+    }
+
+    #[test]
+    fn encode_length_long_uses_four_bytes_with_high_bit() {
+        let mut buf = Vec::new();
+        encode_length(&mut buf, 128);
+        assert_eq!(buf.len(), 4);
+        assert_ne!(buf[0] & 0x80, 0, "high bit must be set");
+        let val = u32::from_be_bytes([
+            buf[0] & 0x7f, buf[1], buf[2], buf[3],
+        ]);
+        assert_eq!(val, 128);
+    }
+
+    #[test]
+    fn build_fcgi_request_begins_with_begin_request_record() {
+        let req = build_fcgi_request(&[], b"");
+        assert_eq!(req[0], FCGI_VERSION);
+        assert_eq!(req[1], FCGI_BEGIN_REQUEST);
+    }
+
+    #[test]
+    fn build_fcgi_request_record_sequence() {
+        // Collect record types in order.
+        let req = build_fcgi_request(&[("K".into(), "V".into())], b"body");
+        let types = record_types(&req);
+        // BEGIN, PARAMS(data), PARAMS(empty), STDIN(data), STDIN(empty)
+        assert_eq!(types[0], FCGI_BEGIN_REQUEST);
+        assert_eq!(types[1], FCGI_PARAMS);
+        assert_eq!(types[2], FCGI_PARAMS); // empty terminator
+        assert_eq!(types[3], FCGI_STDIN);
+        assert_eq!(types[4], FCGI_STDIN);  // empty terminator
+    }
+
+    // Extract record type bytes from a raw FastCGI byte stream.
+    fn record_types(data: &[u8]) -> Vec<u8> {
+        let mut types = Vec::new();
+        let mut pos = 0;
+        while pos + 8 <= data.len() {
+            types.push(data[pos + 1]);
+            let content_len =
+                u16::from_be_bytes([data[pos + 4], data[pos + 5]]) as usize;
+            let padding_len = data[pos + 6] as usize;
+            pos += 8 + content_len + padding_len;
+        }
+        types
+    }
 }
