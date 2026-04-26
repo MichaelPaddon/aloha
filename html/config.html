@@ -988,11 +988,12 @@
       </div>
 
       <!-- fastcgi -->
-      <h3 id="handler-fastcgi">Handler: <code>fastcgi</code> <span class="badge badge-stub">stub</span></h3>
-      <p>Forwards requests to a FastCGI process. Not yet implemented — returns 502.</p>
-<pre><code><span class="kw">location</span> <span class="str">"/php/"</span> {
+      <h3 id="handler-fastcgi">Handler: <code>fastcgi</code></h3>
+      <p>Forwards requests to a FastCGI application server such as PHP-FPM.</p>
+<pre><code><span class="kw">location</span> <span class="str">"/"</span> {
     <span class="kw">fastcgi</span> {
         <span class="kw">socket</span> <span class="str">"unix:/run/php/fpm.sock"</span>
+        <span class="kw">root</span>   <span class="str">"/var/www/html"</span>
         <span class="kw">index</span>  <span class="str">"index.php"</span>
     }
 }</code></pre>
@@ -1008,14 +1009,29 @@
                   <code>tcp:host:port</code> for TCP.</td>
             </tr>
             <tr>
+              <td>root</td><td>path</td><td>—</td>
+              <td><span class="badge badge-req">required</span>
+                  Document root. Combined with the request path to set
+                  <code>SCRIPT_FILENAME</code>.</td>
+            </tr>
+            <tr>
               <td>index</td><td>string</td><td>—</td>
               <td><span class="badge badge-opt">optional</span>
-                  Default script name for directory requests,
+                  Default script appended to directory requests
+                  (paths ending in <code>/</code>),
                   e.g. <code>"index.php"</code>.</td>
             </tr>
           </tbody>
         </table>
       </div>
+      <p>
+        aloha opens a new connection per request (no pooling). The full
+        CGI/1.1 environment is sent, including <code>REQUEST_METHOD</code>,
+        <code>QUERY_STRING</code>, <code>CONTENT_TYPE</code>,
+        <code>CONTENT_LENGTH</code>, and all <code>HTTP_*</code> headers.
+        <code>REMOTE_ADDR</code> is set to <code>0.0.0.0</code>; use
+        <code>X-Forwarded-For</code> in a proxy deployment.
+      </p>
     </section>
 
     <hr class="divider">

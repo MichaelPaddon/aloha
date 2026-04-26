@@ -39,17 +39,19 @@ impl Handler {
                     code: *code,
                 })
             }
-            HandlerConfig::FastCgi { socket, index } => {
-                Ok(Handler::FastCgi(
-                    fcgi::FcgiHandler::new(socket, index.clone()),
-                ))
+            HandlerConfig::FastCgi { socket, root, index } => {
+                Ok(Handler::FastCgi(fcgi::FcgiHandler::new(
+                    socket,
+                    root,
+                    index.clone(),
+                )))
             }
         }
     }
 
     pub async fn serve(
         &self,
-        req: &Request<Incoming>,
+        req: Request<Incoming>,
         matched_prefix: &str,
     ) -> HttpResponse {
         match self {

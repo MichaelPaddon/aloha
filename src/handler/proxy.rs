@@ -15,7 +15,7 @@ impl ProxyHandler {
 
     pub async fn serve(
         &self,
-        _req: &Request<Incoming>,
+        _req: Request<Incoming>,
         _prefix: &str,
     ) -> HttpResponse {
         response_502()

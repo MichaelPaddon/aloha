@@ -103,9 +103,11 @@ impl hyper::service::Service<Request<Incoming>> for AlohaService {
                                 }
                             }
                         }
+                        // Routing and auth use a shared ref; the handler
+                        // takes ownership so it can consume the body.
                         route
                             .handler
-                            .serve(&req, &route.matched_prefix)
+                            .serve(req, &route.matched_prefix)
                             .await
                     }
                     None => response_404(),

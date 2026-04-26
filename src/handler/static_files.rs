@@ -36,7 +36,7 @@ impl StaticHandler {
 
     pub async fn serve(
         &self,
-        req: &Request<Incoming>,
+        req: Request<Incoming>,
         matched_prefix: &str,
     ) -> HttpResponse {
         let uri_path = req.uri().path();
@@ -98,7 +98,7 @@ impl StaticHandler {
         };
 
         let etag = compute_etag(&metadata);
-        if is_not_modified(req, &etag) {
+        if is_not_modified(&req, &etag) {
             return Response::builder()
                 .status(StatusCode::NOT_MODIFIED)
                 .header("ETag", &etag)
@@ -112,7 +112,7 @@ impl StaticHandler {
             .unwrap_or("application/octet-stream");
 
         // Parse an optional Range header and build the response.
-        match parse_range_header(req, file_len) {
+        match parse_range_header(&req, file_len) {
             // Syntactically valid range that fits within the file.
             Some(Ok((start, end))) => {
                 let mut file = match File::open(&target).await {

@@ -382,14 +382,15 @@ location "/old/" {
 | `to`   | URL or path   | —       | **Required.** Destination written to the `Location` header. |
 | `code` | integer       | `301`   | HTTP status code: `301` (permanent) or `302` (temporary). |
 
-### Handler: `fastcgi` *(stub)*
+### Handler: `fastcgi`
 
-Forwards requests to a FastCGI process. Not yet implemented — returns 502.
+Forwards requests to a FastCGI application server such as PHP-FPM.
 
 ```kdl
-location "/php/" {
+location "/" {
     fastcgi {
         socket "unix:/run/php/fpm.sock"
+        root   "/var/www/html"
         index  "index.php"
     }
 }
@@ -397,8 +398,14 @@ location "/php/" {
 
 | Child node | Type   | Default | Description |
 |---|---|---|---|
-| `socket` | string | —       | **Required.** FastCGI socket: `unix:/path` or `tcp:host:port`. |
-| `index`  | string | —       | Default script name for directory requests, e.g. `"index.php"`. |
+| `socket` | string | —       | **Required.** FastCGI socket: `unix:/path` for a Unix domain socket or `tcp:host:port` for TCP. |
+| `root`   | path   | —       | **Required.** Document root; combined with the request path to build `SCRIPT_FILENAME`. |
+| `index`  | string | —       | Default script appended to directory requests (paths ending in `/`), e.g. `"index.php"`. |
+
+aloha opens a new connection per request (no pooling). The full CGI/1.1
+environment is sent, including `REQUEST_METHOD`, `QUERY_STRING`,
+`CONTENT_TYPE`, `CONTENT_LENGTH`, and `HTTP_*` headers. `REMOTE_ADDR`
+is set to `0.0.0.0`; use `X-Forwarded-For` in a proxy deployment.
 
 ---
 

@@ -167,6 +167,7 @@ pub enum HandlerConfig {
     },
     FastCgi {
         socket: String,
+        root: String,
         index: Option<String>,
     },
 }
@@ -699,8 +700,10 @@ fn parse_handler(
         "fastcgi" => {
             let socket = req_child_str(node, "socket")
                 .with_context(|| format!("{name}:{line}"))?;
+            let root = req_child_str(node, "root")
+                .with_context(|| format!("{name}:{line}"))?;
             let index = child_str(node, "index");
-            Ok(HandlerConfig::FastCgi { socket, index })
+            Ok(HandlerConfig::FastCgi { socket, root, index })
         }
         other => bail!(
             "{name}:{line}: unknown handler '{other}' \
@@ -1141,7 +1144,10 @@ mod tests {
                     }
                 }
                 location "/php/" {
-                    fastcgi { socket "unix:/run/php/fpm.sock"; }
+                    fastcgi {
+                        socket "unix:/run/php/fpm.sock"
+                        root "/var/www/html"
+                    }
                 }
             }
             "#,
