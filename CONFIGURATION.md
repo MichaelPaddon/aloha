@@ -108,6 +108,40 @@ listener {
 | `fd`            | integer           | —             | Adopt an already-open file descriptor as the listening socket (systemd socket activation). Mutually exclusive with `bind`. |
 | `default-vhost` | string \| `null`  | first vhost   | Vhost used when no `Host` header matches. Omit to fall back to the first vhost defined in the config. Set to `null` to return 404 for unrecognised hosts. |
 
+### `tcp-proxy` child node
+
+Add a `tcp-proxy` child to make the listener forward raw TCP bytes to an
+upstream address instead of speaking HTTP. All HTTP processing (virtual
+hosts, handlers, auth, TLS termination) is bypassed.
+
+```kdl
+// Plain TCP tunnel to a PostgreSQL backend
+listener {
+    bind "[::]:5432"
+    tcp-proxy {
+        upstream     "db.internal:5432"
+        proxy-protocol "v2"
+    }
+}
+
+// Plain tunnel without PROXY protocol
+listener {
+    bind "[::]:6379"
+    tcp-proxy {
+        upstream "cache.internal:6379"
+    }
+}
+```
+
+| Child node | Type | Default | Description |
+|---|---|---|---|
+| `upstream` | `"host:port"` | — | **Required.** Address to forward connections to. |
+| `proxy-protocol` | `"v1"` \| `"v2"` | — | Send a HAProxy PROXY protocol header to the upstream so it can see the real client IP. `"v1"` is text; `"v2"` is binary and preferred. |
+
+A listener with `tcp-proxy` cannot also have `tls`. It does not need
+any `vhost` blocks — a config consisting entirely of `tcp-proxy` listeners
+is valid with no `vhost` at all.
+
 ### `timeouts` child node
 
 Optional connection and request timeout settings. All values are whole seconds.

@@ -1,6 +1,7 @@
 use crate::acme::ChallengeMap;
 use crate::auth::{AuthDecision, Authenticator};
-use crate::config::{ListenerConfig, Timeouts};
+use crate::config::{ListenerConfig, TcpProxyConfig, Timeouts};
+use crate::proxy_proto;
 use crate::error::{
     bytes_body, response_401, response_403, response_404, BoxBody,
 };
@@ -371,6 +372,97 @@ async fn serve_connection<I>(
             }
         }
     }
+}
+
+// ── TCP proxy listener ────────────────────────────────────────────
+
+pub async fn run_tcp_proxy(
+    cfg: ListenerConfig,
+    proxy: TcpProxyConfig,
+    listener: TcpListener,
+    mut shutdown: watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    let name = cfg.local_name();
+    let local_addr = listener.local_addr().ok();
+    tracing::info!(
+        bind = %name,
+        upstream = %proxy.upstream,
+        "listening (TCP proxy)"
+    );
+    let mut connections: JoinSet<()> = JoinSet::new();
+
+    loop {
+        tokio::select! {
+            accept = listener.accept() => {
+                match accept {
+                    Ok((stream, peer_addr)) => {
+                        let upstream = proxy.upstream.clone();
+                        let proto = proxy.proxy_protocol;
+                        let conn_shutdown = shutdown.clone();
+                        connections.spawn(async move {
+                            if let Err(e) = tcp_proxy_connection(
+                                stream, peer_addr, local_addr,
+                                &upstream, proto, conn_shutdown,
+                            )
+                            .await
+                            {
+                                debug!(%peer_addr, "tcp proxy: {e}");
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        tracing::error!(bind = %name, "accept error: {e}");
+                    }
+                }
+            }
+            Some(_) = connections.join_next(),
+                if !connections.is_empty() => {}
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() { break; }
+            }
+        }
+    }
+
+    drain_connections(&name, connections).await;
+    Ok(())
+}
+
+async fn tcp_proxy_connection(
+    mut client: tokio::net::TcpStream,
+    peer_addr: SocketAddr,
+    local_addr: Option<SocketAddr>,
+    upstream: &str,
+    proxy_protocol: Option<crate::config::ProxyProtocolVersion>,
+    mut shutdown: watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    if *shutdown.borrow() {
+        return Ok(());
+    }
+
+    let mut backend = tokio::net::TcpStream::connect(upstream).await?;
+
+    if let Some(version) = proxy_protocol {
+        // Use the listener's local address as the "destination" in the
+        // PROXY header.  Fall back to 0.0.0.0:0 / [::]:0 if unavailable.
+        let dst = local_addr.unwrap_or_else(|| {
+            use std::net::{Ipv4Addr, IpAddr};
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)
+        });
+        let header = proxy_proto::build_header(version, peer_addr, dst);
+        use tokio::io::AsyncWriteExt;
+        backend.write_all(&header).await?;
+    }
+
+    tokio::select! {
+        result = tokio::io::copy_bidirectional(&mut client, &mut backend) => {
+            result?;
+        }
+        _ = shutdown.changed() => {
+            // Shutdown signalled; let OS close the sockets.
+        }
+    }
+
+    Ok(())
 }
 
 // Wait for all in-flight connections to finish, with a hard timeout.

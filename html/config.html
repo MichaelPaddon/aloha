@@ -369,6 +369,7 @@
         </ul>
         <li><a href="#listener">listener</a></li>
         <ul class="nav-list sub">
+          <li><a href="#tcp-proxy">tcp-proxy</a></li>
           <li><a href="#timeouts">timeouts</a></li>
           <li><a href="#tls">tls</a></li>
           <li><a href="#tls-acme">acme mode</a></li>
@@ -565,6 +566,45 @@
                   Set to <code>null</code> to return 404 for unrecognised hosts.
                   Must reference a <code>vhost</code> primary name or alias
                   (including <code>~</code>-prefixed regex names).</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3 id="tcp-proxy"><code>tcp-proxy</code> child node</h3>
+      <p>
+        Add a <code>tcp-proxy</code> child to make the listener forward
+        raw TCP bytes to an upstream address instead of speaking HTTP.
+        Virtual hosts, handlers, auth, and TLS termination are all bypassed.
+        A listener with <code>tcp-proxy</code> cannot also have
+        <code>tls</code>.
+      </p>
+<pre><code><span class="cm">// Tunnel PostgreSQL with PROXY protocol v2</span>
+<span class="kw">listener</span> {
+    <span class="kw">bind</span>          <span class="str">"[::]:5432"</span>
+    <span class="kw">tcp-proxy</span> {
+        <span class="kw">upstream</span>      <span class="str">"db.internal:5432"</span>
+        <span class="kw">proxy-protocol</span> <span class="str">"v2"</span>
+    }
+}</code></pre>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Child node</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>upstream</td><td>string</td><td>—</td>
+              <td><span class="badge badge-req">required</span>
+                  Upstream address in <code>"host:port"</code> form.</td>
+            </tr>
+            <tr>
+              <td>proxy-protocol</td>
+              <td><code>"v1"</code> | <code>"v2"</code></td><td>—</td>
+              <td><span class="badge badge-opt">optional</span>
+                  Prepend a HAProxy PROXY protocol header so the upstream
+                  sees the real client IP.
+                  <code>"v1"</code> is human-readable text;
+                  <code>"v2"</code> is binary and preferred for new
+                  deployments.</td>
             </tr>
           </tbody>
         </table>

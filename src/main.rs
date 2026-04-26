@@ -6,6 +6,7 @@ mod handler;
 mod listener;
 #[cfg(unix)]
 mod privdrop;
+mod proxy_proto;
 mod router;
 mod tls;
 
@@ -119,11 +120,34 @@ async fn main() -> anyhow::Result<()> {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let mut handles: JoinSet<()> = JoinSet::new();
 
-    // Split pre-bound sockets into plain-HTTP and TLS groups.
-    let (plain_bound, tls_bound): (Vec<_>, Vec<_>) =
-        bound.into_iter().partition(|(cfg, _)| cfg.tls.is_none());
+    // Split pre-bound sockets into three groups.
+    let mut tcp_proxy_bound = Vec::new();
+    let mut plain_bound = Vec::new();
+    let mut tls_bound = Vec::new();
+    for (cfg, socket) in bound {
+        if cfg.tcp_proxy.is_some() {
+            tcp_proxy_bound.push((cfg, socket));
+        } else if cfg.tls.is_some() {
+            tls_bound.push((cfg, socket));
+        } else {
+            plain_bound.push((cfg, socket));
+        }
+    }
 
-    // Phase 2: spawn plain HTTP listeners first so that ACME HTTP-01
+    // Phase 2a: TCP proxy listeners (no HTTP processing, no ACME dependency).
+    for (cfg, socket) in tcp_proxy_bound {
+        let proxy = cfg.tcp_proxy.clone().unwrap();
+        let rx = shutdown_rx.clone();
+        handles.spawn(async move {
+            if let Err(e) =
+                listener::run_tcp_proxy(cfg, proxy, socket, rx).await
+            {
+                tracing::error!("TCP proxy error: {e:#}");
+            }
+        });
+    }
+
+    // Phase 2b: plain HTTP listeners first so that ACME HTTP-01
     // challenge requests can be served before we start ACME flows.
     for (cfg, socket) in plain_bound {
         let state = state.clone();

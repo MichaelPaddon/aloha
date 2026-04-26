@@ -44,6 +44,21 @@ pub struct Timeouts {
     pub keepalive_secs: Option<u64>,
 }
 
+/// Which version of the HAProxy PROXY protocol to prepend.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ProxyProtocolVersion { V1, V2 }
+
+/// TCP-proxy mode: forward raw bytes to an upstream address.
+/// When present on a listener, HTTP processing is bypassed entirely.
+#[derive(Debug, Clone)]
+pub struct TcpProxyConfig {
+    /// Upstream address, e.g. `"db.internal:5432"`.
+    pub upstream: String,
+    /// Prepend a PROXY protocol header so the backend sees the real
+    /// client IP even though it only sees aloha's connection.
+    pub proxy_protocol: Option<ProxyProtocolVersion>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ListenerConfig {
     // Exactly one of bind or fd must be set (enforced by validate).
@@ -53,6 +68,8 @@ pub struct ListenerConfig {
     pub tls: Option<TlsListenerConfig>,
     pub default_vhost: Option<String>,
     pub timeouts: Timeouts,
+    // When set, the listener forwards raw TCP instead of speaking HTTP.
+    pub tcp_proxy: Option<TcpProxyConfig>,
 }
 
 impl ListenerConfig {
@@ -250,10 +267,14 @@ impl Config {
             }
         }
         // Resolve: absent → first vhost name, null → None, named → Some(s).
+        // tcp-proxy listeners bypass HTTP entirely; leave default_vhost = None.
         let first = config.vhosts.first().map(|v| v.name.clone());
         for (listener, raw) in
             config.listeners.iter_mut().zip(raw_defaults)
         {
+            if listener.tcp_proxy.is_some() {
+                continue;
+            }
             listener.default_vhost = match raw {
                 None             => first.clone(),
                 Some(None)       => None,
@@ -268,7 +289,10 @@ impl Config {
         if self.listeners.is_empty() {
             bail!("config must define at least one listener");
         }
-        if self.vhosts.is_empty() {
+        // Vhosts are only required when at least one listener speaks HTTP.
+        let has_http_listener = self.listeners.iter()
+            .any(|l| l.tcp_proxy.is_none());
+        if has_http_listener && self.vhosts.is_empty() {
             bail!("config must define at least one vhost");
         }
         // Verify each listener has exactly one socket source.
@@ -282,6 +306,15 @@ impl Config {
                 (None, None) => bail!(
                     "listener[{i}] needs either 'bind' or 'fd'"
                 ),
+            }
+        }
+        // tcp-proxy and tls are mutually exclusive on a single listener.
+        for (i, l) in self.listeners.iter().enumerate() {
+            if l.tcp_proxy.is_some() && l.tls.is_some() {
+                bail!(
+                    "listener[{i}] cannot have both 'tcp-proxy' and 'tls'; \
+                     TLS termination with TCP proxying is not yet supported"
+                );
             }
         }
         // ACME mode requires a state_dir for cert/account storage.
@@ -391,12 +424,38 @@ fn parse_listener(
         .find(|n| n.name().value() == "timeouts")
         .map(parse_timeouts)
         .unwrap_or_default();
+    let tcp_proxy = children
+        .iter()
+        .find(|n| n.name().value() == "tcp-proxy")
+        .map(|n| parse_tcp_proxy(n, src, name))
+        .transpose()?;
     // bind/fd mutual-exclusion is checked in Config::validate.
     // default_vhost is resolved later in Config::parse.
     Ok((
-        ListenerConfig { bind, fd, tls, default_vhost: None, timeouts },
+        ListenerConfig { bind, fd, tls, default_vhost: None, timeouts, tcp_proxy },
         raw_default_vhost,
     ))
+}
+
+fn parse_tcp_proxy(
+    node: &KdlNode,
+    src: &str,
+    name: &str,
+) -> anyhow::Result<TcpProxyConfig> {
+    let line = node_line(src, node);
+    let upstream = req_child_str(node, "upstream")
+        .with_context(|| format!("{name}:{line}"))?;
+    let proxy_protocol = child_str(node, "proxy-protocol")
+        .map(|v| match v.as_str() {
+            "v1" | "1" => Ok(ProxyProtocolVersion::V1),
+            "v2" | "2" => Ok(ProxyProtocolVersion::V2),
+            other => bail!(
+                "{name}:{line}: unknown proxy-protocol '{other}'; \
+                 expected 'v1' or 'v2'"
+            ),
+        })
+        .transpose()?;
+    Ok(TcpProxyConfig { upstream, proxy_protocol })
 }
 
 fn parse_timeouts(node: &KdlNode) -> Timeouts {
@@ -1188,6 +1247,115 @@ mod tests {
             locs[3].handler,
             HandlerConfig::FastCgi { .. }
         ));
+    }
+
+    // ── tcp-proxy ─────────────────────────────────────────────────
+
+    #[test]
+    fn tcp_proxy_parses() {
+        let cfg = Config::parse(
+            r#"
+            listener {
+                bind "[::]:5432"
+                tcp-proxy {
+                    upstream "db.internal:5432"
+                    proxy-protocol "v2"
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        let proxy = cfg.listeners[0].tcp_proxy.as_ref().unwrap();
+        assert_eq!(proxy.upstream, "db.internal:5432");
+        assert_eq!(
+            proxy.proxy_protocol,
+            Some(ProxyProtocolVersion::V2)
+        );
+    }
+
+    #[test]
+    fn tcp_proxy_without_proxy_protocol() {
+        let cfg = Config::parse(
+            r#"
+            listener {
+                bind "[::]:3306"
+                tcp-proxy {
+                    upstream "db.internal:3306"
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        let proxy = cfg.listeners[0].tcp_proxy.as_ref().unwrap();
+        assert!(proxy.proxy_protocol.is_none());
+    }
+
+    #[test]
+    fn tcp_proxy_v1_parses() {
+        let cfg = Config::parse(
+            r#"
+            listener {
+                bind "[::]:80"
+                tcp-proxy {
+                    upstream "backend:80"
+                    proxy-protocol "v1"
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        let proxy = cfg.listeners[0].tcp_proxy.as_ref().unwrap();
+        assert_eq!(proxy.proxy_protocol, Some(ProxyProtocolVersion::V1));
+    }
+
+    #[test]
+    fn tcp_proxy_and_tls_is_error() {
+        let result = Config::parse(
+            r#"
+            listener {
+                bind "[::]:443"
+                tls
+                tcp-proxy {
+                    upstream "backend:443"
+                }
+            }
+            "#,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn tcp_proxy_only_config_needs_no_vhost() {
+        let cfg = Config::parse(
+            r#"
+            listener {
+                bind "[::]:5432"
+                tcp-proxy {
+                    upstream "db.internal:5432"
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        assert!(cfg.vhosts.is_empty());
+        assert!(cfg.listeners[0].tcp_proxy.is_some());
+    }
+
+    #[test]
+    fn tcp_proxy_default_vhost_stays_none() {
+        let cfg = Config::parse(
+            r#"
+            listener {
+                bind "[::]:5432"
+                tcp-proxy {
+                    upstream "db.internal:5432"
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        // tcp-proxy listeners bypass HTTP; default_vhost should be None.
+        assert!(cfg.listeners[0].default_vhost.is_none());
     }
 
     #[test]
