@@ -575,15 +575,30 @@
       <p>
         Add a <code>tcp-proxy</code> child to make the listener forward
         raw TCP bytes to an upstream address instead of speaking HTTP.
-        Virtual hosts, handlers, auth, and TLS termination are all bypassed.
-        A listener with <code>tcp-proxy</code> cannot also have
-        <code>tls</code>.
+        Virtual hosts, handlers, and auth are all bypassed.
       </p>
-<pre><code><span class="cm">// Tunnel PostgreSQL with PROXY protocol v2</span>
+      <p>
+        Combine with a <code>tls</code> node to <strong>terminate TLS</strong>
+        before forwarding — aloha decrypts the connection and then sends
+        the plaintext stream to the upstream. This lets backend services
+        (databases, message brokers, etc.) receive unencrypted traffic
+        while clients connect over TLS.
+      </p>
+<pre><code><span class="cm">// Plain TCP tunnel to PostgreSQL with PROXY protocol v2</span>
 <span class="kw">listener</span> {
     <span class="kw">bind</span>          <span class="str">"[::]:5432"</span>
     <span class="kw">tcp-proxy</span> {
         <span class="kw">upstream</span>      <span class="str">"db.internal:5432"</span>
+        <span class="kw">proxy-protocol</span> <span class="str">"v2"</span>
+    }
+}
+
+<span class="cm">// TLS-terminating tunnel — clients connect over TLS, backend gets plaintext</span>
+<span class="kw">listener</span> {
+    <span class="kw">bind</span>          <span class="str">"[::]:5433"</span>
+    <span class="kw">tls</span> <span class="str">"self-signed"</span>
+    <span class="kw">tcp-proxy</span> {
+        <span class="kw">upstream</span>       <span class="str">"db.internal:5432"</span>
         <span class="kw">proxy-protocol</span> <span class="str">"v2"</span>
     }
 }</code></pre>

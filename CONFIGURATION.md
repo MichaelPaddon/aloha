@@ -112,7 +112,12 @@ listener {
 
 Add a `tcp-proxy` child to make the listener forward raw TCP bytes to an
 upstream address instead of speaking HTTP. All HTTP processing (virtual
-hosts, handlers, auth, TLS termination) is bypassed.
+hosts, handlers, auth) is bypassed.
+
+Combine with a `tls` node to terminate TLS before forwarding — aloha
+decrypts the connection, then forwards the plaintext stream to the
+upstream. This lets backend services (databases, message brokers, etc.)
+receive unencrypted traffic while clients connect over TLS.
 
 ```kdl
 // Plain TCP tunnel to a PostgreSQL backend
@@ -120,6 +125,17 @@ listener {
     bind "[::]:5432"
     tcp-proxy {
         upstream     "db.internal:5432"
+        proxy-protocol "v2"
+    }
+}
+
+// TLS-terminating tunnel — clients connect over TLS, backend gets
+// plaintext. Pair with proxy-protocol so the backend sees real IPs.
+listener {
+    bind "[::]:5433"
+    tls "self-signed"
+    tcp-proxy {
+        upstream       "db.internal:5432"
         proxy-protocol "v2"
     }
 }
@@ -138,9 +154,9 @@ listener {
 | `upstream` | `"host:port"` | — | **Required.** Address to forward connections to. |
 | `proxy-protocol` | `"v1"` \| `"v2"` | — | Send a HAProxy PROXY protocol header to the upstream so it can see the real client IP. `"v1"` is text; `"v2"` is binary and preferred. |
 
-A listener with `tcp-proxy` cannot also have `tls`. It does not need
-any `vhost` blocks — a config consisting entirely of `tcp-proxy` listeners
-is valid with no `vhost` at all.
+`tcp-proxy` listeners do not need any `vhost` blocks — a config
+consisting entirely of `tcp-proxy` listeners is valid with no `vhost`
+at all.
 
 ### `timeouts` child node
 

@@ -308,15 +308,6 @@ impl Config {
                 ),
             }
         }
-        // tcp-proxy and tls are mutually exclusive on a single listener.
-        for (i, l) in self.listeners.iter().enumerate() {
-            if l.tcp_proxy.is_some() && l.tls.is_some() {
-                bail!(
-                    "listener[{i}] cannot have both 'tcp-proxy' and 'tls'; \
-                     TLS termination with TCP proxying is not yet supported"
-                );
-            }
-        }
         // ACME mode requires a state_dir for cert/account storage.
         let uses_acme = self.listeners.iter()
             .filter_map(|l| l.tls.as_ref())
@@ -1309,19 +1300,44 @@ mod tests {
     }
 
     #[test]
-    fn tcp_proxy_and_tls_is_error() {
-        let result = Config::parse(
+    fn tcp_proxy_with_tls_termination() {
+        let cfg = Config::parse(
             r#"
             listener {
                 bind "[::]:443"
-                tls
+                tls "self-signed"
                 tcp-proxy {
-                    upstream "backend:443"
+                    upstream "backend:5432"
                 }
             }
             "#,
+        )
+        .unwrap();
+        assert!(cfg.listeners[0].tls.is_some());
+        let proxy = cfg.listeners[0].tcp_proxy.as_ref().unwrap();
+        assert_eq!(proxy.upstream, "backend:5432");
+    }
+
+    #[test]
+    fn tcp_proxy_with_tls_and_proxy_protocol() {
+        let cfg = Config::parse(
+            r#"
+            listener {
+                bind "[::]:443"
+                tls "self-signed"
+                tcp-proxy {
+                    upstream "backend:5432"
+                    proxy-protocol "v2"
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        let proxy = cfg.listeners[0].tcp_proxy.as_ref().unwrap();
+        assert_eq!(
+            proxy.proxy_protocol,
+            Some(ProxyProtocolVersion::V2)
         );
-        assert!(result.is_err());
     }
 
     #[test]

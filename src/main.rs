@@ -121,12 +121,14 @@ async fn main() -> anyhow::Result<()> {
     let mut handles: JoinSet<()> = JoinSet::new();
 
     // Split pre-bound sockets into three groups.
-    let mut tcp_proxy_bound = Vec::new();
+    // TLS TCP proxies go into tls_bound so they share the acceptor-building
+    // path; the spawned task dispatches to run_tcp_proxy rather than run_tls.
+    let mut tcp_proxy_plain_bound = Vec::new();
     let mut plain_bound = Vec::new();
     let mut tls_bound = Vec::new();
     for (cfg, socket) in bound {
-        if cfg.tcp_proxy.is_some() {
-            tcp_proxy_bound.push((cfg, socket));
+        if cfg.tcp_proxy.is_some() && cfg.tls.is_none() {
+            tcp_proxy_plain_bound.push((cfg, socket));
         } else if cfg.tls.is_some() {
             tls_bound.push((cfg, socket));
         } else {
@@ -134,13 +136,13 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Phase 2a: TCP proxy listeners (no HTTP processing, no ACME dependency).
-    for (cfg, socket) in tcp_proxy_bound {
+    // Phase 2a: plain TCP proxy listeners (no TLS, no HTTP, no ACME dependency).
+    for (cfg, socket) in tcp_proxy_plain_bound {
         let proxy = cfg.tcp_proxy.clone().unwrap();
         let rx = shutdown_rx.clone();
         handles.spawn(async move {
             if let Err(e) =
-                listener::run_tcp_proxy(cfg, proxy, socket, rx).await
+                listener::run_tcp_proxy(cfg, proxy, socket, None, rx).await
             {
                 tracing::error!("TCP proxy error: {e:#}");
             }
@@ -243,16 +245,29 @@ async fn main() -> anyhow::Result<()> {
                 }
             };
 
-        let state = state.clone();
         let rx = shutdown_rx.clone();
-        handles.spawn(async move {
-            if let Err(e) =
-                listener::run_tls(cfg, socket, state, acceptor, rx)
-                    .await
-            {
-                tracing::error!("TLS listener error: {e:#}");
-            }
-        });
+        if let Some(proxy) = cfg.tcp_proxy.clone() {
+            // TLS-terminating TCP proxy: accept TLS, forward plaintext.
+            handles.spawn(async move {
+                if let Err(e) = listener::run_tcp_proxy(
+                    cfg, proxy, socket, Some(acceptor), rx,
+                )
+                .await
+                {
+                    tracing::error!("TLS TCP proxy error: {e:#}");
+                }
+            });
+        } else {
+            let state = state.clone();
+            handles.spawn(async move {
+                if let Err(e) =
+                    listener::run_tls(cfg, socket, state, acceptor, rx)
+                        .await
+                {
+                    tracing::error!("TLS listener error: {e:#}");
+                }
+            });
+        }
     }
 
     // ── Wait for a shutdown signal ─────────────────────────────────

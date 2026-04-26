@@ -376,18 +376,26 @@ async fn serve_connection<I>(
 
 // ── TCP proxy listener ────────────────────────────────────────────
 
+// `acceptor` is Some when the listener should terminate TLS before
+// forwarding the decrypted stream to the upstream.
 pub async fn run_tcp_proxy(
     cfg: ListenerConfig,
     proxy: TcpProxyConfig,
     listener: TcpListener,
+    acceptor: Option<Arc<ArcSwap<TlsAcceptor>>>,
     mut shutdown: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     let name = cfg.local_name();
     let local_addr = listener.local_addr().ok();
+    let label = if acceptor.is_some() {
+        "TCP proxy (TLS)"
+    } else {
+        "TCP proxy"
+    };
     tracing::info!(
         bind = %name,
         upstream = %proxy.upstream,
-        "listening (TCP proxy)"
+        "listening ({label})"
     );
     let mut connections: JoinSet<()> = JoinSet::new();
 
@@ -399,13 +407,31 @@ pub async fn run_tcp_proxy(
                         let upstream = proxy.upstream.clone();
                         let proto = proxy.proxy_protocol;
                         let conn_shutdown = shutdown.clone();
+                        // load_full() cheaply bumps the Arc refcount,
+                        // picking up any hot-swapped cert since last accept.
+                        let acc = acceptor
+                            .as_ref()
+                            .map(|a| a.load_full());
                         connections.spawn(async move {
-                            if let Err(e) = tcp_proxy_connection(
-                                stream, peer_addr, local_addr,
-                                &upstream, proto, conn_shutdown,
-                            )
-                            .await
-                            {
+                            let result = if let Some(acc) = acc {
+                                match acc.accept(stream).await {
+                                    Ok(tls) => tcp_proxy_connection(
+                                        tls, peer_addr, local_addr,
+                                        &upstream, proto, conn_shutdown,
+                                    ).await,
+                                    Err(e) => {
+                                        debug!(%peer_addr,
+                                            "TLS handshake failed: {e}");
+                                        Ok(())
+                                    }
+                                }
+                            } else {
+                                tcp_proxy_connection(
+                                    stream, peer_addr, local_addr,
+                                    &upstream, proto, conn_shutdown,
+                                ).await
+                            };
+                            if let Err(e) = result {
                                 debug!(%peer_addr, "tcp proxy: {e}");
                             }
                         });
@@ -427,14 +453,17 @@ pub async fn run_tcp_proxy(
     Ok(())
 }
 
-async fn tcp_proxy_connection(
-    mut client: tokio::net::TcpStream,
+async fn tcp_proxy_connection<C>(
+    mut client: C,
     peer_addr: SocketAddr,
     local_addr: Option<SocketAddr>,
     upstream: &str,
     proxy_protocol: Option<crate::config::ProxyProtocolVersion>,
     mut shutdown: watch::Receiver<bool>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<()>
+where
+    C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send,
+{
     if *shutdown.borrow() {
         return Ok(());
     }
