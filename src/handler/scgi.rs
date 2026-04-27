@@ -1,3 +1,7 @@
+// SCGI (Simple Common Gateway Interface) client handler: encodes request
+// headers as a netstring block, forwards to a Unix or TCP socket, and
+// streams the response through parse_cgi_response().
+
 use super::cgi_util::{build_cgi_env, parse_cgi_response};
 use crate::error::{response_502, HttpResponse};
 use http_body_util::BodyExt;
@@ -89,7 +93,7 @@ impl ScgiHandler {
     }
 }
 
-// ── SCGI request encoding ─────────────────────────────────────────
+// -- SCGI request encoding -----------------------------------------
 
 // Build an SCGI request: a netstring-encoded header block followed
 // by the raw request body.
@@ -126,7 +130,7 @@ fn append_pair(buf: &mut Vec<u8>, key: &str, value: &str) {
     buf.push(b'\0');
 }
 
-// ── Tests ─────────────────────────────────────────────────────────
+// -- Tests ---------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

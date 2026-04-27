@@ -1,3 +1,7 @@
+// Server entry point: parse config, bind sockets, drop privileges, then
+// spawn listener tasks.  Sockets are bound while still root (for ports
+// below 1024); all further work runs as the configured unprivileged user.
+
 mod access;
 mod acme;
 mod auth;
@@ -61,7 +65,7 @@ async fn main() -> anyhow::Result<()> {
     let state_dir = config.server.state_dir.clone()
         .map(PathBuf::from);
 
-    // ── Bind all sockets before dropping privileges ────────────────
+    // -- Bind all sockets before dropping privileges ----------------
     //
     // Ports < 1024 (80, 443) require root on Linux.  We bind them all
     // here, then drop to an unprivileged user before accepting any
@@ -78,12 +82,12 @@ async fn main() -> anyhow::Result<()> {
         })
         .collect::<anyhow::Result<_>>()?;
 
-    // ── Privilege drop ─────────────────────────────────────────────
+    // -- Privilege drop ---------------------------------------------
     #[cfg(unix)]
     {
         if let Some(ref user) = config.server.user {
             // Create and chown the state directory before dropping
-            // privileges — StateDirectory= in the systemd unit creates
+            // privileges -- StateDirectory= in the systemd unit creates
             // it owned by root, and the unprivileged process cannot
             // write ACME certificates there without this step.
             if let Some(ref sd) = state_dir {
@@ -129,7 +133,7 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // Background task: advance the request-rate ring buffer every 5 s.
-    // Not tracked in `handles` — it carries no state worth draining.
+    // Not tracked in `handles` -- it carries no state worth draining.
     tokio::spawn(metrics.clone().tick_loop());
 
     // Shutdown channel: false = running, true = drain and exit.
@@ -217,7 +221,7 @@ async fn main() -> anyhow::Result<()> {
                     ));
                     // Try to get an initial cert.  If ACME fails,
                     // fall back to self-signed and keep retrying in
-                    // the background rather than crashing — crashing
+                    // the background rather than crashing -- crashing
                     // causes systemd to restart us rapidly, which can
                     // exhaust Let's Encrypt rate limits.
                     let (initial, initial_failed) =
@@ -286,7 +290,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // ── Wait for a shutdown signal ─────────────────────────────────
+    // -- Wait for a shutdown signal ---------------------------------
     //
     // On Unix we handle both SIGTERM (systemd stop) and SIGINT (ctrl-c).
     // On other platforms only ctrl-c is available.

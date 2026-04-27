@@ -1,3 +1,7 @@
+// FastCGI client handler: sends requests to a FastCGI process over a
+// Unix or TCP socket using the binary FastCGI record protocol and
+// streams the response back to the HTTP client.
+
 use super::cgi_util::{build_cgi_env, parse_cgi_response};
 use crate::error::{response_502, HttpResponse};
 use http_body_util::BodyExt;
@@ -5,7 +9,7 @@ use hyper::body::Incoming;
 use hyper::Request;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-// ── FastCGI constants ─────────────────────────────────────────────
+// -- FastCGI constants ---------------------------------------------
 
 const FCGI_VERSION: u8 = 1;
 const FCGI_BEGIN_REQUEST: u8 = 1;
@@ -19,7 +23,7 @@ const FCGI_RESPONDER: u16 = 1;
 // We don't multiplex; a single request ID per connection is safe.
 const REQUEST_ID: u16 = 1;
 
-// ── Handler ───────────────────────────────────────────────────────
+// -- Handler -------------------------------------------------------
 
 pub struct FcgiHandler {
     socket: String,
@@ -114,7 +118,7 @@ impl FcgiHandler {
     }
 }
 
-// ── Record encoding ───────────────────────────────────────────────
+// -- Record encoding -----------------------------------------------
 
 fn build_record(type_: u8, content: &[u8]) -> Vec<u8> {
     let len = content.len();
@@ -179,7 +183,7 @@ fn build_fcgi_request(env: &[(String, String)], body: &[u8]) -> Vec<u8> {
     out
 }
 
-// ── STDOUT parsing ────────────────────────────────────────────────
+// -- STDOUT parsing ------------------------------------------------
 
 // Concatenate FCGI_STDOUT record content from the raw response stream.
 // Stops at FCGI_END_REQUEST.  FCGI_STDERR is logged and discarded.
@@ -214,7 +218,7 @@ pub fn parse_fcgi_stdout(data: &[u8]) -> anyhow::Result<Vec<u8>> {
     Ok(stdout)
 }
 
-// ── Tests ─────────────────────────────────────────────────────────
+// -- Tests ---------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

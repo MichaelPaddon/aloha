@@ -1,8 +1,12 @@
+// Firewall-style access control: IP, user, and group rules evaluated
+// per-request against the authenticated principal.  Rules use first-match
+// semantics; an implicit deny-403 fires when no rule matches.
+
 use crate::auth::Principal;
 use ipnet::IpNet;
 use std::net::IpAddr;
 
-// ── Types ─────────────────────────────────────────────────────────
+// -- Types ---------------------------------------------------------
 
 #[derive(Clone, Debug)]
 pub enum AccessCondition {
@@ -36,7 +40,7 @@ pub enum AccessOutcome {
     Redirect(String, u16),
 }
 
-// ── Evaluation ───────────────────────────────────────────────────
+// -- Evaluation ---------------------------------------------------
 
 impl AccessPolicy {
     pub fn evaluate(
@@ -138,7 +142,7 @@ fn normalise(addr: IpAddr) -> IpAddr {
     addr
 }
 
-// ── Tests ─────────────────────────────────────────────────────────
+// -- Tests ---------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -193,7 +197,7 @@ mod tests {
         }
     }
 
-    // ── No rules ─────────────────────────────────────────────────
+    // -- No rules -------------------------------------------------
 
     #[test]
     fn no_rules_implicit_deny() {
@@ -204,7 +208,7 @@ mod tests {
         ));
     }
 
-    // ── IP conditions ─────────────────────────────────────────────
+    // -- IP conditions ---------------------------------------------
 
     #[test]
     fn ip_in_range_allows() {
@@ -248,14 +252,14 @@ mod tests {
             p.evaluate(ip("192.168.1.1"), &anon()),
             AccessOutcome::Allow
         ));
-        // Neither range → deny.
+        // Neither range -> deny.
         assert!(matches!(
             p.evaluate(ip("8.8.8.8"), &anon()),
             AccessOutcome::Deny(403)
         ));
     }
 
-    // ── IP + identity AND ─────────────────────────────────────────
+    // -- IP + identity AND -----------------------------------------
 
     #[test]
     fn ip_and_group_both_required() {
@@ -266,24 +270,24 @@ mod tests {
             ]),
             deny_rule(vec![], 403),
         ]);
-        // Right IP, right group → allow.
+        // Right IP, right group -> allow.
         assert!(matches!(
             p.evaluate(ip("10.0.0.1"), &authed("alice", &["admin"])),
             AccessOutcome::Allow
         ));
-        // Right IP, wrong group → deny.
+        // Right IP, wrong group -> deny.
         assert!(matches!(
             p.evaluate(ip("10.0.0.1"), &authed("alice", &["users"])),
             AccessOutcome::Deny(403)
         ));
-        // Wrong IP, right group → deny.
+        // Wrong IP, right group -> deny.
         assert!(matches!(
             p.evaluate(ip("1.2.3.4"), &authed("alice", &["admin"])),
             AccessOutcome::Deny(403)
         ));
     }
 
-    // ── Custom codes ──────────────────────────────────────────────
+    // -- Custom codes ----------------------------------------------
 
     #[test]
     fn deny_custom_code() {
@@ -294,7 +298,7 @@ mod tests {
         ));
     }
 
-    // ── Redirect action ───────────────────────────────────────────
+    // -- Redirect action -------------------------------------------
 
     #[test]
     fn redirect_action() {
@@ -321,7 +325,7 @@ mod tests {
         }
     }
 
-    // ── Identity conditions ───────────────────────────────────────
+    // -- Identity conditions ---------------------------------------
 
     #[test]
     fn identity_conditions_never_match_anonymous() {
@@ -392,7 +396,7 @@ mod tests {
         ));
     }
 
-    // ── IPv4-mapped normalisation ─────────────────────────────────
+    // -- IPv4-mapped normalisation ---------------------------------
 
     #[test]
     fn ipv4_mapped_v6_matches_v4_rule() {
@@ -409,7 +413,7 @@ mod tests {
         ));
     }
 
-    // ── Rule ordering ─────────────────────────────────────────────
+    // -- Rule ordering ---------------------------------------------
 
     #[test]
     fn first_matching_rule_wins() {
@@ -424,7 +428,7 @@ mod tests {
         ));
     }
 
-    // ── No-condition rule (catch-all) ─────────────────────────────
+    // -- No-condition rule (catch-all) -----------------------------
 
     #[test]
     fn no_condition_rule_always_matches() {
@@ -439,7 +443,7 @@ mod tests {
         ));
     }
 
-    // ── Multiple user/group conditions (OR within type) ───────────
+    // -- Multiple user/group conditions (OR within type) -----------
 
     #[test]
     fn multiple_user_conditions_are_or() {

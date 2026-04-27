@@ -1,3 +1,10 @@
+// Authentication back-ends for HTTP Basic auth.
+//
+// Provides the Authenticator trait and three implementations:
+//   AnonymousAuthenticator -- always returns Principal::Anonymous
+//   PamAuthenticator       -- validates via the system PAM stack (Unix)
+//   LdapAuthenticator      -- validates via an LDAP simple bind
+
 use async_trait::async_trait;
 use hyper::Request;
 use hyper::body::Incoming;
@@ -21,7 +28,7 @@ pub trait Authenticator: Send + Sync {
     async fn authenticate(&self, req: &Request<Incoming>) -> Principal;
 }
 
-/// Always anonymous — replaced once a real auth mechanism is wired up.
+/// Always anonymous -- replaced once a real auth mechanism is wired up.
 pub struct AnonymousAuthenticator;
 
 #[async_trait]
@@ -31,7 +38,7 @@ impl Authenticator for AnonymousAuthenticator {
     }
 }
 
-// ── HTTP Basic / PAM ──────────────────────────────────────────────
+// -- HTTP Basic / PAM ----------------------------------------------
 
 /// Decode an `Authorization: Basic <base64>` header.
 /// Returns `(username, password)` or `None` if absent or malformed.
@@ -52,7 +59,7 @@ pub fn parse_basic_auth(
     Some((user.to_owned(), pass.to_owned()))
 }
 
-// ── LDAP ──────────────────────────────────────────────────────────
+// -- LDAP ----------------------------------------------------------
 
 /// Authenticates HTTP Basic credentials via an LDAP simple bind, then
 /// searches for the user's group memberships.
@@ -166,7 +173,7 @@ async fn ldap_authenticate(
     Ok(groups)
 }
 
-/// Escape a value for use inside an LDAP DN (RFC 4514 §2.4).
+/// Escape a value for use inside an LDAP DN (RFC 4514 s.2.4).
 ///
 /// The following characters are escaped with a leading `\`:
 /// `,`, `+`, `"`, `\`, `<`, `>`, `;`, leading `#`, leading/trailing ` `.
@@ -191,7 +198,7 @@ pub fn escape_dn(s: &str) -> String {
     out
 }
 
-/// Escape a value for use inside an LDAP search filter (RFC 4515 §3).
+/// Escape a value for use inside an LDAP search filter (RFC 4515 s.3).
 ///
 /// `\`, `*`, `(`, `)`, and NUL are replaced with their `\xx` hex forms.
 pub fn escape_filter(s: &str) -> String {
@@ -209,7 +216,7 @@ pub fn escape_filter(s: &str) -> String {
     out
 }
 
-// ── PAM ───────────────────────────────────────────────────────────
+// -- PAM -----------------------------------------------------------
 
 /// Authenticates against the system PAM stack, then resolves the
 /// user's Unix group membership via `getgrouplist(3)`.
@@ -288,7 +295,7 @@ fn lookup_groups(username: &str) -> anyhow::Result<Vec<String>> {
         .collect())
 }
 
-// ── Tests ─────────────────────────────────────────────────────────
+// -- Tests ---------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -353,7 +360,7 @@ mod tests {
 
     #[test]
     fn parse_basic_auth_empty_username() {
-        // ":password" — empty username is technically valid per RFC 7617
+        // ":password" -- empty username is technically valid per RFC 7617
         use base64::Engine as _;
         let enc = base64::engine::general_purpose::STANDARD
             .encode(":password");
@@ -377,18 +384,23 @@ mod tests {
     #[test]
     fn parse_basic_auth_unicode_credentials() {
         // RFC 7617 allows UTF-8 in credentials.
+        // Strings written with Rust unicode escapes to keep source ASCII.
+        // \u{fc}=u-umlaut \u{ef}=i-umlaut \u{f6}=o-umlaut \u{e9}=e-acute
+        // \u{e4}=a-umlaut \u{f0}=eth
+        let user = "\u{fc}n\u{ef}c\u{f6}d\u{e9}";
+        let pass = "p\u{e4}ssw\u{f6}r\u{f0}";
         use base64::Engine as _;
         let enc = base64::engine::general_purpose::STANDARD
-            .encode("ünïcödé:pässwörð");
+            .encode(format!("{user}:{pass}"));
         let h = headers_with_auth(&format!("Basic {enc}"));
         let (u, p) = parse_basic_auth(&h).unwrap();
-        assert_eq!(u, "ünïcödé");
-        assert_eq!(p, "pässwörð");
+        assert_eq!(u, user);
+        assert_eq!(p, pass);
     }
 
     #[test]
     fn parse_basic_auth_case_sensitive_scheme() {
-        // "basic" (lowercase) must not match — RFC 7235 says the scheme
+        // "basic" (lowercase) must not match -- RFC 7235 says the scheme
         // token is case-insensitive in HTTP, but our prefix match is
         // exact.  Browsers always send "Basic" with capital B.
         let h = headers_with_auth("basic dXNlcjpwYXNz");
@@ -406,7 +418,7 @@ mod tests {
         assert_eq!(p, "");
     }
 
-    // ── LDAP escaping ─────────────────────────────────────────────
+    // -- LDAP escaping ---------------------------------------------
 
     #[test]
     fn escape_dn_plain_username() {
@@ -449,7 +461,7 @@ mod tests {
     #[test]
     fn escape_dn_unicode_passthrough() {
         // Non-ASCII characters that are not special pass through unchanged.
-        assert_eq!(escape_dn("héllo"), "héllo");
+        assert_eq!(escape_dn("h\u{e9}llo"), "h\u{e9}llo");
     }
 
     #[test]
@@ -484,6 +496,6 @@ mod tests {
 
     #[test]
     fn escape_filter_unicode_passthrough() {
-        assert_eq!(escape_filter("héllo"), "héllo");
+        assert_eq!(escape_filter("h\u{e9}llo"), "h\u{e9}llo");
     }
 }

@@ -1,3 +1,7 @@
+// ACME certificate management (Let's Encrypt / HTTP-01 challenge).
+// AcmeManager acquires an initial certificate at startup and renews it
+// in a background task when fewer than 30 days remain before expiry.
+
 use crate::config::TlsOptions;
 use crate::tls;
 use anyhow::{bail, Context};
@@ -19,7 +23,7 @@ use tokio_rustls::TlsAcceptor;
 // validation; read by AlohaService on /.well-known/acme-challenge/*.
 pub type ChallengeMap = Arc<Mutex<HashMap<String, String>>>;
 
-// ── Provisioner trait ─────────────────────────────────────────────
+// -- Provisioner trait ---------------------------------------------
 
 // Handles the ACME protocol and returns the issued cert + private key
 // as PEM strings.  Receives the challenge map to register HTTP-01
@@ -36,7 +40,7 @@ pub(crate) trait Provisioner: Send + Sync {
     ) -> anyhow::Result<(String, String)>; // (cert_pem, key_pem)
 }
 
-// ── Config ────────────────────────────────────────────────────────
+// -- Config --------------------------------------------------------
 
 pub struct AcmeConfig {
     // All domains become SANs in the issued cert.  First is primary.
@@ -65,7 +69,7 @@ impl AcmeConfig {
     // env var > Let's Encrypt production.
     //
     // Setting ALOHA_ACME_STAGING=1 in the environment forces staging
-    // without changing the config file — useful during testing.
+    // without changing the config file -- useful during testing.
     pub fn acme_server_url(&self) -> &str {
         if let Some(ref url) = self.server {
             return url.as_str();
@@ -84,7 +88,7 @@ impl AcmeConfig {
     }
 }
 
-// ── AcmeManager ──────────────────────────────────────────────────
+// -- AcmeManager --------------------------------------------------
 
 pub struct AcmeManager {
     config: AcmeConfig,
@@ -94,7 +98,7 @@ pub struct AcmeManager {
 }
 
 impl AcmeManager {
-    // Production constructor — uses the real ACME protocol.
+    // Production constructor -- uses the real ACME protocol.
     pub fn new(
         config: AcmeConfig,
         challenges: ChallengeMap,
@@ -108,7 +112,7 @@ impl AcmeManager {
         Self::with_provisioner(config, challenges, tls_opts, provisioner)
     }
 
-    // Inject a custom provisioner — used in tests.
+    // Inject a custom provisioner -- used in tests.
     pub(crate) fn with_provisioner(
         config: AcmeConfig,
         challenges: ChallengeMap,
@@ -118,7 +122,7 @@ impl AcmeManager {
         if config.is_staging() {
             tracing::info!(
                 cert = config.cert_name(),
-                "ACME staging mode — \
+                "ACME staging mode -- \
                  certificates are NOT trusted by browsers"
             );
         }
@@ -280,7 +284,7 @@ impl AcmeManager {
     }
 }
 
-// ── Atomic cert directory writer ──────────────────────────────────
+// -- Atomic cert directory writer ----------------------------------
 
 // Write cert_pem + key_pem into a staging directory, then move it
 // over `dir` in two renames.
@@ -332,7 +336,7 @@ async fn atomic_write_cert_dir(
     Ok(())
 }
 
-// ── Real ACME provisioner (instant-acme / Let's Encrypt) ─────────
+// -- Real ACME provisioner (instant-acme / Let's Encrypt) ---------
 
 struct RealProvisioner {
     server_url: String,
@@ -403,7 +407,7 @@ impl Provisioner for RealProvisioner {
                         map.remove(t);
                     }
                     bail!(
-                        "ACME order invalid — ensure the domain is \
+                        "ACME order invalid -- ensure the domain is \
                          publicly reachable on port 80"
                     );
                 }
@@ -516,7 +520,7 @@ async fn finalize_order(
     Ok((cert_chain_pem, key_pair.serialize_pem()))
 }
 
-// ── Shared helpers ────────────────────────────────────────────────
+// -- Shared helpers ------------------------------------------------
 
 // Read the notAfter timestamp from the first cert in a PEM chain.
 pub(crate) fn cert_expiry_timestamp(
@@ -545,7 +549,7 @@ fn cert_not_before_timestamp(pem: &[u8]) -> anyhow::Result<i64> {
 // Log a warning if the certificate's notBefore is in the future.
 // This typically indicates clock skew between the server and the CA
 // (e.g. server in UTC+8 presenting local time as UTC).  The cert is
-// served immediately regardless — TLS clients tolerate small skew, and
+// served immediately regardless -- TLS clients tolerate small skew, and
 // sleeping here would delay the service for no benefit.
 fn warn_if_not_yet_valid(pem: &[u8]) {
     let Ok(not_before) = cert_not_before_timestamp(pem) else {
@@ -558,19 +562,19 @@ fn warn_if_not_yet_valid(pem: &[u8]) {
     if not_before > now {
         tracing::warn!(
             secs_until_valid = not_before - now,
-            "certificate notBefore is in the future — \
+            "certificate notBefore is in the future -- \
              check that the server clock is set to UTC"
         );
     }
 }
 
-// ── Tests ─────────────────────────────────────────────────────────
+// -- Tests ---------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // ── Test provisioner ─────────────────────────────────────────
+    // -- Test provisioner -----------------------------------------
 
     // Generates a real self-signed cert without touching the network.
     // Accepts an optional validity in days (default 90).
@@ -638,7 +642,7 @@ mod tests {
         )
     }
 
-    // ── AcmeConfig helpers ───────────────────────────────────────
+    // -- AcmeConfig helpers ---------------------------------------
 
     #[test]
     fn cert_name_defaults_to_first_domain() {
@@ -716,7 +720,7 @@ mod tests {
         assert_eq!(cfg.acme_server_url(), "https://acme.example.com/dir");
     }
 
-    // ── cert_expiry_timestamp ────────────────────────────────────
+    // -- cert_expiry_timestamp ------------------------------------
 
     #[test]
     fn cert_expiry_parses() {
@@ -732,7 +736,7 @@ mod tests {
         assert!(diff < 92 * 24 * 3600, "expiry too far: {diff}s");
     }
 
-    // ── cert_needs_renewal ───────────────────────────────────────
+    // -- cert_needs_renewal ---------------------------------------
 
     #[test]
     fn cert_needs_renewal_when_missing() {
@@ -767,7 +771,7 @@ mod tests {
         assert!(!mgr.cert_needs_renewal());
     }
 
-    // ── time_until_renewal ───────────────────────────────────────
+    // -- time_until_renewal ---------------------------------------
 
     #[test]
     fn time_until_renewal_is_60s_when_cert_missing() {
@@ -790,7 +794,7 @@ mod tests {
 
         let mgr = test_manager(dir.path(), Arc::new(MockProvisioner::new()));
         let sleep = mgr.time_until_renewal();
-        // 90 days cert → renewal at 60 days from now (90 - 30)
+        // 90 days cert -> renewal at 60 days from now (90 - 30)
         let expected = 60u64 * 24 * 3600;
         let diff = (sleep.as_secs() as i64 - expected as i64).abs();
         assert!(
@@ -800,7 +804,7 @@ mod tests {
         );
     }
 
-    // ── Full flow via MockProvisioner ────────────────────────────
+    // -- Full flow via MockProvisioner ----------------------------
 
     #[tokio::test]
     async fn ensure_valid_cert_acquires_when_missing() {
@@ -811,7 +815,7 @@ mod tests {
             Arc::new(MockProvisioner::new()),
         );
 
-        // No cert yet — should acquire
+        // No cert yet -- should acquire
         let acc = mgr.ensure_valid_cert().await.unwrap();
         drop(acc); // just verify it doesn't error
 
@@ -836,7 +840,7 @@ mod tests {
         // gets called (it would overwrite with a short-lived cert).
         let mgr = test_manager(
             dir.path(),
-            Arc::new(MockProvisioner::new()), // valid cert → not called
+            Arc::new(MockProvisioner::new()), // valid cert -> not called
         );
 
         mgr.ensure_valid_cert().await.unwrap();
@@ -889,7 +893,7 @@ mod tests {
         );
     }
 
-    // ── atomic_write_cert_dir ────────────────────────────────────
+    // -- atomic_write_cert_dir ------------------------------------
 
     #[tokio::test]
     async fn atomic_write_creates_dir_on_first_run() {
@@ -924,7 +928,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Second write — should replace atomically
+        // Second write -- should replace atomically
         atomic_write_cert_dir(&cert_dir, b"CERT2", b"KEY2")
             .await
             .unwrap();

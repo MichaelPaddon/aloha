@@ -1,3 +1,7 @@
+// HTTP reverse proxy handler: forwards requests to an upstream HTTP
+// server, adds X-Forwarded-For, and streams the response back.  Uses
+// hyper-util's legacy client for connection pooling.
+
 use crate::error::{response_502, HttpResponse};
 use http_body_util::{BodyExt, combinators::BoxBody};
 use hyper::body::Incoming;
@@ -13,7 +17,7 @@ use std::net::SocketAddr;
 // Body type used for requests sent to the upstream.
 type UpstreamBody = BoxBody<bytes::Bytes, hyper::Error>;
 
-// Hop-by-hop headers that must not be forwarded (RFC 7230 §6.1).
+// Hop-by-hop headers that must not be forwarded (RFC 7230 s.6.1).
 // These are connection-specific and meaningless to the next hop.
 static HOP_BY_HOP: &[&str] = &[
     "connection",
@@ -121,7 +125,7 @@ impl ProxyHandler {
     }
 }
 
-// ── URI rewriting ─────────────────────────────────────────────────
+// -- URI rewriting -------------------------------------------------
 
 pub fn build_backend_uri(
     upstream: &Uri,
@@ -166,7 +170,7 @@ pub fn build_backend_uri(
         .map_err(|e| anyhow::anyhow!("failed to build backend URI: {e}"))
 }
 
-// ── Header handling ───────────────────────────────────────────────
+// -- Header handling -----------------------------------------------
 
 // Remove all hop-by-hop headers from a header map, including any
 // headers listed in the Connection header value itself.
@@ -210,7 +214,7 @@ fn set_forwarding_headers(headers: &mut HeaderMap, peer_ip: Option<&str>) {
     }
 }
 
-// ── Response conversion ───────────────────────────────────────────
+// -- Response conversion -------------------------------------------
 
 fn convert_response(resp: Response<Incoming>) -> HttpResponse {
     let (mut parts, body) = resp.into_parts();
@@ -225,7 +229,7 @@ fn convert_response(resp: Response<Incoming>) -> HttpResponse {
     Response::from_parts(parts, boxed)
 }
 
-// ── Tests ─────────────────────────────────────────────────────────
+// -- Tests ---------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -236,7 +240,7 @@ mod tests {
         s.parse().unwrap()
     }
 
-    // ── ProxyHandler::new scheme validation ──────────────────────
+    // -- ProxyHandler::new scheme validation ----------------------
 
     #[test]
     fn new_accepts_http_upstream() {
@@ -261,7 +265,7 @@ mod tests {
         assert!(ProxyHandler::new("http:///path", false).is_err());
     }
 
-    // ── build_backend_uri ─────────────────────────────────────────
+    // -- build_backend_uri -----------------------------------------
 
     #[test]
     fn build_backend_uri_https_scheme_preserved() {
@@ -337,7 +341,7 @@ mod tests {
         assert!(u.query().is_none());
     }
 
-    // ── strip_hop_by_hop ─────────────────────────────────────────
+    // -- strip_hop_by_hop -----------------------------------------
 
     #[test]
     fn strip_hop_by_hop_removes_standard_headers() {
@@ -371,7 +375,7 @@ mod tests {
         assert!(headers.get("x-keep").is_some());
     }
 
-    // ── X-Forwarded-For ──────────────────────────────────────────
+    // -- X-Forwarded-For ------------------------------------------
 
     #[test]
     fn x_forwarded_for_set_when_absent() {

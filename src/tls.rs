@@ -1,3 +1,7 @@
+// TLS acceptor construction: loads PEM files, generates self-signed
+// certificates, and maps config cipher/version names to rustls types.
+// ACME-managed certificates are handled separately in acme.rs.
+
 use crate::config::{TlsConfig, TlsListenerConfig, TlsOptions, TlsVersion};
 use anyhow::Context;
 use rustls::ServerConfig;
@@ -30,7 +34,7 @@ pub fn build_acceptor(
         }
         TlsConfig::SelfSigned => {
             tracing::warn!(
-                "using ephemeral self-signed certificate — \
+                "using ephemeral self-signed certificate -- \
                  not suitable for production"
             );
             build_self_signed(&opts)
@@ -206,7 +210,7 @@ pub fn load_cert_and_key(
     Ok((cert_chain, key))
 }
 
-// ── Tests ─────────────────────────────────────────────────────────
+// -- Tests ---------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -219,7 +223,7 @@ mod tests {
             .ok();
     }
 
-    // ── name_to_cipher_suite ─────────────────────────────────────
+    // -- name_to_cipher_suite -------------------------------------
 
     #[test]
     fn known_tls13_cipher_names_parse() {
@@ -257,7 +261,7 @@ mod tests {
         assert!(name_to_cipher_suite("").is_err());
     }
 
-    // ── protocol_versions ────────────────────────────────────────
+    // -- protocol_versions ----------------------------------------
 
     #[test]
     fn no_min_version_includes_tls12_and_tls13() {
@@ -281,7 +285,7 @@ mod tests {
         );
     }
 
-    // ── build_self_signed ────────────────────────────────────────
+    // -- build_self_signed ----------------------------------------
 
     #[tokio::test]
     async fn self_signed_acceptor_builds_without_error() {

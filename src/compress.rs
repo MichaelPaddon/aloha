@@ -1,3 +1,7 @@
+// Response compression middleware (gzip and brotli).
+// negotiate() picks an encoding from Accept-Encoding; maybe_compress()
+// wraps compressible responses transparently before they are sent.
+
 use crate::error::{bytes_body, HttpResponse};
 use bytes::Bytes;
 use http_body_util::BodyExt;
@@ -16,7 +20,7 @@ pub enum Encoding {
 // Parse Accept-Encoding and return the best encoding we support.
 // Prefers brotli over gzip; returns None if neither is accepted.
 //
-// q=0 ("not acceptable") is intentionally not handled — clients that
+// q=0 ("not acceptable") is intentionally not handled -- clients that
 // explicitly opt out of gzip/brotli are rare enough not to complicate
 // the hot path.
 pub fn negotiate(accept_encoding: &str) -> Option<Encoding> {
@@ -144,7 +148,7 @@ fn brotli_encode(data: &[u8]) -> anyhow::Result<Vec<u8>> {
     let mut out = Vec::new();
     {
         // Quality 5: good balance between speed and ratio for dynamic
-        // content.  Quality 11 is 3–4× slower for marginal gain.
+        // content.  Quality 11 is 3-4x slower for marginal gain.
         let mut enc =
             brotli::CompressorWriter::new(&mut out, 4096, 5, 22);
         enc.write_all(data)?;
@@ -152,7 +156,7 @@ fn brotli_encode(data: &[u8]) -> anyhow::Result<Vec<u8>> {
     Ok(out)
 }
 
-// ── Tests ─────────────────────────────────────────────────────────
+// -- Tests ---------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -176,7 +180,7 @@ mod tests {
             .unwrap()
     }
 
-    // ── negotiate ───────────────────────────────────────────────
+    // -- negotiate -----------------------------------------------
 
     #[test]
     fn negotiate_prefers_brotli() {
@@ -215,7 +219,7 @@ mod tests {
         ));
     }
 
-    // ── is_compressible ─────────────────────────────────────────
+    // -- is_compressible -----------------------------------------
 
     #[test]
     fn compressible_types() {
@@ -254,7 +258,7 @@ mod tests {
         assert!(is_compressible("application/json; charset=utf-8"));
     }
 
-    // ── maybe_compress ──────────────────────────────────────────
+    // -- maybe_compress ------------------------------------------
 
     #[tokio::test]
     async fn compresses_large_text_response_with_gzip() {

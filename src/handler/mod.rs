@@ -1,3 +1,7 @@
+// Handler enum dispatcher: routes a matched request to the appropriate
+// back-end (static files, reverse proxy, FastCGI, SCGI, CGI, redirect,
+// or the built-in status page).
+
 pub mod cgi_util;
 pub mod fcgi;
 pub mod proxy;

@@ -1,7 +1,11 @@
+// Shared helpers for CGI-family handlers (CGI, FastCGI, SCGI).
+// build_cgi_env() constructs the standard CGI environment variables;
+// parse_cgi_response() converts script output into an HTTP response.
+
 use crate::error::{bytes_body, HttpResponse};
 use hyper::{Response, StatusCode};
 
-// ── CGI environment ───────────────────────────────────────────────
+// -- CGI environment -----------------------------------------------
 
 pub fn build_cgi_env(
     parts: &hyper::http::request::Parts,
@@ -94,7 +98,7 @@ pub fn build_cgi_env(
     env
 }
 
-// Split "host[:port]" → ("host", "port").  Handles IPv6 brackets.
+// Split "host[:port]" -> ("host", "port").  Handles IPv6 brackets.
 pub fn split_host_port(host: &str) -> (&str, &str) {
     if host.starts_with('[') {
         if let Some(end) = host.find(']') {
@@ -108,7 +112,7 @@ pub fn split_host_port(host: &str) -> (&str, &str) {
     }
 }
 
-// ── CGI response parsing ──────────────────────────────────────────
+// -- CGI response parsing ------------------------------------------
 
 // Parse a CGI-format response (headers + blank line + body) into a
 // hyper Response.  The Status header sets the code (default 200).
@@ -136,7 +140,7 @@ pub fn parse_cgi_response(stdout: &[u8]) -> anyhow::Result<HttpResponse> {
         let key = key.trim();
         let val = val.trim();
         if key.eq_ignore_ascii_case("status") {
-            // "Status: 404 Not Found" — only the numeric part matters.
+            // "Status: 404 Not Found" -- only the numeric part matters.
             let code: u16 = val
                 .split_whitespace()
                 .next()
@@ -172,7 +176,7 @@ pub fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
-// ── Tests ─────────────────────────────────────────────────────────
+// -- Tests ---------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -217,7 +221,7 @@ mod tests {
         assert_eq!(split_host_port("[::1]"), ("[::1]", "80"));
     }
 
-    // ── find_subsequence / find_header_boundary ──────────────────
+    // -- find_subsequence / find_header_boundary ------------------
 
     #[test]
     fn find_subsequence_at_start() {
@@ -252,7 +256,7 @@ mod tests {
 
     #[test]
     fn find_header_boundary_prefers_crlf() {
-        // \r\n\r\n appears before \n\n — the CRLF split takes priority.
+        // \r\n\r\n appears before \n\n -- the CRLF split takes priority.
         let data = b"A: 1\r\n\r\nB: 2\n\nbody";
         let (_, body) = find_header_boundary(data).unwrap();
         assert_eq!(body, b"B: 2\n\nbody");
@@ -263,7 +267,7 @@ mod tests {
         assert!(find_header_boundary(b"no separator here").is_none());
     }
 
-    // ── build_cgi_env ────────────────────────────────────────────
+    // -- build_cgi_env --------------------------------------------
 
     fn parts(method: &str, uri: &str, headers: &[(&str, &str)])
         -> hyper::http::request::Parts

@@ -1,3 +1,7 @@
+// CGI (Common Gateway Interface) handler: fork-per-request execution of
+// scripts under the configured document root.  Unix only; uses execve(2)
+// via std::process::Command with a CGI-standard environment.
+
 use super::cgi_util::{build_cgi_env, parse_cgi_response};
 use crate::error::{response_404, response_502, HttpResponse};
 use http_body_util::BodyExt;
@@ -49,7 +53,7 @@ impl CgiHandler {
             }
         };
 
-        // No index for CGI — build_cgi_env called with None.
+        // No index for CGI -- build_cgi_env called with None.
         let env = build_cgi_env(&parts, &self.root.to_string_lossy(), matched_prefix, &None, &body_bytes);
 
         let mut child = match Command::new(&script_path)
@@ -121,9 +125,9 @@ fn resolve_script(root: &std::path::Path, uri_path: &str) -> Option<PathBuf> {
     if candidate.exists() { Some(candidate) } else { None }
 }
 
-// ── Tests ─────────────────────────────────────────────────────────
+// -- Tests ---------------------------------------------------------
 
-// No unit tests for process execution — requires a real filesystem
+// No unit tests for process execution -- requires a real filesystem
 // script and is better covered by integration tests.
 
 #[cfg(test)]

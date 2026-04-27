@@ -1,3 +1,7 @@
+// Request counters, per-status-class tallies, latency histogram, and a
+// sliding-window request-rate ring buffer.  All fields use atomics so
+// metrics can be read from the status handler without locking.
+
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -5,10 +9,10 @@ use tokio::time::interval;
 
 // Ring-buffer slot width: one entry per WINDOW_SECS seconds.
 pub const WINDOW_SECS: u64 = 5;
-// 180 × 5 s = 15 minutes of history.
+// 180 x 5 s = 15 minutes of history.
 const HISTORY_SLOTS: usize = 180;
 
-// ── Core data ────────────────────────────────────────────────────
+// -- Core data ----------------------------------------------------
 
 pub struct Metrics {
     pub start_time: Instant,
@@ -20,7 +24,7 @@ pub struct Metrics {
     pub status_3xx: AtomicU64,
     pub status_4xx: AtomicU64,
     pub status_5xx: AtomicU64,
-    // Latency histogram: <1ms <10ms <50ms <200ms <1s ≥1s
+    // Latency histogram: <1ms <10ms <50ms <200ms <1s >=1s
     pub latency: [AtomicU64; 6],
     // Written only by the background tick task.
     history: Mutex<RateHistory>,
@@ -34,7 +38,7 @@ struct RateHistory {
     last_total: u64,
 }
 
-// ── Snapshot (used by the status handler) ────────────────────────
+// -- Snapshot (used by the status handler) ------------------------
 
 pub struct Snapshot {
     pub uptime: Duration,
@@ -44,7 +48,7 @@ pub struct Snapshot {
     pub status_3xx: u64,
     pub status_4xx: u64,
     pub status_5xx: u64,
-    // Counts per latency bucket: <1ms <10ms <50ms <200ms <1s ≥1s
+    // Counts per latency bucket: <1ms <10ms <50ms <200ms <1s >=1s
     pub latency: [u64; 6],
     // Requests/second over the partial current window,
     // and completed 1/5/15-minute windows.
@@ -78,7 +82,7 @@ impl Snapshot {
     }
 }
 
-// ── Metrics implementation ────────────────────────────────────────
+// -- Metrics implementation ----------------------------------------
 
 impl Metrics {
     pub fn new() -> Self {
@@ -137,9 +141,9 @@ impl Metrics {
         let since_last = total.saturating_sub(hist.last_total);
         let rate_current = since_last as f64 / WINDOW_SECS as f64;
 
-        let rate_1min  = window_rate(&hist, 12);   // 12 × 5 s = 60 s
-        let rate_5min  = window_rate(&hist, 60);   // 60 × 5 s = 300 s
-        let rate_15min = window_rate(&hist, 180);  // 180 × 5 s = 900 s
+        let rate_1min  = window_rate(&hist, 12);   // 12 x 5 s = 60 s
+        let rate_5min  = window_rate(&hist, 60);   // 60 x 5 s = 300 s
+        let rate_15min = window_rate(&hist, 180);  // 180 x 5 s = 900 s
         drop(hist);
 
         Snapshot {
@@ -167,7 +171,7 @@ impl Metrics {
         // interval() fires immediately on first call; skip that tick
         // so the first real slot represents a complete window.
         let mut iv = interval(Duration::from_secs(WINDOW_SECS));
-        iv.tick().await; // immediate first tick — discard
+        iv.tick().await; // immediate first tick -- discard
         loop {
             iv.tick().await;
             let total =
@@ -217,7 +221,7 @@ fn read_memory_kb() -> Option<u64> {
     None
 }
 
-// ── Tests ─────────────────────────────────────────────────────────
+// -- Tests ---------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -253,12 +257,12 @@ mod tests {
     #[test]
     fn record_increments_correct_latency_bucket() {
         let m = Metrics::new();
-        m.record(200, 0);    // <1ms  → bucket 0
-        m.record(200, 5);    // <10ms → bucket 1
-        m.record(200, 30);   // <50ms → bucket 2
-        m.record(200, 100);  // <200ms → bucket 3
-        m.record(200, 500);  // <1s → bucket 4
-        m.record(200, 2000); // ≥1s → bucket 5
+        m.record(200, 0);    // <1ms  -> bucket 0
+        m.record(200, 5);    // <10ms -> bucket 1
+        m.record(200, 30);   // <50ms -> bucket 2
+        m.record(200, 100);  // <200ms -> bucket 3
+        m.record(200, 500);  // <1s -> bucket 4
+        m.record(200, 2000); // >=1s -> bucket 5
         for (i, b) in m.latency.iter().enumerate() {
             assert_eq!(
                 b.load(Ordering::Relaxed), 1,
@@ -283,7 +287,7 @@ mod tests {
         let m = Metrics::new();
         m.record(200, 1);
         let snap = m.snapshot();
-        // Ring buffer has no completed windows yet — all rates are 0.
+        // Ring buffer has no completed windows yet -- all rates are 0.
         assert_eq!(snap.rate_1min, 0.0);
         assert_eq!(snap.rate_5min, 0.0);
         assert_eq!(snap.rate_15min, 0.0);
@@ -310,7 +314,7 @@ mod tests {
         }
         let snap = m.snapshot();
         // 5 requests spread across one 5-second window out of the
-        // 12 windows that make up 1 minute → 5 / (12×5) = 0.0833 req/s.
+        // 12 windows that make up 1 minute -> 5 / (12x5) = 0.0833 req/s.
         let expected = 5.0 / (12.0 * WINDOW_SECS as f64);
         assert!(
             (snap.rate_1min - expected).abs() < 0.001,

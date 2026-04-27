@@ -1,3 +1,7 @@
+// Shared HTTP response body type and common error/status response helpers.
+// All handlers return BoxBody so file streaming and static bytes can share
+// a single concrete type without generics leaking through the call stack.
+
 use bytes::Bytes;
 use http_body_util::{combinators::BoxBody as ErasedBody, BodyExt, Full};
 use hyper::{Response, StatusCode};
@@ -88,7 +92,7 @@ pub fn response_status(code: u16) -> HttpResponse {
 }
 
 /// Return 401 with a `WWW-Authenticate: Basic` challenge header.
-/// The realm is encoded as a quoted-string per RFC 7235 §2.1.
+/// The realm is encoded as a quoted-string per RFC 7235 s.2.1.
 pub fn response_www_auth(realm: &str) -> HttpResponse {
     // Escape backslashes then double-quotes to form a valid quoted-string.
     let safe = realm.replace('\\', "\\\\").replace('"', "\\\"");
@@ -113,7 +117,7 @@ pub fn response_redirect(to: &str, code: u16) -> HttpResponse {
         .expect("caller-validated redirect code and URL")
 }
 
-// ── Tests ─────────────────────────────────────────────────────────
+// -- Tests ---------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -220,7 +224,7 @@ mod tests {
     fn response_status_401_has_no_www_authenticate() {
         // response_status is used for generic denials; a plain 401
         // (without an auth block configured) must NOT include a
-        // WWW-Authenticate header — browsers would pop an auth dialog
+        // WWW-Authenticate header -- browsers would pop an auth dialog
         // even when the page has its own login UI.
         let r = response_status(401);
         assert_eq!(r.status(), 401);

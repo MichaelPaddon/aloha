@@ -1,3 +1,6 @@
+// Built-in server status page: serves request counters, latency
+// histogram, and uptime as HTML or JSON depending on Accept header.
+
 use crate::error::{bytes_body, HttpResponse};
 use crate::metrics::{Metrics, Snapshot};
 use bytes::Bytes;
@@ -37,7 +40,7 @@ fn accept_json(headers: &hyper::HeaderMap) -> bool {
         .unwrap_or(false)
 }
 
-// ── JSON output ───────────────────────────────────────────────────
+// -- JSON output ---------------------------------------------------
 
 fn render_json(s: &Snapshot) -> HttpResponse {
     let body = serde_json::json!({
@@ -76,7 +79,7 @@ fn render_json(s: &Snapshot) -> HttpResponse {
         .expect("known-valid response")
 }
 
-// ── HTML output ───────────────────────────────────────────────────
+// -- HTML output ---------------------------------------------------
 
 fn render_html(s: &Snapshot) -> HttpResponse {
     let total_lat: u64 = s.latency.iter().sum();
@@ -87,7 +90,7 @@ fn render_html(s: &Snapshot) -> HttpResponse {
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="refresh" content="10">
-<title>aloha — Status</title>
+<title>aloha -- Status</title>
 <style>
 *,*::before,*::after{{box-sizing:border-box}}
 :root{{
@@ -164,7 +167,7 @@ h2{{font-size:.85rem;font-weight:700;color:var(--muted);
   <img class="topbar-logo" src="/aloha-logo.svg" alt="aloha">
   <div class="topbar-sep"></div>
   <span class="topbar-title">Server Status</span>
-  <a class="topbar-home" href="/">← Home</a>
+  <a class="topbar-home" href="/">&larr; Home</a>
 </header>
 <main class="main">
 
@@ -304,7 +307,7 @@ fn fmt_num(n: u64) -> String {
     out.chars().rev().collect()
 }
 
-// ── Tests ─────────────────────────────────────────────────────────
+// -- Tests ---------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -330,7 +333,7 @@ mod tests {
         }
     }
 
-    // ── accept_json ──────────────────────────────────────────────
+    // -- accept_json ----------------------------------------------
 
     #[test]
     fn accept_json_true_for_application_json() {
@@ -354,7 +357,7 @@ mod tests {
         assert!(!accept_json(&hyper::HeaderMap::new()));
     }
 
-    // ── render_json ──────────────────────────────────────────────
+    // -- render_json ----------------------------------------------
 
     #[tokio::test]
     async fn render_json_contains_required_keys() {
@@ -382,7 +385,7 @@ mod tests {
         assert!(text.contains("1100"));
     }
 
-    // ── render_html ──────────────────────────────────────────────
+    // -- render_html ----------------------------------------------
 
     #[tokio::test]
     async fn render_html_contains_status_classes() {
@@ -412,7 +415,7 @@ mod tests {
         assert!(!html.contains("Memory"), "memory section should be absent");
     }
 
-    // ── fmt_num ──────────────────────────────────────────────────
+    // -- fmt_num --------------------------------------------------
 
     #[test]
     fn fmt_num_zero() {

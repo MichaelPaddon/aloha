@@ -1,3 +1,7 @@
+// HAProxy PROXY protocol header builder (v1 text and v2 binary).
+// Used by the TCP proxy listener to forward the real client address
+// to backends that cannot see it directly through NAT or a load balancer.
+
 use std::net::{IpAddr, SocketAddr};
 
 use crate::config::ProxyProtocolVersion;
@@ -17,7 +21,7 @@ pub fn build_header(
     }
 }
 
-// ── PROXY protocol v1 (text) ──────────────────────────────────────
+// -- PROXY protocol v1 (text) --------------------------------------
 
 // Format: "PROXY {TCP4|TCP6} {src_ip} {dst_ip} {src_port} {dst_port}\r\n"
 fn build_v1(src: SocketAddr, dst: SocketAddr) -> Vec<u8> {
@@ -35,7 +39,7 @@ fn build_v1(src: SocketAddr, dst: SocketAddr) -> Vec<u8> {
     .into_bytes()
 }
 
-// ── PROXY protocol v2 (binary) ───────────────────────────────────
+// -- PROXY protocol v2 (binary) -----------------------------------
 
 // Fixed 12-byte signature that marks a v2 PROXY header.
 const V2_SIGNATURE: &[u8; 12] = b"\x0D\x0A\x0D\x0A\x00\x0D\x0A\x51\x55\x49\x54\x0A";
@@ -65,7 +69,7 @@ fn build_v2(src: SocketAddr, dst: SocketAddr) -> Vec<u8> {
             buf.extend_from_slice(&dst.port().to_be_bytes());
         }
         _ => {
-            // Mixed address families — emit UNSPEC/UNSPEC with no addresses.
+            // Mixed address families -- emit UNSPEC/UNSPEC with no addresses.
             buf.push(0x00);
             buf.extend_from_slice(&0u16.to_be_bytes());
         }
@@ -74,7 +78,7 @@ fn build_v2(src: SocketAddr, dst: SocketAddr) -> Vec<u8> {
     buf
 }
 
-// ── Tests ─────────────────────────────────────────────────────────
+// -- Tests ---------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -89,7 +93,7 @@ mod tests {
         SocketAddr::new(IpAddr::V6(Ipv6Addr::from(ip)), port)
     }
 
-    // ── v1 ────────────────────────────────────────────────────────
+    // -- v1 --------------------------------------------------------
 
     #[test]
     fn v1_ipv4_format() {
@@ -119,7 +123,7 @@ mod tests {
         assert!(h.ends_with(b"\r\n"));
     }
 
-    // ── v2 ────────────────────────────────────────────────────────
+    // -- v2 --------------------------------------------------------
 
     #[test]
     fn v2_starts_with_signature() {

@@ -1,3 +1,9 @@
+// Virtual host resolution and location prefix matching.
+//
+// Vhosts are resolved in order: exact hostname (O(1) HashMap), then
+// regex patterns in config order, then the listener default.  Within
+// a vhost, the longest matching location prefix wins.
+
 use crate::access::AccessPolicy;
 use crate::config::{BasicAuthConfig, Config, ListenerConfig, VHostConfig};
 use crate::handler::Handler;
@@ -28,7 +34,7 @@ struct Location {
 }
 
 pub struct Router {
-    // Literal hostname → vhost; checked first at request time.
+    // Literal hostname -> vhost; checked first at request time.
     vhosts: HashMap<String, Arc<VHost>>,
     // Regex patterns in config order; checked when the literal
     // lookup produces no match.  Anchored at both ends.
@@ -99,7 +105,7 @@ impl Router {
         let vhost = self.resolve_vhost(host.as_deref(), listener_bind)?;
         let path = req.uri().path();
         // Longest prefix match: the most specific location wins.
-        // This makes declaration order irrelevant — "/_status" always
+        // This makes declaration order irrelevant -- "/_status" always
         // beats "/" regardless of which is declared first in the config.
         vhost.locations.iter()
             .filter(|loc| path.starts_with(loc.path.as_str()))
@@ -140,7 +146,7 @@ impl Router {
 }
 
 // Strip the port suffix from a Host header value.
-// Handles IPv6 bracket notation: [::1]:8080 → [::1].
+// Handles IPv6 bracket notation: [::1]:8080 -> [::1].
 fn strip_port(host: &str) -> &str {
     if host.starts_with('[') {
         if let Some(end) = host.find(']') {
@@ -286,7 +292,7 @@ mod tests {
         );
     }
 
-    // ── regex vhost matching ───────────────────────────────────────
+    // -- regex vhost matching ---------------------------------------
 
     #[test]
     fn regex_vhost_matches_by_pattern() {
@@ -448,7 +454,7 @@ mod tests {
     fn regex_vhost_as_implicit_default() {
         // When the only vhost has a regex name, it becomes the implicit
         // default (first vhost).  A host that does not match the regex
-        // must still be served by the default — the regex name must be
+        // must still be served by the default -- the regex name must be
         // resolved to an Arc<VHost> at startup, not matched at request time.
         let config = make_config(
             r#"
@@ -463,7 +469,7 @@ mod tests {
             "#,
         );
         let router = make_router(&config);
-        // "other.org" does not match the regex — falls back to the default.
+        // "other.org" does not match the regex -- falls back to the default.
         assert_eq!(
             route_str(&router, "other.org", "/", "0.0.0.0:80"),
             Some("/".into())
@@ -602,7 +608,7 @@ mod tests {
             "#,
         );
         let router = make_router(&config);
-        // Pass None for host — simulates a request with no Host header.
+        // Pass None for host -- simulates a request with no Host header.
         let vhost = router.resolve_vhost(None, "0.0.0.0:80");
         assert!(vhost.is_some(), "no Host header should fall back to default");
         let path = vhost.and_then(|vh| {
@@ -626,7 +632,7 @@ mod tests {
         assert_eq!(strip_port("[::1]"), "[::1]");
     }
 
-    // ── basic_auth / access_policy propagation ────────────────────
+    // -- basic_auth / access_policy propagation --------------------
 
     #[test]
     fn basic_auth_realm_propagates_to_route() {

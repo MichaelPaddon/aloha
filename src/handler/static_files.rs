@@ -1,3 +1,7 @@
+// Static file handler: streams files with 64 KB chunks, supports
+// byte-range requests (Range/Content-Range), ETags for conditional GET,
+// and directory index files.  Safe path joining prevents traversal.
+
 use crate::error::{
     bytes_body, response_400, response_403, response_404,
     response_416, response_500, HttpResponse,
@@ -85,7 +89,7 @@ impl StaticHandler {
         let target = if metadata.is_dir() {
             match self.resolve_index(&canonical_path).await {
                 Some(p) => p,
-                // Directory exists but has no index — do not list.
+                // Directory exists but has no index -- do not list.
                 None => return response_403(),
             }
         } else {
@@ -144,9 +148,9 @@ impl StaticHandler {
                     )
                     .unwrap()
             }
-            // Range header present but out of bounds → 416.
+            // Range header present but out of bounds -> 416.
             Some(Err(())) => response_416(file_len),
-            // No Range header → full 200 response.
+            // No Range header -> full 200 response.
             None => {
                 let file = match File::open(&target).await {
                     Ok(f) => f,
@@ -184,13 +188,13 @@ impl StaticHandler {
     }
 }
 
-// ── Range parsing ─────────────────────────────────────────────────
+// -- Range parsing -------------------------------------------------
 //
 // Parses a single `Range: bytes=start-end` header value.
 // Returns:
-//   None          – no Range header (serve the full file)
-//   Some(Ok(_))   – valid range within [0, file_len)
-//   Some(Err(()))  – syntactically invalid or out-of-range (→ 416)
+//   None          - no Range header (serve the full file)
+//   Some(Ok(_))   - valid range within [0, file_len)
+//   Some(Err(()))  - syntactically invalid or out-of-range (-> 416)
 //
 // Multi-range requests (e.g. `bytes=0-499,600-999`) are not supported;
 // they are treated as absent and a 200 is returned instead.
@@ -205,13 +209,13 @@ fn parse_range_header(
 
     let bytes = value.strip_prefix("bytes=")?;
 
-    // Decline multi-range requests — return None so the caller sends 200.
+    // Decline multi-range requests -- return None so the caller sends 200.
     if bytes.contains(',') {
         return None;
     }
 
     let (start, end) = if let Some(suffix) = bytes.strip_prefix('-') {
-        // Suffix range: bytes=-N → last N bytes.
+        // Suffix range: bytes=-N -> last N bytes.
         let n: u64 = suffix.parse().ok()?;
         if n == 0 || file_len == 0 {
             return Some(Err(()));
@@ -223,7 +227,7 @@ fn parse_range_header(
         let start: u64 = parts.next()?.parse().ok()?;
         let end_str = parts.next()?;
         let end = if end_str.is_empty() {
-            // Open-ended: bytes=N- → from N to EOF.
+            // Open-ended: bytes=N- -> from N to EOF.
             if file_len == 0 {
                 return Some(Err(()));
             }
@@ -240,7 +244,7 @@ fn parse_range_header(
     Some(Ok((start, end)))
 }
 
-// ── FileBody ──────────────────────────────────────────────────────
+// -- FileBody ------------------------------------------------------
 //
 // Streams a tokio File in 64 KB chunks without buffering the whole
 // file in memory.  `limit` caps the number of bytes read, enabling
@@ -315,7 +319,7 @@ impl Body for FileBody {
     }
 }
 
-// ── Path helpers ──────────────────────────────────────────────────
+// -- Path helpers --------------------------------------------------
 
 /// Join `root` with the URI-decoded `uri_path`, blocking traversal.
 ///
@@ -430,7 +434,7 @@ mod tests {
     #[test]
     fn safe_join_encoded_slash_in_name_is_fine() {
         let root = Path::new("/var/www");
-        // %2F → '/' → segments ["foo", "bar.txt"], neither is "..".
+        // %2F -> '/' -> segments ["foo", "bar.txt"], neither is "..".
         let result = safe_join(root, "/foo%2Fbar.txt");
         assert!(result.is_some());
     }
@@ -463,7 +467,7 @@ mod tests {
 
     #[test]
     fn percent_decode_invalid_sequence_passed_through() {
-        // %GG is not valid hex — bytes passed through as-is.
+        // %GG is not valid hex -- bytes passed through as-is.
         assert_eq!(percent_decode("/%GGfile"), "/%GGfile");
     }
 
@@ -572,7 +576,7 @@ mod tests {
 
     #[test]
     fn range_start_at_file_length_is_error() {
-        // bytes=100- on a 100-byte file: start (100) > end (99) → error.
+        // bytes=100- on a 100-byte file: start (100) > end (99) -> error.
         assert_eq!(parse("bytes=100-", 100), Some(Err(())));
     }
 

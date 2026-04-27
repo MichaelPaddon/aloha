@@ -1,3 +1,9 @@
+// KDL configuration file parsing and validation.
+//
+// Config::load() reads a .kdl file; Config::parse() accepts a string
+// (used in tests).  All fields are resolved to concrete values before
+// validate() is called so downstream code never sees partial state.
+
 use crate::access::{AccessAction, AccessCondition, AccessPolicy, AccessRule};
 use anyhow::{anyhow, bail, Context};
 use kdl::{KdlDocument, KdlNode};
@@ -5,7 +11,7 @@ use miette::Diagnostic as _;
 use std::path::Path;
 use regex::Regex;
 
-// ── Public types ──────────────────────────────────────────────────
+// -- Public types --------------------------------------------------
 
 #[derive(Debug, Default)]
 pub struct Config {
@@ -108,7 +114,7 @@ pub struct TcpProxyConfig {
 pub struct ListenerConfig {
     // Exactly one of bind or fd must be set (enforced by validate).
     pub bind: Option<String>,
-    // Raw file descriptor — used for systemd socket activation.
+    // Raw file descriptor -- used for systemd socket activation.
     pub fd: Option<i32>,
     pub tls: Option<TlsListenerConfig>,
     pub default_vhost: Option<String>,
@@ -139,7 +145,7 @@ pub struct TlsListenerConfig {
 /// How a TLS listener obtains its certificate and private key.
 ///
 /// The default when a `tls` node is present but carries no properties
-/// is `SelfSigned` — an ephemeral certificate generated at startup,
+/// is `SelfSigned` -- an ephemeral certificate generated at startup,
 /// useful for development without any configuration.
 #[derive(Debug, Clone)]
 pub enum TlsConfig {
@@ -246,7 +252,7 @@ pub enum HandlerConfig {
     Status,
 }
 
-// ── Config loading ────────────────────────────────────────────────
+// -- Config loading ------------------------------------------------
 
 impl Config {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
@@ -283,16 +289,16 @@ impl Config {
                 .unwrap_or("")
                 .trim();
             if name.is_empty() {
-                anyhow!("line {line}: syntax error — `{snippet}`")
+                anyhow!("line {line}: syntax error -- `{snippet}`")
             } else {
-                anyhow!("{name}:{line}: syntax error — `{snippet}`")
+                anyhow!("{name}:{line}: syntax error -- `{snippet}`")
             }
         })?;
         let mut config = Config::default();
         // Raw default-vhost specs, one per listener, in order:
-        //   None          – child node absent; resolved to first vhost
-        //   Some(None)    – explicit null; no fallback vhost
-        //   Some(Some(s)) – named vhost
+        //   None          - child node absent; resolved to first vhost
+        //   Some(None)    - explicit null; no fallback vhost
+        //   Some(Some(s)) - named vhost
         let mut raw_defaults: Vec<Option<Option<String>>> = Vec::new();
         for node in doc.nodes() {
             let line = node_line(text, node);
@@ -314,7 +320,7 @@ impl Config {
                 ),
             }
         }
-        // Resolve: absent → first vhost name, null → None, named → Some(s).
+        // Resolve: absent -> first vhost name, null -> None, named -> Some(s).
         // tcp-proxy listeners bypass HTTP entirely; leave default_vhost = None.
         let first = config.vhosts.first().map(|v| v.name.clone());
         for (listener, raw) in
@@ -407,7 +413,7 @@ impl Config {
     }
 }
 
-// ── Node parsers ──────────────────────────────────────────────────
+// -- Node parsers --------------------------------------------------
 
 fn node_line(src: &str, node: &KdlNode) -> usize {
     src[..node.span().offset()]
@@ -509,9 +515,9 @@ fn parse_auth_backend(
 }
 
 // Returns (config, raw_default_vhost) where raw_default_vhost is:
-//   None          – child node absent; resolved to first vhost
-//   Some(None)    – explicitly set to null
-//   Some(Some(s)) – explicitly set to a hostname string
+//   None          - child node absent; resolved to first vhost
+//   Some(None)    - explicitly set to null
+//   Some(Some(s)) - explicitly set to a hostname string
 fn parse_listener(
     node: &KdlNode,
     src: &str,
@@ -924,7 +930,7 @@ fn parse_handler(
     }
 }
 
-// ── KDL access helpers ────────────────────────────────────────────
+// -- KDL access helpers --------------------------------------------
 //
 // kdl 4.x: node.get(key) returns &KdlEntry; call .value() to reach
 // the underlying &KdlValue.
@@ -998,7 +1004,7 @@ fn child_null_or_str(
     })
 }
 
-// ── Tests ─────────────────────────────────────────────────────────
+// -- Tests ---------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -1378,7 +1384,7 @@ mod tests {
         ));
     }
 
-    // ── tcp-proxy ─────────────────────────────────────────────────
+    // -- tcp-proxy -------------------------------------------------
 
     #[test]
     fn tcp_proxy_parses() {
@@ -1836,7 +1842,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // ── default-vhost resolution ───────────────────────────────────
+    // -- default-vhost resolution -----------------------------------
 
     #[test]
     fn default_vhost_absent_resolves_to_first_vhost() {
@@ -1917,7 +1923,7 @@ mod tests {
 
     #[test]
     fn default_vhost_absent_multiple_listeners() {
-        // Absent → first vhost; null → no default.
+        // Absent -> first vhost; null -> no default.
         let cfg = Config::parse(
             r#"
             listener {
@@ -1942,7 +1948,7 @@ mod tests {
         assert!(cfg.listeners[1].default_vhost.is_none());
     }
 
-    // ── timeouts ──────────────────────────────────────────────────
+    // -- timeouts --------------------------------------------------
 
     #[test]
     fn timeouts_parse() {
@@ -2015,7 +2021,7 @@ mod tests {
         assert!(t.keepalive_secs.is_none());
     }
 
-    // ── server user/group ─────────────────────────────────────────
+    // -- server user/group -----------------------------------------
 
     #[test]
     fn server_user_and_group_parse() {
@@ -2063,7 +2069,7 @@ mod tests {
     }
 
 
-        // ── access blocks ─────────────────────────────────────────────
+        // -- access blocks ---------------------------------------------
 
     #[test]
     fn access_allow_ip_parses() {
@@ -2395,7 +2401,7 @@ mod tests {
         )
         .unwrap();
         let policy = cfg.vhosts[0].locations[0].access.as_ref().unwrap();
-        // deny rule has no conditions → catch-all
+        // deny rule has no conditions -> catch-all
         assert!(policy.rules[1].conditions.is_empty());
     }
 
@@ -2462,7 +2468,7 @@ mod tests {
         assert!(cfg.server.group.is_none());
     }
 
-    // ── auth backend ──────────────────────────────────────────────
+    // -- auth backend ----------------------------------------------
 
     #[test]
     fn server_auth_pam_default_service() {
@@ -2602,7 +2608,7 @@ mod tests {
         assert_eq!(auth.realm, "Restricted");
     }
 
-    // ── LDAP auth backend ─────────────────────────────────────────
+    // -- LDAP auth backend -----------------------------------------
 
     #[test]
     fn server_auth_ldap_defaults() {

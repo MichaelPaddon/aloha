@@ -1,3 +1,9 @@
+// Per-connection hyper service, TCP/TLS listener loops, and access logging.
+//
+// AppState is shared across all connections on all listeners.  Each
+// accepted connection gets a cheap clone of AlohaService (Arc refs only)
+// and is driven to completion before the graceful-shutdown drain finishes.
+
 use crate::access::AccessOutcome;
 use crate::acme::ChallengeMap;
 use crate::auth::Authenticator;
@@ -227,7 +233,7 @@ fn make_builder(timeouts: &Timeouts) -> auto::Builder<TokioExecutor> {
     builder
 }
 
-// Bind a TCP socket for the listener — exported so main() can bind
+// Bind a TCP socket for the listener -- exported so main() can bind
 // all sockets before dropping root privileges.
 //
 // For bind addresses this does a synchronous kernel bind; for fd-based
@@ -410,7 +416,7 @@ async fn serve_connection<I>(
     }
 }
 
-// ── TCP proxy listener ────────────────────────────────────────────
+// -- TCP proxy listener --------------------------------------------
 
 // `acceptor` is Some when the listener should terminate TLS before
 // forwarding the decrypted stream to the upstream.

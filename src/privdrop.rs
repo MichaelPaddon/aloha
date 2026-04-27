@@ -1,10 +1,13 @@
+// Unix privilege drop: switch from root to an unprivileged user after
+// all privileged sockets have been bound.  Also handles pre-drop
+// ownership of the ACME state directory.
 // Privilege dropping for Unix servers that start as root.
 //
 // Call drop_privileges() after all sockets have been bound.
 // The function is a no-op when the process is not running as root,
 // so it is safe to call unconditionally on any Unix deployment.
 //
-// Dropping order: setgroups → setgid → setuid.
+// Dropping order: setgroups -> setgid -> setuid.
 // The UID change must come last; once it is applied the process can
 // no longer call setgid.
 
@@ -64,7 +67,7 @@ pub fn drop_privileges(
     user: &str,
     group: Option<&str>,
 ) -> anyhow::Result<()> {
-    // Not root — nothing to do.
+    // Not root -- nothing to do.
     if !nix::unistd::getuid().is_root() {
         return Ok(());
     }
@@ -92,9 +95,9 @@ pub fn drop_privileges(
     setgid(gid).context("setgid")?;
     setuid(uid).context("setuid")?;
 
-    // Verify: attempt to regain root — it must fail.
+    // Verify: attempt to regain root -- it must fail.
     if setuid(Uid::from_raw(0)).is_ok() {
-        bail!("setuid(0) succeeded after privilege drop — aborting");
+        bail!("setuid(0) succeeded after privilege drop -- aborting");
     }
 
     tracing::info!(
