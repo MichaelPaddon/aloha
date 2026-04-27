@@ -1,13 +1,12 @@
 use crate::access::AccessOutcome;
 use crate::acme::ChallengeMap;
-use crate::auth::{AuthDecision, Authenticator};
+use crate::auth::Authenticator;
 use crate::compress;
 use crate::config::{ListenerConfig, TcpProxyConfig, Timeouts};
 use crate::metrics::Metrics;
 use crate::proxy_proto;
 use crate::error::{
-    bytes_body, response_401, response_403, response_404,
-    response_redirect, response_status, BoxBody,
+    bytes_body, response_404, response_redirect, response_status, BoxBody,
 };
 use crate::router::Router;
 use arc_swap::ArcSwap;
@@ -121,27 +120,12 @@ impl hyper::service::Service<Request<Incoming>> for AlohaService {
             let serve_fut = async {
                 match state.router.route(&req, &bind) {
                     Some(route) => {
-                        // Authenticate once if either access or auth
-                        // policy needs identity information.
-                        let principal = if route.access_policy.is_some()
-                            || route.auth_policy.is_some()
-                        {
-                            Some(
-                                state
-                                    .authenticator
-                                    .authenticate(&req)
-                                    .await,
-                            )
-                        } else {
-                            None
-                        };
-
-                        // Unified access policy: IP + identity rules.
-                        // Evaluated before legacy auth so IP blocks are
-                        // enforced even when auth is not configured.
                         if let Some(policy) = &route.access_policy {
-                            let p = principal.as_ref().unwrap();
-                            match policy.evaluate(peer.ip(), p) {
+                            let principal = state
+                                .authenticator
+                                .authenticate(&req)
+                                .await;
+                            match policy.evaluate(peer.ip(), &principal) {
                                 AccessOutcome::Allow => {}
                                 AccessOutcome::Deny(code) => {
                                     return response_status(code);
@@ -151,23 +135,6 @@ impl hyper::service::Service<Request<Incoming>> for AlohaService {
                                 }
                             }
                         }
-
-                        // Legacy auth policy (identity only).
-                        if let Some(policy) = &route.auth_policy {
-                            let p = principal.as_ref().unwrap();
-                            match policy.evaluate(p) {
-                                AuthDecision::Allow => {}
-                                AuthDecision::Unauthenticated => {
-                                    return response_401();
-                                }
-                                AuthDecision::Deny => {
-                                    return response_403();
-                                }
-                            }
-                        }
-
-                        // Routing and access use a shared ref; the
-                        // handler takes ownership to consume the body.
                         route
                             .handler
                             .serve(req, &route.matched_prefix)

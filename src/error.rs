@@ -27,13 +27,6 @@ fn html_response(
         .expect("known-valid status and header")
 }
 
-pub fn response_401() -> HttpResponse {
-    html_response(
-        StatusCode::UNAUTHORIZED,
-        "<h1>401 Unauthorized</h1>",
-    )
-}
-
 pub fn response_400() -> HttpResponse {
     html_response(
         StatusCode::BAD_REQUEST,
@@ -107,16 +100,6 @@ pub fn response_redirect(to: &str, code: u16) -> HttpResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn response_401_status_and_type() {
-        let r = response_401();
-        assert_eq!(r.status(), 401);
-        assert_eq!(
-            r.headers().get("content-type").unwrap(),
-            "text/html; charset=utf-8"
-        );
-    }
 
     #[test]
     fn response_400_status() {
