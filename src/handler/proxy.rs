@@ -3,6 +3,7 @@ use http_body_util::{BodyExt, combinators::BoxBody};
 use hyper::body::Incoming;
 use hyper::header::{HeaderMap, HeaderName, HeaderValue};
 use hyper::{Request, Response, Uri, Version};
+use hyper_rustls::HttpsConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
@@ -29,7 +30,7 @@ pub struct ProxyHandler {
     // The client maintains a connection pool keyed by authority.
     // Stored in Arc<Handler> by the router, so it is shared across
     // all requests to this location.
-    client: Client<HttpConnector, UpstreamBody>,
+    client: Client<HttpsConnector<HttpConnector>, UpstreamBody>,
     upstream: Uri,
     strip_prefix: bool,
 }
@@ -39,16 +40,23 @@ impl ProxyHandler {
         let upstream: Uri = upstream
             .parse()
             .map_err(|_| anyhow::anyhow!("invalid upstream URL: {upstream}"))?;
-        if upstream.scheme_str() != Some("http") {
-            anyhow::bail!(
-                "upstream '{upstream}' must use http scheme; \
-                 https backends are not yet supported"
-            );
+        match upstream.scheme_str() {
+            Some("http") | Some("https") => {}
+            _ => anyhow::bail!(
+                "upstream '{upstream}' must use http or https scheme"
+            ),
         }
         if upstream.authority().is_none() {
             anyhow::bail!("upstream '{upstream}' must include a host");
         }
-        let client = Client::builder(TokioExecutor::new()).build_http();
+        // HttpsConnector handles both http:// and https:// upstreams.
+        // Mozilla WebPKI roots are bundled; no OS cert store dependency.
+        let connector = hyper_rustls::HttpsConnectorBuilder::new()
+            .with_webpki_roots()
+            .https_or_http()
+            .enable_http1()
+            .build();
+        let client = Client::builder(TokioExecutor::new()).build(connector);
         Ok(Self { client, upstream, strip_prefix })
     }
 
@@ -228,7 +236,45 @@ mod tests {
         s.parse().unwrap()
     }
 
+    // ── ProxyHandler::new scheme validation ──────────────────────
+
+    #[test]
+    fn new_accepts_http_upstream() {
+        assert!(ProxyHandler::new("http://backend:8080", false).is_ok());
+    }
+
+    #[test]
+    fn new_accepts_https_upstream() {
+        assert!(
+            ProxyHandler::new("https://backend:8443", false).is_ok(),
+            "https upstream should be accepted"
+        );
+    }
+
+    #[test]
+    fn new_rejects_invalid_scheme() {
+        assert!(ProxyHandler::new("ftp://backend", false).is_err());
+    }
+
+    #[test]
+    fn new_rejects_missing_host() {
+        assert!(ProxyHandler::new("http:///path", false).is_err());
+    }
+
     // ── build_backend_uri ─────────────────────────────────────────
+
+    #[test]
+    fn build_backend_uri_https_scheme_preserved() {
+        let u = build_backend_uri(
+            &uri("https://secure-backend"),
+            &uri("/api/data"),
+            "/api/",
+            false,
+        )
+        .unwrap();
+        assert_eq!(u.scheme_str(), Some("https"));
+        assert_eq!(u.to_string(), "https://secure-backend/api/data");
+    }
 
     #[test]
     fn build_backend_uri_no_strip() {

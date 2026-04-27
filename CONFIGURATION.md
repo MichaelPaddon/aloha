@@ -460,7 +460,7 @@ location "/api/" {
 
 | Child node | Type | Default | Description |
 |---|---|---|---|
-| `upstream` | URL | — | **Required.** Base URL of the upstream server. Only `http` scheme is supported; HTTPS backends are not yet implemented. |
+| `upstream` | URL | — | **Required.** Base URL of the upstream server. Both `http` and `https` schemes are supported. HTTPS backends are verified against Mozilla's bundled root certificates. |
 | `strip-prefix` | boolean | `false` | Remove the matched location prefix from the request path before forwarding. With `location "/api/"` and `strip-prefix true`, `/api/users` is forwarded as `/users`. |
 
 The proxy sets `X-Forwarded-For` (appending the client IP to any

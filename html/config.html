@@ -1098,8 +1098,10 @@
             <tr>
               <td>upstream</td><td>URL</td><td>—</td>
               <td><span class="badge badge-req">required</span>
-                  Base URL of the upstream. Only <code>http</code> scheme is
-                  supported; HTTPS backends are not yet implemented.</td>
+                  Base URL of the upstream. Both <code>http</code> and
+                  <code>https</code> schemes are supported. HTTPS backends
+                  are verified against Mozilla's bundled root
+                  certificates.</td>
             </tr>
             <tr>
               <td>strip-prefix</td><td>boolean</td><td><code>false</code></td>
