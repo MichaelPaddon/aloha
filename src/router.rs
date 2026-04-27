@@ -1,5 +1,5 @@
 use crate::access::AccessPolicy;
-use crate::config::{Config, ListenerConfig, VHostConfig};
+use crate::config::{BasicAuthConfig, Config, ListenerConfig, VHostConfig};
 use crate::handler::Handler;
 use crate::metrics::Metrics;
 use hyper::Request;
@@ -12,6 +12,7 @@ pub struct Route {
     pub handler: Arc<Handler>,
     pub matched_prefix: String,
     pub access_policy: Option<Arc<AccessPolicy>>,
+    pub basic_auth: Option<Arc<BasicAuthConfig>>,
 }
 
 // Runtime representation of a virtual host, with handlers pre-built.
@@ -23,6 +24,7 @@ struct Location {
     path: String,
     handler: Arc<Handler>,
     access_policy: Option<Arc<AccessPolicy>>,
+    basic_auth: Option<Arc<BasicAuthConfig>>,
 }
 
 pub struct Router {
@@ -106,6 +108,7 @@ impl Router {
                 handler: loc.handler.clone(),
                 matched_prefix: loc.path.clone(),
                 access_policy: loc.access_policy.clone(),
+                basic_auth: loc.basic_auth.clone(),
             })
     }
 
@@ -161,6 +164,8 @@ fn build_vhost(
             handler,
             access_policy: loc.access.as_ref()
                 .map(|p| Arc::new(p.clone())),
+            basic_auth: loc.auth.as_ref()
+                .map(|a| Arc::new(a.clone())),
         });
     }
     Ok(VHost { locations })

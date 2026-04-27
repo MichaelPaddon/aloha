@@ -87,6 +87,24 @@ pub fn response_status(code: u16) -> HttpResponse {
         })
 }
 
+/// Return 401 with a `WWW-Authenticate: Basic` challenge header.
+/// The realm is encoded as a quoted-string per RFC 7235 §2.1.
+pub fn response_www_auth(realm: &str) -> HttpResponse {
+    // Escape backslashes then double-quotes to form a valid quoted-string.
+    let safe = realm.replace('\\', "\\\\").replace('"', "\\\"");
+    Response::builder()
+        .status(StatusCode::UNAUTHORIZED)
+        .header(
+            "WWW-Authenticate",
+            format!("Basic realm=\"{safe}\""),
+        )
+        .header("Content-Type", "text/html; charset=utf-8")
+        .body(bytes_body(Bytes::from_static(
+            b"<h1>401 Unauthorized</h1>",
+        )))
+        .expect("known-valid status and header")
+}
+
 pub fn response_redirect(to: &str, code: u16) -> HttpResponse {
     Response::builder()
         .status(code)
@@ -151,5 +169,29 @@ mod tests {
             r.headers().get("location").unwrap(),
             "https://example.com/"
         );
+    }
+
+    #[test]
+    fn response_www_auth_status_and_header() {
+        let r = response_www_auth("My Realm");
+        assert_eq!(r.status(), 401);
+        assert_eq!(
+            r.headers().get("www-authenticate").unwrap(),
+            "Basic realm=\"My Realm\""
+        );
+    }
+
+    #[test]
+    fn response_www_auth_escapes_quotes() {
+        let r = response_www_auth("Say \"hello\"");
+        let h = r.headers().get("www-authenticate").unwrap();
+        assert_eq!(h, r#"Basic realm="Say \"hello\"""#);
+    }
+
+    #[test]
+    fn response_www_auth_escapes_backslashes() {
+        let r = response_www_auth(r"C:\path");
+        let h = r.headers().get("www-authenticate").unwrap();
+        assert_eq!(h, r#"Basic realm="C:\\path""#);
     }
 }

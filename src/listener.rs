@@ -6,7 +6,8 @@ use crate::config::{ListenerConfig, TcpProxyConfig, Timeouts};
 use crate::metrics::Metrics;
 use crate::proxy_proto;
 use crate::error::{
-    bytes_body, response_404, response_redirect, response_status, BoxBody,
+    bytes_body, response_404, response_redirect, response_status,
+    response_www_auth, BoxBody,
 };
 use crate::router::Router;
 use arc_swap::ArcSwap;
@@ -127,6 +128,14 @@ impl hyper::service::Service<Request<Incoming>> for AlohaService {
                                 .await;
                             match policy.evaluate(peer.ip(), &principal) {
                                 AccessOutcome::Allow => {}
+                                AccessOutcome::Deny(401) => {
+                                    let realm = route
+                                        .basic_auth
+                                        .as_ref()
+                                        .map(|a| a.realm.as_str())
+                                        .unwrap_or("Restricted");
+                                    return response_www_auth(realm);
+                                }
                                 AccessOutcome::Deny(code) => {
                                     return response_status(code);
                                 }

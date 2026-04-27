@@ -117,10 +117,14 @@ async fn main() -> anyhow::Result<()> {
     // Phase 1: create shared ACME challenge map and app state.
     let challenges: ChallengeMap =
         Arc::new(Mutex::new(HashMap::new()));
+
+    let authenticator: Arc<dyn auth::Authenticator> =
+        build_authenticator(&config.server.auth);
+
     let state = Arc::new(AppState {
         router,
         acme_challenges: challenges.clone(),
-        authenticator: Arc::new(auth::AnonymousAuthenticator),
+        authenticator,
         metrics: metrics.clone(),
     });
 
@@ -322,4 +326,26 @@ struct Args {
     /// Path to configuration file
     #[arg(short, long, default_value = "aloha.kdl")]
     config: PathBuf,
+}
+
+fn build_authenticator(
+    backend: &Option<config::AuthBackend>,
+) -> Arc<dyn auth::Authenticator> {
+    match backend {
+        #[cfg(unix)]
+        Some(config::AuthBackend::Pam { service }) => {
+            tracing::info!(service, "auth: PAM");
+            Arc::new(auth::PamAuthenticator::new(service.clone()))
+        }
+        None => Arc::new(auth::AnonymousAuthenticator),
+        // On non-Unix builds, PAM is unavailable; fall through to anonymous.
+        #[cfg(not(unix))]
+        Some(_) => {
+            tracing::warn!(
+                "PAM auth configured but not supported on this \
+                 platform; falling back to anonymous"
+            );
+            Arc::new(auth::AnonymousAuthenticator)
+        }
+    }
 }

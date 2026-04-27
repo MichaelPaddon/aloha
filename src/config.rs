@@ -26,6 +26,22 @@ pub struct ServerConfig {
     pub user: Option<String>,
     // Unix group to switch to; defaults to the user's primary group.
     pub group: Option<String>,
+    // Authentication back-end; None means anonymous-only.
+    pub auth: Option<AuthBackend>,
+}
+
+/// Authentication back-end activated at the server level.
+#[derive(Debug, Clone)]
+pub enum AuthBackend {
+    /// Validate HTTP Basic credentials against the PAM stack.
+    /// `service` is the PAM service name, e.g. `"login"`.
+    Pam { service: String },
+}
+
+/// Per-location HTTP Basic auth settings (realm for WWW-Authenticate).
+#[derive(Debug, Clone)]
+pub struct BasicAuthConfig {
+    pub realm: String,
 }
 
 /// Per-listener connection and request timeout configuration.
@@ -166,6 +182,8 @@ pub struct LocationConfig {
     pub handler: HandlerConfig,
     // Firewall-style access policy (IP + identity rules).
     pub access: Option<AccessPolicy>,
+    // HTTP Basic auth realm; None means no WWW-Authenticate challenge.
+    pub auth: Option<BasicAuthConfig>,
 }
 
 #[derive(Debug)]
@@ -379,12 +397,41 @@ fn parse_server(node: &KdlNode, src: &str, name: &str) -> anyhow::Result<ServerC
         .map(|n| parse_tls_options(n, src, name))
         .transpose()?
         .unwrap_or_default();
+    let auth = node
+        .children()
+        .and_then(|doc| {
+            doc.nodes().iter().find(|n| n.name().value() == "auth")
+        })
+        .map(|n| parse_auth_backend(n, src, name))
+        .transpose()?;
     Ok(ServerConfig {
         state_dir: child_str(node, "state-dir"),
         tls_defaults,
         user:  child_str(node, "user"),
         group: child_str(node, "group"),
+        auth,
     })
+}
+
+// Parse a `auth "pam" { service "login" }` node inside `server`.
+fn parse_auth_backend(
+    node: &KdlNode,
+    src: &str,
+    name: &str,
+) -> anyhow::Result<AuthBackend> {
+    let line = node_line(src, node);
+    let kind = arg_str(node, 0).unwrap_or_default();
+    match kind.as_str() {
+        "pam" => {
+            let service = child_str(node, "service")
+                .unwrap_or_else(|| "login".to_owned());
+            Ok(AuthBackend::Pam { service })
+        }
+        other => bail!(
+            "{name}:{line}: unknown auth backend '{other}'; \
+             expected 'pam'"
+        ),
+    }
 }
 
 // Returns (config, raw_default_vhost) where raw_default_vhost is:
@@ -600,7 +647,16 @@ fn parse_location(node: &KdlNode, src: &str, name: &str) -> anyhow::Result<Locat
         .find(|n| n.name().value() == "access")
         .map(|n| parse_access_policy(n, src, name))
         .transpose()?;
-    Ok(LocationConfig { path, handler, access })
+    let auth = children
+        .iter()
+        .find(|n| n.name().value() == "auth")
+        .map(|n| {
+            let realm = child_str(n, "realm")
+                .unwrap_or_else(|| "Restricted".to_owned());
+            Ok::<_, anyhow::Error>(BasicAuthConfig { realm })
+        })
+        .transpose()?;
+    Ok(LocationConfig { path, handler, access, auth })
 }
 
 // Parse an `access { }` block into an AccessPolicy.
@@ -2330,5 +2386,163 @@ mod tests {
         .unwrap();
         assert!(cfg.server.user.is_none());
         assert!(cfg.server.group.is_none());
+    }
+
+    // ── auth backend ──────────────────────────────────────────────
+
+    #[test]
+    fn server_auth_pam_default_service() {
+        let cfg = Config::parse(
+            r#"
+            server {
+                auth "pam"
+            }
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    static { root "."; }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        assert!(matches!(
+            cfg.server.auth,
+            Some(AuthBackend::Pam { service })
+                if service == "login"
+        ));
+    }
+
+    #[test]
+    fn server_auth_pam_explicit_service() {
+        let cfg = Config::parse(
+            r#"
+            server {
+                auth "pam" {
+                    service "aloha"
+                }
+            }
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    static { root "."; }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        assert!(matches!(
+            cfg.server.auth,
+            Some(AuthBackend::Pam { service })
+                if service == "aloha"
+        ));
+    }
+
+    #[test]
+    fn server_auth_absent_is_none() {
+        let cfg = Config::parse(
+            r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    static { root "."; }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        assert!(cfg.server.auth.is_none());
+    }
+
+    #[test]
+    fn server_auth_unknown_backend_is_error() {
+        let result = Config::parse(
+            r#"
+            server {
+                auth "htpasswd"
+            }
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    static { root "."; }
+                }
+            }
+            "#,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn location_auth_realm_parses() {
+        let cfg = Config::parse(
+            r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/admin/" {
+                    auth {
+                        realm "Admin Area"
+                    }
+                    access {
+                        allow {
+                            authenticated
+                        }
+                        deny code=401
+                    }
+                    static { root "."; }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        let auth = cfg.vhosts[0].locations[0].auth.as_ref().unwrap();
+        assert_eq!(auth.realm, "Admin Area");
+    }
+
+    #[test]
+    fn location_auth_default_realm() {
+        let cfg = Config::parse(
+            r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/secure/" {
+                    auth {}
+                    static { root "."; }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        let auth = cfg.vhosts[0].locations[0].auth.as_ref().unwrap();
+        assert_eq!(auth.realm, "Restricted");
+    }
+
+    #[test]
+    fn location_auth_absent_is_none() {
+        let cfg = Config::parse(
+            r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    static { root "."; }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        assert!(cfg.vhosts[0].locations[0].auth.is_none());
     }
 }
