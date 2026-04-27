@@ -337,10 +337,14 @@ fn build_authenticator(
             tracing::info!(service, "auth: PAM");
             Arc::new(auth::PamAuthenticator::new(service.clone()))
         }
+        Some(config::AuthBackend::Ldap(cfg)) => {
+            tracing::info!(url = %cfg.url, "auth: LDAP");
+            Arc::new(auth::LdapAuthenticator::new(cfg.clone()))
+        }
         None => Arc::new(auth::AnonymousAuthenticator),
         // On non-Unix builds, PAM is unavailable; fall through to anonymous.
         #[cfg(not(unix))]
-        Some(_) => {
+        Some(config::AuthBackend::Pam { .. }) => {
             tracing::warn!(
                 "PAM auth configured but not supported on this \
                  platform; falling back to anonymous"

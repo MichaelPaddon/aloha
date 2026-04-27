@@ -36,6 +36,35 @@ pub enum AuthBackend {
     /// Validate HTTP Basic credentials against the PAM stack.
     /// `service` is the PAM service name, e.g. `"login"`.
     Pam { service: String },
+    /// Validate HTTP Basic credentials via an LDAP simple bind.
+    Ldap(LdapAuthConfig),
+}
+
+/// Configuration for the LDAP authentication back-end.
+///
+/// Supports `ldap://`, `ldaps://`, and `ldapi://` (Unix socket) URLs.
+/// The `bind_dn` and `group_filter` fields accept a `{user}` placeholder
+/// that is substituted with the escaped username at authentication time.
+#[derive(Debug, Clone)]
+pub struct LdapAuthConfig {
+    /// LDAP server URL, e.g. `ldap://localhost:389` or
+    /// `ldapi:///var/run/slapd/ldapi`.
+    pub url: String,
+    /// DN template used for the simple bind, e.g.
+    /// `uid={user},ou=people,dc=example,dc=com`.
+    pub bind_dn: String,
+    /// Base DN for the group membership search.
+    pub base_dn: String,
+    /// LDAP filter for finding a user's groups.
+    /// Defaults to `(memberUid={user})` (RFC 2307 posixGroup).
+    pub group_filter: String,
+    /// Entry attribute whose value becomes the group name.
+    /// Defaults to `cn`.
+    pub group_attr: String,
+    /// Upgrade a plain `ldap://` connection to TLS via STARTTLS.
+    pub starttls: bool,
+    /// Seconds before an LDAP operation is abandoned.
+    pub timeout_secs: u64,
 }
 
 /// Per-location HTTP Basic auth settings (realm for WWW-Authenticate).
@@ -413,7 +442,8 @@ fn parse_server(node: &KdlNode, src: &str, name: &str) -> anyhow::Result<ServerC
     })
 }
 
-// Parse a `auth "pam" { service "login" }` node inside `server`.
+// Parse an `auth "pam" { ... }` or `auth "ldap" { ... }` node inside
+// `server { }`.
 fn parse_auth_backend(
     node: &KdlNode,
     src: &str,
@@ -427,9 +457,53 @@ fn parse_auth_backend(
                 .unwrap_or_else(|| "login".to_owned());
             Ok(AuthBackend::Pam { service })
         }
+        "ldap" => {
+            let url = req_child_str(node, "url")
+                .with_context(|| format!("{name}:{line}"))?;
+            let bind_dn = req_child_str(node, "bind-dn")
+                .with_context(|| format!("{name}:{line}"))?;
+            let base_dn = req_child_str(node, "base-dn")
+                .with_context(|| format!("{name}:{line}"))?;
+
+            // Validate URL scheme.
+            let scheme = url.split("://").next().unwrap_or("");
+            if !matches!(scheme, "ldap" | "ldaps" | "ldapi") {
+                bail!(
+                    "{name}:{line}: auth ldap: url must use \
+                     ldap://, ldaps://, or ldapi:// scheme"
+                );
+            }
+            // Placeholder is required so bind-dn is username-specific.
+            if !bind_dn.contains("{user}") {
+                bail!(
+                    "{name}:{line}: auth ldap: bind-dn must contain \
+                     the {{user}} placeholder"
+                );
+            }
+
+            let group_filter = child_str(node, "group-filter")
+                .unwrap_or_else(|| "(memberUid={user})".to_owned());
+            let group_attr = child_str(node, "group-attr")
+                .unwrap_or_else(|| "cn".to_owned());
+            let starttls =
+                child_bool(node, "starttls").unwrap_or(false);
+            let timeout_secs = child_i64(node, "timeout")
+                .map(|n| n as u64)
+                .unwrap_or(5);
+
+            Ok(AuthBackend::Ldap(LdapAuthConfig {
+                url,
+                bind_dn,
+                base_dn,
+                group_filter,
+                group_attr,
+                starttls,
+                timeout_secs,
+            }))
+        }
         other => bail!(
             "{name}:{line}: unknown auth backend '{other}'; \
-             expected 'pam'"
+             expected 'pam' or 'ldap'"
         ),
     }
 }
@@ -2526,6 +2600,285 @@ mod tests {
         .unwrap();
         let auth = cfg.vhosts[0].locations[0].auth.as_ref().unwrap();
         assert_eq!(auth.realm, "Restricted");
+    }
+
+    // ── LDAP auth backend ─────────────────────────────────────────
+
+    #[test]
+    fn server_auth_ldap_defaults() {
+        let cfg = Config::parse(
+            r#"
+            server {
+                auth "ldap" {
+                    url "ldap://localhost:389"
+                    bind-dn "uid={user},ou=people,dc=example,dc=com"
+                    base-dn "ou=groups,dc=example,dc=com"
+                }
+            }
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    static { root "."; }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        if let Some(AuthBackend::Ldap(c)) = &cfg.server.auth {
+            assert_eq!(c.url, "ldap://localhost:389");
+            assert_eq!(
+                c.bind_dn,
+                "uid={user},ou=people,dc=example,dc=com"
+            );
+            assert_eq!(c.base_dn, "ou=groups,dc=example,dc=com");
+            assert_eq!(c.group_filter, "(memberUid={user})");
+            assert_eq!(c.group_attr, "cn");
+            assert!(!c.starttls);
+            assert_eq!(c.timeout_secs, 5);
+        } else {
+            panic!("expected AuthBackend::Ldap");
+        }
+    }
+
+    #[test]
+    fn server_auth_ldap_explicit_options() {
+        let cfg = Config::parse(
+            r#"
+            server {
+                auth "ldap" {
+                    url "ldaps://ldap.example.com:636"
+                    bind-dn "uid={user},ou=people,dc=example,dc=com"
+                    base-dn "ou=groups,dc=example,dc=com"
+                    group-filter "(member=uid={user},ou=people,dc=example,dc=com)"
+                    group-attr "cn"
+                    starttls false
+                    timeout 10
+                }
+            }
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    static { root "."; }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        if let Some(AuthBackend::Ldap(c)) = &cfg.server.auth {
+            assert_eq!(c.url, "ldaps://ldap.example.com:636");
+            assert_eq!(
+                c.group_filter,
+                "(member=uid={user},ou=people,dc=example,dc=com)"
+            );
+            assert_eq!(c.timeout_secs, 10);
+        } else {
+            panic!("expected AuthBackend::Ldap");
+        }
+    }
+
+    #[test]
+    fn server_auth_ldap_unix_socket_url() {
+        let cfg = Config::parse(
+            r#"
+            server {
+                auth "ldap" {
+                    url "ldapi:///var/run/slapd/ldapi"
+                    bind-dn "uid={user},ou=people,dc=example,dc=com"
+                    base-dn "ou=groups,dc=example,dc=com"
+                }
+            }
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    static { root "."; }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        if let Some(AuthBackend::Ldap(c)) = &cfg.server.auth {
+            assert_eq!(c.url, "ldapi:///var/run/slapd/ldapi");
+        } else {
+            panic!("expected AuthBackend::Ldap");
+        }
+    }
+
+    #[test]
+    fn server_auth_ldap_missing_url_is_error() {
+        let result = Config::parse(
+            r#"
+            server {
+                auth "ldap" {
+                    bind-dn "uid={user},ou=people,dc=example,dc=com"
+                    base-dn "ou=groups,dc=example,dc=com"
+                }
+            }
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    static { root "."; }
+                }
+            }
+            "#,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn server_auth_ldap_missing_bind_dn_is_error() {
+        let result = Config::parse(
+            r#"
+            server {
+                auth "ldap" {
+                    url "ldap://localhost:389"
+                    base-dn "ou=groups,dc=example,dc=com"
+                }
+            }
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    static { root "."; }
+                }
+            }
+            "#,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn server_auth_ldap_missing_base_dn_is_error() {
+        let result = Config::parse(
+            r#"
+            server {
+                auth "ldap" {
+                    url "ldap://localhost:389"
+                    bind-dn "uid={user},ou=people,dc=example,dc=com"
+                }
+            }
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    static { root "."; }
+                }
+            }
+            "#,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn server_auth_ldap_invalid_url_scheme_is_error() {
+        let result = Config::parse(
+            r#"
+            server {
+                auth "ldap" {
+                    url "http://localhost:389"
+                    bind-dn "uid={user},ou=people,dc=example,dc=com"
+                    base-dn "ou=groups,dc=example,dc=com"
+                }
+            }
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    static { root "."; }
+                }
+            }
+            "#,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn server_auth_ldap_bind_dn_without_placeholder_is_error() {
+        let result = Config::parse(
+            r#"
+            server {
+                auth "ldap" {
+                    url "ldap://localhost:389"
+                    bind-dn "cn=readonly,dc=example,dc=com"
+                    base-dn "ou=groups,dc=example,dc=com"
+                }
+            }
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    static { root "."; }
+                }
+            }
+            "#,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn server_auth_ldap_starttls_parses() {
+        let cfg = Config::parse(
+            r#"
+            server {
+                auth "ldap" {
+                    url "ldap://localhost:389"
+                    bind-dn "uid={user},ou=people,dc=example,dc=com"
+                    base-dn "ou=groups,dc=example,dc=com"
+                    starttls true
+                }
+            }
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    static { root "."; }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        if let Some(AuthBackend::Ldap(c)) = &cfg.server.auth {
+            assert!(c.starttls);
+        } else {
+            panic!("expected AuthBackend::Ldap");
+        }
+    }
+
+    #[test]
+    fn server_auth_unknown_backend_error_mentions_ldap() {
+        let err = Config::parse(
+            r#"
+            server {
+                auth "kerberos"
+            }
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    static { root "."; }
+                }
+            }
+            "#,
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ldap"),
+            "error should mention 'ldap': {msg}"
+        );
     }
 
     #[test]

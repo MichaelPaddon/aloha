@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use hyper::Request;
 use hyper::body::Incoming;
+use std::sync::Arc;
 
 pub struct Identity {
     pub username: String,
@@ -50,6 +51,165 @@ pub fn parse_basic_auth(
     let (user, pass) = decoded.split_once(':')?;
     Some((user.to_owned(), pass.to_owned()))
 }
+
+// ── LDAP ──────────────────────────────────────────────────────────
+
+/// Authenticates HTTP Basic credentials via an LDAP simple bind, then
+/// searches for the user's group memberships.
+///
+/// Supports `ldap://`, `ldaps://`, and `ldapi://` (Unix socket) URLs.
+/// A new connection is established for each authentication request.
+pub struct LdapAuthenticator {
+    config: Arc<crate::config::LdapAuthConfig>,
+}
+
+impl LdapAuthenticator {
+    pub fn new(config: crate::config::LdapAuthConfig) -> Self {
+        Self { config: Arc::new(config) }
+    }
+}
+
+#[async_trait]
+impl Authenticator for LdapAuthenticator {
+    async fn authenticate(&self, req: &Request<Incoming>) -> Principal {
+        let Some((username, password)) = parse_basic_auth(req.headers())
+        else {
+            return Principal::Anonymous;
+        };
+        // An empty password causes many LDAP servers to accept any
+        // bind as an anonymous bind, granting unintended access.
+        if password.is_empty() {
+            return Principal::Anonymous;
+        }
+        let cfg = self.config.clone();
+        let uname = username.clone();
+        let timeout =
+            std::time::Duration::from_secs(cfg.timeout_secs);
+        match tokio::time::timeout(
+            timeout,
+            ldap_authenticate(&cfg, &uname, &password),
+        )
+        .await
+        {
+            Ok(Ok(groups)) => Principal::Authenticated(Identity {
+                username,
+                groups,
+            }),
+            Ok(Err(e)) => {
+                tracing::debug!(
+                    "LDAP auth failed for {username}: {e}"
+                );
+                Principal::Anonymous
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "LDAP auth timed out for {username}"
+                );
+                Principal::Anonymous
+            }
+        }
+    }
+}
+
+async fn ldap_authenticate(
+    config: &crate::config::LdapAuthConfig,
+    username: &str,
+    password: &str,
+) -> anyhow::Result<Vec<String>> {
+    use ldap3::{LdapConnAsync, LdapConnSettings, Scope, SearchEntry};
+
+    let settings = LdapConnSettings::new()
+        .set_starttls(config.starttls)
+        .set_conn_timeout(
+            std::time::Duration::from_secs(config.timeout_secs),
+        );
+
+    let (conn, mut ldap) =
+        LdapConnAsync::with_settings(settings, &config.url).await?;
+    ldap3::drive!(conn);
+
+    // Substitute and escape the username into the bind DN.
+    let dn = config
+        .bind_dn
+        .replace("{user}", &escape_dn(username));
+    ldap.simple_bind(&dn, password)
+        .await?
+        .success()
+        .map_err(|e| anyhow::anyhow!("invalid credentials: {e:?}"))?;
+
+    // Search for groups containing this user.
+    let filter = config
+        .group_filter
+        .replace("{user}", &escape_filter(username));
+    let (entries, _res) = ldap
+        .search(
+            &config.base_dn,
+            Scope::Subtree,
+            &filter,
+            vec![config.group_attr.as_str()],
+        )
+        .await?
+        .success()?;
+
+    let groups = entries
+        .into_iter()
+        .filter_map(|e| {
+            SearchEntry::construct(e)
+                .attrs
+                .get(&config.group_attr)?
+                .first()
+                .cloned()
+        })
+        .collect();
+
+    ldap.unbind().await?;
+    Ok(groups)
+}
+
+/// Escape a value for use inside an LDAP DN (RFC 4514 §2.4).
+///
+/// The following characters are escaped with a leading `\`:
+/// `,`, `+`, `"`, `\`, `<`, `>`, `;`, leading `#`, leading/trailing ` `.
+pub fn escape_dn(s: &str) -> String {
+    if s.is_empty() {
+        return String::new();
+    }
+    let chars: Vec<char> = s.chars().collect();
+    let last = chars.len() - 1;
+    let mut out = String::with_capacity(s.len());
+    for (i, &ch) in chars.iter().enumerate() {
+        match ch {
+            ',' | '+' | '"' | '\\' | '<' | '>' | ';' => {
+                out.push('\\');
+                out.push(ch);
+            }
+            '#' if i == 0 => out.push_str("\\#"),
+            ' ' if i == 0 || i == last => out.push_str("\\ "),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Escape a value for use inside an LDAP search filter (RFC 4515 §3).
+///
+/// `\`, `*`, `(`, `)`, and NUL are replaced with their `\xx` hex forms.
+pub fn escape_filter(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\5c"),
+            '*'  => out.push_str("\\2a"),
+            '('  => out.push_str("\\28"),
+            ')'  => out.push_str("\\29"),
+            '\0' => out.push_str("\\00"),
+            c    => out.push(c),
+        }
+    }
+    out
+}
+
+// ── PAM ───────────────────────────────────────────────────────────
 
 /// Authenticates against the system PAM stack, then resolves the
 /// user's Unix group membership via `getgrouplist(3)`.
@@ -244,5 +404,86 @@ mod tests {
         let (u, p) = parse_basic_auth(&h).unwrap();
         assert_eq!(u, "");
         assert_eq!(p, "");
+    }
+
+    // ── LDAP escaping ─────────────────────────────────────────────
+
+    #[test]
+    fn escape_dn_plain_username() {
+        assert_eq!(escape_dn("alice"), "alice");
+    }
+
+    #[test]
+    fn escape_dn_special_chars() {
+        // Each of the RFC 4514 special characters must be backslash-escaped.
+        assert_eq!(escape_dn("a,b"), "a\\,b");
+        assert_eq!(escape_dn("a+b"), "a\\+b");
+        assert_eq!(escape_dn("a\"b"), "a\\\"b");
+        assert_eq!(escape_dn("a\\b"), "a\\\\b");
+        assert_eq!(escape_dn("a<b"), "a\\<b");
+        assert_eq!(escape_dn("a>b"), "a\\>b");
+        assert_eq!(escape_dn("a;b"), "a\\;b");
+    }
+
+    #[test]
+    fn escape_dn_leading_hash() {
+        assert_eq!(escape_dn("#admin"), "\\#admin");
+        // Hash not at position 0 is left alone.
+        assert_eq!(escape_dn("ad#min"), "ad#min");
+    }
+
+    #[test]
+    fn escape_dn_leading_trailing_space() {
+        assert_eq!(escape_dn(" alice"), "\\ alice");
+        assert_eq!(escape_dn("alice "), "alice\\ ");
+        assert_eq!(escape_dn(" alice "), "\\ alice\\ ");
+        // Space in the middle is left alone.
+        assert_eq!(escape_dn("ali ce"), "ali ce");
+    }
+
+    #[test]
+    fn escape_dn_empty() {
+        assert_eq!(escape_dn(""), "");
+    }
+
+    #[test]
+    fn escape_dn_unicode_passthrough() {
+        // Non-ASCII characters that are not special pass through unchanged.
+        assert_eq!(escape_dn("héllo"), "héllo");
+    }
+
+    #[test]
+    fn escape_filter_plain_value() {
+        assert_eq!(escape_filter("alice"), "alice");
+    }
+
+    #[test]
+    fn escape_filter_special_chars() {
+        assert_eq!(escape_filter("\\"), "\\5c");
+        assert_eq!(escape_filter("*"), "\\2a");
+        assert_eq!(escape_filter("("), "\\28");
+        assert_eq!(escape_filter(")"), "\\29");
+        assert_eq!(escape_filter("\0"), "\\00");
+    }
+
+    #[test]
+    fn escape_filter_injection_attempt() {
+        // A username designed to break out of a filter must be neutralised.
+        let malicious = "alice)(uid=*))(|(uid=*";
+        let safe = escape_filter(malicious);
+        // Must not contain any bare `(` or `)`.
+        assert!(!safe.contains('('));
+        assert!(!safe.contains(')'));
+    }
+
+    #[test]
+    fn escape_filter_wildcard_prevented() {
+        let result = escape_filter("*");
+        assert_eq!(result, "\\2a");
+    }
+
+    #[test]
+    fn escape_filter_unicode_passthrough() {
+        assert_eq!(escape_filter("héllo"), "héllo");
     }
 }
