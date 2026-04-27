@@ -203,6 +203,27 @@ mod tests {
             .map(|loc| loc.path.clone())
     }
 
+    // Return the matched location's (access_policy, basic_auth) pair.
+    // Private fields are accessible here since tests are in the same
+    // module as the struct definitions.
+    fn route_meta(
+        router: &Router,
+        host: &str,
+        path: &str,
+        bind: &str,
+    ) -> Option<(Option<Arc<AccessPolicy>>, Option<Arc<BasicAuthConfig>>)> {
+        let host_stripped = strip_port(host);
+        let vhost = router.resolve_vhost(Some(host_stripped), bind)?;
+        vhost
+            .locations
+            .iter()
+            .filter(|loc| path.starts_with(loc.path.as_str()))
+            .max_by_key(|loc| loc.path.len())
+            .map(|loc| {
+                (loc.access_policy.clone(), loc.basic_auth.clone())
+            })
+    }
+
     #[test]
     fn routes_by_host() {
         let config = make_config(
@@ -603,5 +624,166 @@ mod tests {
     fn strip_port_ipv6() {
         assert_eq!(strip_port("[::1]:8080"), "[::1]");
         assert_eq!(strip_port("[::1]"), "[::1]");
+    }
+
+    // ── basic_auth / access_policy propagation ────────────────────
+
+    #[test]
+    fn basic_auth_realm_propagates_to_route() {
+        let config = make_config(
+            r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/secure/" {
+                    auth {
+                        realm "Secret Zone"
+                    }
+                    static { root "."; }
+                }
+            }
+            "#,
+        );
+        let router = make_router(&config);
+        let (_, auth) =
+            route_meta(&router, "h", "/secure/", "0.0.0.0:80")
+                .unwrap();
+        assert_eq!(auth.unwrap().realm, "Secret Zone");
+    }
+
+    #[test]
+    fn basic_auth_absent_when_no_auth_block() {
+        let config = make_config(
+            r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    static { root "."; }
+                }
+            }
+            "#,
+        );
+        let router = make_router(&config);
+        let (_, auth) =
+            route_meta(&router, "h", "/", "0.0.0.0:80").unwrap();
+        assert!(auth.is_none());
+    }
+
+    #[test]
+    fn basic_auth_per_location_independent() {
+        // One location has auth, a sibling does not.
+        let config = make_config(
+            r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/public/" {
+                    static { root "."; }
+                }
+                location "/private/" {
+                    auth {
+                        realm "Members Only"
+                    }
+                    static { root "."; }
+                }
+            }
+            "#,
+        );
+        let router = make_router(&config);
+        let (_, pub_auth) =
+            route_meta(&router, "h", "/public/x", "0.0.0.0:80")
+                .unwrap();
+        let (_, priv_auth) =
+            route_meta(&router, "h", "/private/x", "0.0.0.0:80")
+                .unwrap();
+        assert!(pub_auth.is_none());
+        assert_eq!(priv_auth.unwrap().realm, "Members Only");
+    }
+
+    #[test]
+    fn access_policy_propagates_to_route() {
+        let config = make_config(
+            r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/admin/" {
+                    access {
+                        deny code=403
+                    }
+                    static { root "."; }
+                }
+                location "/" {
+                    static { root "."; }
+                }
+            }
+            "#,
+        );
+        let router = make_router(&config);
+        let (policy, _) =
+            route_meta(&router, "h", "/admin/x", "0.0.0.0:80")
+                .unwrap();
+        assert!(policy.is_some(), "/admin/ should have access policy");
+        let (policy, _) =
+            route_meta(&router, "h", "/index.html", "0.0.0.0:80")
+                .unwrap();
+        assert!(policy.is_none(), "/ should have no access policy");
+    }
+
+    #[test]
+    fn basic_auth_and_access_policy_coexist() {
+        let config = make_config(
+            r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/members/" {
+                    auth {
+                        realm "Club"
+                    }
+                    access {
+                        allow {
+                            authenticated
+                        }
+                        deny code=401
+                    }
+                    static { root "."; }
+                }
+            }
+            "#,
+        );
+        let router = make_router(&config);
+        let (policy, auth) =
+            route_meta(&router, "h", "/members/", "0.0.0.0:80")
+                .unwrap();
+        assert!(policy.is_some());
+        assert_eq!(auth.unwrap().realm, "Club");
+    }
+
+    #[test]
+    fn basic_auth_default_realm_is_restricted() {
+        let config = make_config(
+            r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/x/" {
+                    auth {}
+                    static { root "."; }
+                }
+            }
+            "#,
+        );
+        let router = make_router(&config);
+        let (_, auth) =
+            route_meta(&router, "h", "/x/", "0.0.0.0:80").unwrap();
+        assert_eq!(auth.unwrap().realm, "Restricted");
     }
 }

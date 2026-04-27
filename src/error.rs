@@ -194,4 +194,39 @@ mod tests {
         let h = r.headers().get("www-authenticate").unwrap();
         assert_eq!(h, r#"Basic realm="C:\\path""#);
     }
+
+    #[test]
+    fn response_www_auth_empty_realm() {
+        let r = response_www_auth("");
+        assert_eq!(r.status(), 401);
+        assert_eq!(
+            r.headers().get("www-authenticate").unwrap(),
+            r#"Basic realm="""#
+        );
+    }
+
+    #[test]
+    fn response_www_auth_content_type() {
+        let r = response_www_auth("Test");
+        assert_eq!(
+            r.headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok()),
+            Some("text/html; charset=utf-8")
+        );
+    }
+
+    #[test]
+    fn response_status_401_has_no_www_authenticate() {
+        // response_status is used for generic denials; a plain 401
+        // (without an auth block configured) must NOT include a
+        // WWW-Authenticate header — browsers would pop an auth dialog
+        // even when the page has its own login UI.
+        let r = response_status(401);
+        assert_eq!(r.status(), 401);
+        assert!(
+            r.headers().get("www-authenticate").is_none(),
+            "plain 401 from response_status must not include WWW-Authenticate"
+        );
+    }
 }

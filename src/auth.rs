@@ -190,4 +190,59 @@ mod tests {
         let h = headers_with_auth(&format!("Basic {enc}"));
         assert!(parse_basic_auth(&h).is_none());
     }
+
+    #[test]
+    fn parse_basic_auth_empty_username() {
+        // ":password" — empty username is technically valid per RFC 7617
+        use base64::Engine as _;
+        let enc = base64::engine::general_purpose::STANDARD
+            .encode(":password");
+        let h = headers_with_auth(&format!("Basic {enc}"));
+        let (u, p) = parse_basic_auth(&h).unwrap();
+        assert_eq!(u, "");
+        assert_eq!(p, "password");
+    }
+
+    #[test]
+    fn parse_basic_auth_empty_password() {
+        use base64::Engine as _;
+        let enc = base64::engine::general_purpose::STANDARD
+            .encode("alice:");
+        let h = headers_with_auth(&format!("Basic {enc}"));
+        let (u, p) = parse_basic_auth(&h).unwrap();
+        assert_eq!(u, "alice");
+        assert_eq!(p, "");
+    }
+
+    #[test]
+    fn parse_basic_auth_unicode_credentials() {
+        // RFC 7617 allows UTF-8 in credentials.
+        use base64::Engine as _;
+        let enc = base64::engine::general_purpose::STANDARD
+            .encode("ünïcödé:pässwörð");
+        let h = headers_with_auth(&format!("Basic {enc}"));
+        let (u, p) = parse_basic_auth(&h).unwrap();
+        assert_eq!(u, "ünïcödé");
+        assert_eq!(p, "pässwörð");
+    }
+
+    #[test]
+    fn parse_basic_auth_case_sensitive_scheme() {
+        // "basic" (lowercase) must not match — RFC 7235 says the scheme
+        // token is case-insensitive in HTTP, but our prefix match is
+        // exact.  Browsers always send "Basic" with capital B.
+        let h = headers_with_auth("basic dXNlcjpwYXNz");
+        assert!(parse_basic_auth(&h).is_none());
+    }
+
+    #[test]
+    fn parse_basic_auth_empty_credentials() {
+        // Just ":" encodes to a valid split: ("", "")
+        use base64::Engine as _;
+        let enc = base64::engine::general_purpose::STANDARD.encode(":");
+        let h = headers_with_auth(&format!("Basic {enc}"));
+        let (u, p) = parse_basic_auth(&h).unwrap();
+        assert_eq!(u, "");
+        assert_eq!(p, "");
+    }
 }
