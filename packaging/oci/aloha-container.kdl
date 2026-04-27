@@ -5,12 +5,19 @@
 // and no server block is present.
 //
 // Listens on port 80 (HTTP) and 443 (HTTPS, ephemeral self-signed cert).
+// Starts as root to bind those ports, then drops to the aloha user — the
+// same pattern used by the systemd service.
+//
 // Override this file to use a real cert or enable ACME:
 //
 //   podman run -v ./my-config.kdl:/etc/aloha.kdl:ro,Z aloha:latest
 //
 // When using tls "acme", also mount /var/lib/aloha for certificate storage
-// and add state-dir "/var/lib/aloha" to a server block above.
+// and add state-dir "/var/lib/aloha" to the server block below.
+
+server {
+    user "aloha"
+}
 
 listener {
     bind "[::]:80"

@@ -55,7 +55,11 @@ strip     = "symbols"
 # Requires:    cargo install cargo-run-script
 
 [package.metadata.scripts]
-oci-build = "podman build -f packaging/oci/Containerfile -t aloha:$CARGO_PKG_VERSION -t aloha:latest ."
+oci-build = '''
+set -e
+VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
+podman build -f packaging/oci/Containerfile -t "aloha:$VERSION" -t aloha:latest .
+'''
 
 # ── Debian package ────────────────────────────────────────────────
 # Build with:  cargo deb
