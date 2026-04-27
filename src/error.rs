@@ -73,6 +73,27 @@ pub fn response_416(total_len: u64) -> HttpResponse {
         .expect("known-valid status and header")
 }
 
+/// Return a minimal response with any HTTP status code.
+/// Used by the access policy to return custom deny codes.
+pub fn response_status(code: u16) -> HttpResponse {
+    Response::builder()
+        .status(code)
+        .header("Content-Type", "text/html; charset=utf-8")
+        .body(bytes_body(Bytes::from(format!(
+            "<h1>{code}</h1>"
+        ))))
+        .unwrap_or_else(|_| {
+            // code was invalid; fall back to 403
+            Response::builder()
+                .status(StatusCode::FORBIDDEN)
+                .header("Content-Type", "text/html; charset=utf-8")
+                .body(bytes_body(Bytes::from_static(
+                    b"<h1>403 Forbidden</h1>",
+                )))
+                .expect("known-valid")
+        })
+}
+
 pub fn response_redirect(to: &str, code: u16) -> HttpResponse {
     Response::builder()
         .status(code)

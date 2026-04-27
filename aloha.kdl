@@ -142,6 +142,34 @@ vhost "localhost" {
 // vhost "example.com" {
 //     alias "www.example.com"
 //
+//     // Restrict an admin area to a trusted network.
+//     // access rules are evaluated top-to-bottom; first match wins.
+//     // A rule with no conditions matches everything (catch-all).
+//     //
+//     //   Conditions (children of allow/deny/redirect, AND across types):
+//     //     ip "cidr-or-addr"  -- source IP or CIDR (multiple = OR)
+//     //     user "name"        -- authenticated username
+//     //     group "name"       -- authenticated group membership
+//     //     authenticated      -- any logged-in user
+//     //
+//     //   Actions:
+//     //     allow                       -- permit the request
+//     //     deny [code=N]               -- reject (default 403)
+//     //     redirect to="url" [code=N]  -- redirect (default 302)
+//     //
+//     location "/admin/" {
+//         access {
+//             allow {
+//                 ip "10.0.0.0/8"
+//                 ip "192.168.0.0/16"
+//             }
+//             deny code=403
+//         }
+//         static {
+//             root "/var/www/admin"
+//         }
+//     }
+//
 //     // Redirect bare domain to www
 //     location "/old-section/" {
 //         redirect {

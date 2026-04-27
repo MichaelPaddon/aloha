@@ -1,3 +1,4 @@
+use crate::access::{AccessAction, AccessCondition, AccessPolicy, AccessRule};
 use crate::auth::{AuthPolicy, AuthRule};
 use anyhow::{anyhow, bail, Context};
 use kdl::{KdlDocument, KdlNode};
@@ -164,7 +165,10 @@ pub struct LocationConfig {
     // URL path prefix; locations are tested in config order.
     pub path: String,
     pub handler: HandlerConfig,
-    // None = open; Some = require authentication matching the policy.
+    // Firewall-style access policy (IP + identity rules).
+    // Supersedes `auth` when both are present.
+    pub access: Option<AccessPolicy>,
+    // Legacy identity-only auth policy (kept for backward compat).
     pub auth: Option<AuthPolicy>,
 }
 
@@ -600,7 +604,12 @@ fn parse_location(node: &KdlNode, src: &str, name: &str) -> anyhow::Result<Locat
         .find(|n| n.name().value() == "auth")
         .map(|n| parse_auth_policy(n, src, name))
         .transpose()?;
-    Ok(LocationConfig { path, handler, auth })
+    let access = children
+        .iter()
+        .find(|n| n.name().value() == "access")
+        .map(|n| parse_access_policy(n, src, name))
+        .transpose()?;
+    Ok(LocationConfig { path, handler, access, auth })
 }
 
 // Auth rules use node names as rule types — idiomatic KDL avoids
@@ -694,6 +703,118 @@ fn parse_auth_rule_node(
         ),
     }
     Ok(())
+}
+
+// Parse an `access { }` block into an AccessPolicy.
+//
+//   access {
+//       allow { ip "10.0.0.0/8"; group "admin" }
+//       deny code=403 { ip "1.2.3.4" }
+//       redirect to="/login/" { user "unverified" }
+//       deny code=403      // catch-all: no children = always matches
+//   }
+fn parse_access_policy(
+    node: &KdlNode,
+    src: &str,
+    name: &str,
+) -> anyhow::Result<AccessPolicy> {
+    use ipnet::IpNet;
+    use std::net::IpAddr;
+
+    let children =
+        node.children().map(|d| d.nodes()).unwrap_or_default();
+    let mut rules = Vec::new();
+
+    for child in children {
+        let child_line = node_line(src, child);
+        let action = match child.name().value() {
+            "allow" => AccessAction::Allow,
+            "deny" => {
+                let code = child
+                    .get("code")
+                    .and_then(|e| e.value().as_i64())
+                    .map(|n| n as u16)
+                    .unwrap_or(403);
+                AccessAction::Deny { code }
+            }
+            "redirect" => {
+                let to = child
+                    .get("to")
+                    .and_then(|e| e.value().as_string())
+                    .map(String::from)
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "{name}:{child_line}: 'redirect' requires \
+                             a 'to' property"
+                        )
+                    })?;
+                let code = child
+                    .get("code")
+                    .and_then(|e| e.value().as_i64())
+                    .map(|n| n as u16)
+                    .unwrap_or(302);
+                AccessAction::Redirect { to, code }
+            }
+            other => bail!(
+                "{name}:{child_line}: unknown access rule '{other}'; \
+                 expected 'allow', 'deny', or 'redirect'"
+            ),
+        };
+
+        // Parse conditions from child nodes.
+        let cond_nodes = child
+            .children()
+            .map(|d| d.nodes())
+            .unwrap_or_default();
+        let mut conditions = Vec::new();
+        for cond in cond_nodes {
+            let cond_line = node_line(src, cond);
+            match cond.name().value() {
+                "ip" => {
+                    let s = req_arg_str(cond, 0).with_context(|| {
+                        format!("{name}:{cond_line}")
+                    })?;
+                    // Try CIDR notation first, then plain IP address.
+                    let net: IpNet = s
+                        .parse()
+                        .or_else(|_| {
+                            s.parse::<IpAddr>().map(IpNet::from)
+                        })
+                        .map_err(|_| {
+                            anyhow!(
+                                "{name}:{cond_line}: invalid IP \
+                                 address or CIDR '{s}'"
+                            )
+                        })?;
+                    conditions.push(AccessCondition::Ip(net));
+                }
+                "user" => {
+                    let u = req_arg_str(cond, 0).with_context(|| {
+                        format!("{name}:{cond_line}")
+                    })?;
+                    conditions.push(AccessCondition::User(u));
+                }
+                "group" => {
+                    let g = req_arg_str(cond, 0).with_context(|| {
+                        format!("{name}:{cond_line}")
+                    })?;
+                    conditions.push(AccessCondition::Group(g));
+                }
+                "authenticated" => {
+                    conditions.push(AccessCondition::Authenticated);
+                }
+                other => bail!(
+                    "{name}:{cond_line}: unknown access condition \
+                     '{other}'; expected 'ip', 'user', 'group', \
+                     or 'authenticated'"
+                ),
+            }
+        }
+
+        rules.push(AccessRule { conditions, action });
+    }
+
+    Ok(AccessPolicy { rules })
 }
 
 fn req_arg_strs(
@@ -2309,6 +2430,342 @@ mod tests {
         assert!(matches!(&auth.allow[1], AuthRule::User(u) if u == "alice"));
         assert!(matches!(&auth.allow[2], AuthRule::Group(g) if g == "admin"));
         assert!(auth.deny.is_empty());
+    }
+
+    // ── access blocks ─────────────────────────────────────────────
+
+    #[test]
+    fn access_allow_ip_parses() {
+        let cfg = Config::parse(
+            r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/admin/" {
+                    access {
+                        allow {
+                            ip "10.0.0.0/8"
+                        }
+                        deny code=403
+                    }
+                    static { root "."; }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        let policy = cfg.vhosts[0].locations[0].access.as_ref().unwrap();
+        assert_eq!(policy.rules.len(), 2);
+        assert!(matches!(&policy.rules[0].action, AccessAction::Allow));
+        assert!(matches!(
+            &policy.rules[1].action,
+            AccessAction::Deny { code: 403 }
+        ));
+    }
+
+    #[test]
+    fn access_deny_custom_code_parses() {
+        let cfg = Config::parse(
+            r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    access {
+                        deny code=429 {
+                            ip "1.2.3.4"
+                        }
+                    }
+                    static { root "."; }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        let policy = cfg.vhosts[0].locations[0].access.as_ref().unwrap();
+        assert!(matches!(
+            &policy.rules[0].action,
+            AccessAction::Deny { code: 429 }
+        ));
+        assert_eq!(policy.rules[0].conditions.len(), 1);
+        assert!(matches!(
+            &policy.rules[0].conditions[0],
+            AccessCondition::Ip(_)
+        ));
+    }
+
+    #[test]
+    fn access_redirect_parses() {
+        let cfg = Config::parse(
+            r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    access {
+                        redirect to="/login/" code=302 {
+                            user "unverified"
+                        }
+                        deny code=403
+                    }
+                    static { root "."; }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        let policy = cfg.vhosts[0].locations[0].access.as_ref().unwrap();
+        assert!(matches!(
+            &policy.rules[0].action,
+            AccessAction::Redirect { code: 302, .. }
+        ));
+        if let AccessAction::Redirect { to, .. } = &policy.rules[0].action {
+            assert_eq!(to, "/login/");
+        }
+        assert!(matches!(
+            &policy.rules[0].conditions[0],
+            AccessCondition::User(u) if u == "unverified"
+        ));
+    }
+
+    #[test]
+    fn access_empty_block_has_zero_rules() {
+        let cfg = Config::parse(
+            r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    access {
+                    }
+                    static { root "."; }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        let policy = cfg.vhosts[0].locations[0].access.as_ref().unwrap();
+        assert_eq!(policy.rules.len(), 0);
+    }
+
+    #[test]
+    fn access_absent_means_none() {
+        let cfg = Config::parse(
+            r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    static { root "."; }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        assert!(cfg.vhosts[0].locations[0].access.is_none());
+    }
+
+    #[test]
+    fn access_invalid_cidr_is_error() {
+        let result = Config::parse(
+            r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    access {
+                        allow {
+                            ip "not-an-ip"
+                        }
+                    }
+                    static { root "."; }
+                }
+            }
+            "#,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn access_unknown_action_is_error() {
+        let result = Config::parse(
+            r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    access {
+                        block {
+                            ip "1.2.3.4"
+                        }
+                    }
+                    static { root "."; }
+                }
+            }
+            "#,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn access_unknown_condition_is_error() {
+        let result = Config::parse(
+            r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    access {
+                        allow {
+                            country "US"
+                        }
+                    }
+                    static { root "."; }
+                }
+            }
+            "#,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn access_redirect_missing_to_is_error() {
+        let result = Config::parse(
+            r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    access {
+                        redirect code=302 {
+                            ip "1.2.3.4"
+                        }
+                    }
+                    static { root "."; }
+                }
+            }
+            "#,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn access_plain_ip_without_prefix_parses() {
+        let cfg = Config::parse(
+            r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    access {
+                        allow {
+                            ip "192.168.1.1"
+                        }
+                        deny code=403
+                    }
+                    static { root "."; }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        let policy = cfg.vhosts[0].locations[0].access.as_ref().unwrap();
+        assert!(matches!(
+            &policy.rules[0].conditions[0],
+            AccessCondition::Ip(_)
+        ));
+    }
+
+    #[test]
+    fn access_authenticated_condition_parses() {
+        let cfg = Config::parse(
+            r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/members/" {
+                    access {
+                        allow {
+                            authenticated
+                        }
+                        deny code=403
+                    }
+                    static { root "."; }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        let policy = cfg.vhosts[0].locations[0].access.as_ref().unwrap();
+        assert!(matches!(
+            &policy.rules[0].conditions[0],
+            AccessCondition::Authenticated
+        ));
+    }
+
+    #[test]
+    fn access_group_condition_parses() {
+        let cfg = Config::parse(
+            r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/admin/" {
+                    access {
+                        allow {
+                            group "admin"
+                        }
+                        deny code=403
+                    }
+                    static { root "."; }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        let policy = cfg.vhosts[0].locations[0].access.as_ref().unwrap();
+        assert!(matches!(
+            &policy.rules[0].conditions[0],
+            AccessCondition::Group(g) if g == "admin"
+        ));
+    }
+
+    #[test]
+    fn access_no_condition_rule_is_catch_all() {
+        let cfg = Config::parse(
+            r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    access {
+                        allow {
+                            ip "10.0.0.0/8"
+                        }
+                        deny code=403
+                    }
+                    static { root "."; }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        let policy = cfg.vhosts[0].locations[0].access.as_ref().unwrap();
+        // deny rule has no conditions → catch-all
+        assert!(policy.rules[1].conditions.is_empty());
     }
 
     #[test]

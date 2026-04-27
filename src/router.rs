@@ -1,3 +1,4 @@
+use crate::access::AccessPolicy;
 use crate::auth::AuthPolicy;
 use crate::config::{Config, ListenerConfig, VHostConfig};
 use crate::handler::Handler;
@@ -11,6 +12,7 @@ use std::sync::Arc;
 pub struct Route {
     pub handler: Arc<Handler>,
     pub matched_prefix: String,
+    pub access_policy: Option<Arc<AccessPolicy>>,
     pub auth_policy: Option<AuthPolicy>,
 }
 
@@ -22,6 +24,7 @@ struct VHost {
 struct Location {
     path: String,
     handler: Arc<Handler>,
+    access_policy: Option<Arc<AccessPolicy>>,
     auth_policy: Option<AuthPolicy>,
 }
 
@@ -105,6 +108,7 @@ impl Router {
             .map(|loc| Route {
                 handler: loc.handler.clone(),
                 matched_prefix: loc.path.clone(),
+                access_policy: loc.access_policy.clone(),
                 auth_policy: loc.auth_policy.clone(),
             })
     }
@@ -159,6 +163,8 @@ fn build_vhost(
         locations.push(Location {
             path: loc.path.clone(),
             handler,
+            access_policy: loc.access.as_ref()
+                .map(|p| Arc::new(p.clone())),
             auth_policy: loc.auth.clone(),
         });
     }
