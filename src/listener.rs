@@ -6,9 +6,11 @@
 
 use crate::access::AccessOutcome;
 use crate::acme::ChallengeMap;
-use crate::auth::Authenticator;
+use crate::auth::{Authenticator, Principal};
+use crate::headers::principal_strings;
 use crate::compress;
 use crate::config::{ListenerConfig, TcpProxyConfig, Timeouts};
+use crate::headers::{self, RequestContext};
 use crate::metrics::Metrics;
 use crate::proxy_proto;
 use crate::error::{
@@ -57,6 +59,9 @@ struct AlohaService {
     bind: String,
     peer_addr: SocketAddr,
     timeouts: Timeouts,
+    // True for TLS listeners; used to populate the {scheme} template
+    // variable in header rules.
+    is_tls: bool,
 }
 
 impl hyper::service::Service<Request<Incoming>> for AlohaService {
@@ -72,6 +77,7 @@ impl hyper::service::Service<Request<Incoming>> for AlohaService {
         let state = self.state.clone();
         let bind = self.bind.clone();
         let peer = self.peer_addr;
+        let is_tls = self.is_tls;
         let handler_timeout = self
             .timeouts
             .handler_secs
@@ -80,6 +86,12 @@ impl hyper::service::Service<Request<Incoming>> for AlohaService {
             let start = Instant::now();
             let method = req.method().clone();
             let path = req.uri().path().to_owned();
+            let host = req
+                .headers()
+                .get(hyper::header::HOST)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_owned();
             // Attach the peer address as a typed extension so handlers
             // (e.g. the reverse proxy) can add X-Forwarded-For without
             // needing a separate parameter through the call stack.
@@ -127,11 +139,24 @@ impl hyper::service::Service<Request<Incoming>> for AlohaService {
             let serve_fut = async {
                 match state.router.route(&req, &bind) {
                     Some(route) => {
-                        if let Some(policy) = &route.access_policy {
-                            let principal = state
+                        // Authenticate once when the access policy or
+                        // header rules need the user's identity.
+                        let needs_auth = route.access_policy.is_some()
+                            || route
+                                .header_rules
+                                .as_ref()
+                                .map(|r| r.needs_principal)
+                                .unwrap_or(false);
+                        let principal = if needs_auth {
+                            state
                                 .authenticator
                                 .authenticate(&req)
-                                .await;
+                                .await
+                        } else {
+                            Principal::Anonymous
+                        };
+
+                        if let Some(policy) = &route.access_policy {
                             match policy.evaluate(peer.ip(), &principal) {
                                 AccessOutcome::Allow => {}
                                 AccessOutcome::Deny(401) => {
@@ -146,14 +171,77 @@ impl hyper::service::Service<Request<Incoming>> for AlohaService {
                                     return response_status(code);
                                 }
                                 AccessOutcome::Redirect(to, code) => {
-                                    return response_redirect(&to, code);
+                                    return response_redirect(
+                                        &to, code,
+                                    );
                                 }
                             }
                         }
-                        route
+
+                        // Apply request-header rules before the handler
+                        // consumes the request.
+                        if let Some(rules) = &route.header_rules {
+                            if !rules.request.is_empty() {
+                                let (username, groups) =
+                                    principal_strings(&principal);
+                                let peer_ip =
+                                    peer.ip().to_string();
+                                let ctx = RequestContext {
+                                    client_ip: &peer_ip,
+                                    username,
+                                    groups: &groups,
+                                    method: method.as_str(),
+                                    path: &path,
+                                    host: &host,
+                                    scheme: if is_tls {
+                                        "https"
+                                    } else {
+                                        "http"
+                                    },
+                                };
+                                headers::apply_request_headers(
+                                    req.headers_mut(),
+                                    &rules.request,
+                                    &ctx,
+                                );
+                            }
+                        }
+
+                        let mut resp = route
                             .handler
                             .serve(req, &route.matched_prefix)
-                            .await
+                            .await;
+
+                        // Apply response-header rules to the response
+                        // before it reaches the client.
+                        if let Some(rules) = &route.header_rules {
+                            if !rules.response.is_empty() {
+                                let (username, groups) =
+                                    principal_strings(&principal);
+                                let peer_ip =
+                                    peer.ip().to_string();
+                                let ctx = RequestContext {
+                                    client_ip: &peer_ip,
+                                    username,
+                                    groups: &groups,
+                                    method: method.as_str(),
+                                    path: &path,
+                                    host: &host,
+                                    scheme: if is_tls {
+                                        "https"
+                                    } else {
+                                        "http"
+                                    },
+                                };
+                                headers::apply_response_headers(
+                                    resp.headers_mut(),
+                                    &rules.response,
+                                    &ctx,
+                                );
+                            }
+                        }
+
+                        resp
                     }
                     None => response_404(),
                 }
@@ -286,6 +374,7 @@ pub async fn run_plain(
                             bind: name.clone(),
                             peer_addr,
                             timeouts: cfg.timeouts.clone(),
+                            is_tls: false,
                         };
                         let conn_shutdown = shutdown.clone();
                         connections.spawn(serve_connection(
@@ -352,6 +441,7 @@ pub async fn run_tls(
                                 bind,
                                 peer_addr,
                                 timeouts: svc_timeouts,
+                                is_tls: true,
                             };
                             serve_connection(io, svc, conn_shutdown, peer_addr)
                                 .await;

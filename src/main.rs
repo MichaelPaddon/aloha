@@ -7,10 +7,11 @@ mod acme;
 mod auth;
 mod compress;
 mod config;
-mod metrics;
 mod error;
 mod handler;
+mod headers;
 mod listener;
+mod metrics;
 #[cfg(unix)]
 mod privdrop;
 mod proxy_proto;

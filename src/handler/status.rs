@@ -96,6 +96,7 @@ impl ServerSummary {
     }
 
     // Empty summary for tests that do not care about config data.
+    #[cfg(test)]
     pub fn default() -> Self {
         ServerSummary {
             version: env!("CARGO_PKG_VERSION"),

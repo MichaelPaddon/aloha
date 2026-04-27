@@ -5,10 +5,14 @@
 // a vhost, the longest matching location prefix wins.
 
 use crate::access::AccessPolicy;
-use crate::config::{BasicAuthConfig, Config, ListenerConfig, VHostConfig};
+use crate::config::{
+    BasicAuthConfig, Config, HeaderOpConfig, ListenerConfig, VHostConfig,
+};
 use crate::handler::Handler;
 use crate::handler::status::ServerSummary;
+use crate::headers::{HeaderOp, HeaderRules, Template};
 use crate::metrics::Metrics;
+use hyper::header::HeaderName;
 use hyper::Request;
 use hyper::body::Incoming;
 use regex::Regex;
@@ -20,6 +24,7 @@ pub struct Route {
     pub matched_prefix: String,
     pub access_policy: Option<Arc<AccessPolicy>>,
     pub basic_auth: Option<Arc<BasicAuthConfig>>,
+    pub header_rules: Option<Arc<HeaderRules>>,
 }
 
 // Runtime representation of a virtual host, with handlers pre-built.
@@ -32,6 +37,7 @@ struct Location {
     handler: Arc<Handler>,
     access_policy: Option<Arc<AccessPolicy>>,
     basic_auth: Option<Arc<BasicAuthConfig>>,
+    header_rules: Option<Arc<HeaderRules>>,
 }
 
 pub struct Router {
@@ -118,6 +124,7 @@ impl Router {
                 matched_prefix: loc.path.clone(),
                 access_policy: loc.access_policy.clone(),
                 basic_auth: loc.basic_auth.clone(),
+                header_rules: loc.header_rules.clone(),
             })
     }
 
@@ -171,6 +178,23 @@ fn build_vhost(
             metrics,
             summary,
         )?);
+        let header_rules = if loc.request_headers.is_empty()
+            && loc.response_headers.is_empty()
+        {
+            None
+        } else {
+            let req = loc
+                .request_headers
+                .iter()
+                .map(op_from_config)
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            let resp = loc
+                .response_headers
+                .iter()
+                .map(op_from_config)
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            Some(Arc::new(HeaderRules::new(req, resp)))
+        };
         locations.push(Location {
             path: loc.path.clone(),
             handler,
@@ -178,9 +202,30 @@ fn build_vhost(
                 .map(|p| Arc::new(p.clone())),
             basic_auth: loc.auth.as_ref()
                 .map(|a| Arc::new(a.clone())),
+            header_rules,
         });
     }
     Ok(VHost { locations })
+}
+
+fn op_from_config(cfg: &HeaderOpConfig) -> anyhow::Result<HeaderOp> {
+    use crate::config::HeaderOpConfig as C;
+    Ok(match cfg {
+        C::Set { name, value } => HeaderOp::Set {
+            name: HeaderName::from_bytes(name.as_bytes())
+                .map_err(|_| anyhow::anyhow!("invalid header name '{name}'"))?,
+            template: Template::parse(value),
+        },
+        C::Add { name, value } => HeaderOp::Add {
+            name: HeaderName::from_bytes(name.as_bytes())
+                .map_err(|_| anyhow::anyhow!("invalid header name '{name}'"))?,
+            template: Template::parse(value),
+        },
+        C::Remove { name } => HeaderOp::Remove {
+            name: HeaderName::from_bytes(name.as_bytes())
+                .map_err(|_| anyhow::anyhow!("invalid header name '{name}'"))?,
+        },
+    })
 }
 
 #[cfg(test)]
@@ -220,7 +265,7 @@ mod tests {
             .map(|loc| loc.path.clone())
     }
 
-    // Return the matched location's (access_policy, basic_auth) pair.
+    // Return the matched location's metadata fields.
     // Private fields are accessible here since tests are in the same
     // module as the struct definitions.
     fn route_meta(
@@ -228,7 +273,11 @@ mod tests {
         host: &str,
         path: &str,
         bind: &str,
-    ) -> Option<(Option<Arc<AccessPolicy>>, Option<Arc<BasicAuthConfig>>)> {
+    ) -> Option<(
+        Option<Arc<AccessPolicy>>,
+        Option<Arc<BasicAuthConfig>>,
+        Option<Arc<HeaderRules>>,
+    )> {
         let host_stripped = strip_port(host);
         let vhost = router.resolve_vhost(Some(host_stripped), bind)?;
         vhost
@@ -236,9 +285,11 @@ mod tests {
             .iter()
             .filter(|loc| path.starts_with(loc.path.as_str()))
             .max_by_key(|loc| loc.path.len())
-            .map(|loc| {
-                (loc.access_policy.clone(), loc.basic_auth.clone())
-            })
+            .map(|loc| (
+                loc.access_policy.clone(),
+                loc.basic_auth.clone(),
+                loc.header_rules.clone(),
+            ))
     }
 
     #[test]
@@ -663,7 +714,7 @@ mod tests {
             "#,
         );
         let router = make_router(&config);
-        let (_, auth) =
+        let (_, auth, _) =
             route_meta(&router, "h", "/secure/", "0.0.0.0:80")
                 .unwrap();
         assert_eq!(auth.unwrap().realm, "Secret Zone");
@@ -684,7 +735,7 @@ mod tests {
             "#,
         );
         let router = make_router(&config);
-        let (_, auth) =
+        let (_, auth, _) =
             route_meta(&router, "h", "/", "0.0.0.0:80").unwrap();
         assert!(auth.is_none());
     }
@@ -711,10 +762,10 @@ mod tests {
             "#,
         );
         let router = make_router(&config);
-        let (_, pub_auth) =
+        let (_, pub_auth, _) =
             route_meta(&router, "h", "/public/x", "0.0.0.0:80")
                 .unwrap();
-        let (_, priv_auth) =
+        let (_, priv_auth, _) =
             route_meta(&router, "h", "/private/x", "0.0.0.0:80")
                 .unwrap();
         assert!(pub_auth.is_none());
@@ -742,11 +793,11 @@ mod tests {
             "#,
         );
         let router = make_router(&config);
-        let (policy, _) =
+        let (policy, _, _) =
             route_meta(&router, "h", "/admin/x", "0.0.0.0:80")
                 .unwrap();
         assert!(policy.is_some(), "/admin/ should have access policy");
-        let (policy, _) =
+        let (policy, _, _) =
             route_meta(&router, "h", "/index.html", "0.0.0.0:80")
                 .unwrap();
         assert!(policy.is_none(), "/ should have no access policy");
@@ -776,11 +827,80 @@ mod tests {
             "#,
         );
         let router = make_router(&config);
-        let (policy, auth) =
+        let (policy, auth, _) =
             route_meta(&router, "h", "/members/", "0.0.0.0:80")
                 .unwrap();
         assert!(policy.is_some());
         assert_eq!(auth.unwrap().realm, "Club");
+    }
+
+    // -- header_rules propagation ---------------------------------
+
+    #[test]
+    fn header_rules_propagate_to_route() {
+        let config = make_config(r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/api/" {
+                    request-headers {
+                        set "X-Client-IP" "{client_ip}"
+                    }
+                    static { root "."; }
+                }
+            }
+        "#);
+        let router = make_router(&config);
+        let (_, _, rules) =
+            route_meta(&router, "h", "/api/x", "0.0.0.0:80")
+                .unwrap();
+        assert!(rules.is_some());
+        let rules = rules.unwrap();
+        assert_eq!(rules.request.len(), 1);
+        assert!(!rules.needs_principal);
+    }
+
+    #[test]
+    fn header_rules_none_when_no_blocks() {
+        let config = make_config(r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    static { root "."; }
+                }
+            }
+        "#);
+        let router = make_router(&config);
+        let (_, _, rules) =
+            route_meta(&router, "h", "/", "0.0.0.0:80").unwrap();
+        assert!(rules.is_none());
+    }
+
+    #[test]
+    fn needs_principal_propagated_for_username_var() {
+        let config = make_config(r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    request-headers {
+                        set "X-User" "{username}"
+                    }
+                    static { root "."; }
+                }
+            }
+        "#);
+        let router = make_router(&config);
+        let (_, _, rules) =
+            route_meta(&router, "h", "/", "0.0.0.0:80").unwrap();
+        assert!(
+            rules.unwrap().needs_principal,
+            "{{username}} should set needs_principal"
+        );
     }
 
     #[test]
@@ -799,7 +919,7 @@ mod tests {
             "#,
         );
         let router = make_router(&config);
-        let (_, auth) =
+        let (_, auth, _) =
             route_meta(&router, "h", "/x/", "0.0.0.0:80").unwrap();
         assert_eq!(auth.unwrap().realm, "Restricted");
     }

@@ -6,6 +6,7 @@
 
 use crate::access::{AccessAction, AccessCondition, AccessPolicy, AccessRule};
 use anyhow::{anyhow, bail, Context};
+use hyper::header::HeaderName;
 use kdl::{KdlDocument, KdlNode};
 use miette::Diagnostic as _;
 use std::path::Path;
@@ -210,6 +211,25 @@ pub struct VHostConfig {
     pub locations: Vec<LocationConfig>,
 }
 
+/// Config-level header operation: raw strings before name validation.
+/// Converted to `headers::HeaderOp` (validated) in `router.rs`.
+#[derive(Debug, Clone)]
+pub enum HeaderOpConfig {
+    Set    { name: String, value: String },
+    Add    { name: String, value: String },
+    Remove { name: String },
+}
+
+impl HeaderOpConfig {
+    pub fn header_name(&self) -> &str {
+        match self {
+            HeaderOpConfig::Set    { name, .. }
+            | HeaderOpConfig::Add    { name, .. }
+            | HeaderOpConfig::Remove { name }    => name,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct LocationConfig {
     // URL path prefix; locations are tested in config order.
@@ -219,6 +239,10 @@ pub struct LocationConfig {
     pub access: Option<AccessPolicy>,
     // HTTP Basic auth realm; None means no WWW-Authenticate challenge.
     pub auth: Option<BasicAuthConfig>,
+    // Header rules applied before the handler sees the request.
+    pub request_headers:  Vec<HeaderOpConfig>,
+    // Header rules applied to the response before it reaches the client.
+    pub response_headers: Vec<HeaderOpConfig>,
 }
 
 #[derive(Debug)]
@@ -395,6 +419,26 @@ impl Config {
                         "listener[{i}] default-vhost '{name}' \
                          not found in vhosts"
                     );
+                }
+            }
+        }
+        // Validate header names in request-headers and response-headers.
+        for v in &self.vhosts {
+            for loc in &v.locations {
+                for ops in
+                    [&loc.request_headers, &loc.response_headers]
+                {
+                    for op in ops.iter() {
+                        let n = op.header_name();
+                        HeaderName::from_bytes(n.as_bytes())
+                        .map_err(|_| {
+                            anyhow!(
+                                "invalid header name '{n}' in \
+                                 location '{}'",
+                                loc.path
+                            )
+                        })?;
+                    }
                 }
             }
         }
@@ -736,7 +780,78 @@ fn parse_location(node: &KdlNode, src: &str, name: &str) -> anyhow::Result<Locat
             Ok::<_, anyhow::Error>(BasicAuthConfig { realm })
         })
         .transpose()?;
-    Ok(LocationConfig { path, handler, access, auth })
+    let request_headers = children
+        .iter()
+        .find(|n| n.name().value() == "request-headers")
+        .map(|n| parse_header_ops(n, src, name))
+        .transpose()?
+        .unwrap_or_default();
+    let response_headers = children
+        .iter()
+        .find(|n| n.name().value() == "response-headers")
+        .map(|n| parse_header_ops(n, src, name))
+        .transpose()?
+        .unwrap_or_default();
+    Ok(LocationConfig {
+        path, handler, access, auth,
+        request_headers, response_headers,
+    })
+}
+
+// Parse a `request-headers { }` or `response-headers { }` block.
+//
+//   request-headers {
+//       set "X-Client-IP" "{client_ip}"
+//       add "Vary"        "accept"
+//       remove "Authorization"
+//   }
+fn parse_header_ops(
+    node: &KdlNode,
+    src: &str,
+    name: &str,
+) -> anyhow::Result<Vec<HeaderOpConfig>> {
+    let children =
+        node.children().map(|d| d.nodes()).unwrap_or_default();
+    let mut ops = Vec::new();
+    for child in children {
+        let child_line = node_line(src, child);
+        match child.name().value() {
+            "set" => {
+                let hname = req_arg_str(child, 0)
+                    .with_context(|| format!("{name}:{child_line}"))?;
+                let value = req_arg_str(child, 1)
+                    .with_context(|| {
+                        anyhow!(
+                            "{name}:{child_line}: 'set' requires a \
+                             header name and a value"
+                        )
+                    })?;
+                ops.push(HeaderOpConfig::Set { name: hname, value });
+            }
+            "add" => {
+                let hname = req_arg_str(child, 0)
+                    .with_context(|| format!("{name}:{child_line}"))?;
+                let value = req_arg_str(child, 1)
+                    .with_context(|| {
+                        anyhow!(
+                            "{name}:{child_line}: 'add' requires a \
+                             header name and a value"
+                        )
+                    })?;
+                ops.push(HeaderOpConfig::Add { name: hname, value });
+            }
+            "remove" => {
+                let hname = req_arg_str(child, 0)
+                    .with_context(|| format!("{name}:{child_line}"))?;
+                ops.push(HeaderOpConfig::Remove { name: hname });
+            }
+            other => bail!(
+                "{name}:{child_line}: unknown header operation \
+                 '{other}'; expected 'set', 'add', or 'remove'"
+            ),
+        }
+    }
+    Ok(ops)
 }
 
 // Parse an `access { }` block into an AccessPolicy.
@@ -2903,5 +3018,141 @@ mod tests {
         )
         .unwrap();
         assert!(cfg.vhosts[0].locations[0].auth.is_none());
+    }
+
+    // -- request-headers / response-headers parsing ---------------
+
+    #[test]
+    fn request_headers_set_parses() {
+        let cfg = Config::parse(r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    request-headers {
+                        set "X-Client-IP" "{client_ip}"
+                    }
+                    static { root "."; }
+                }
+            }
+        "#).unwrap();
+        let ops = &cfg.vhosts[0].locations[0].request_headers;
+        assert_eq!(ops.len(), 1);
+        assert!(matches!(&ops[0], HeaderOpConfig::Set { name, value }
+            if name == "X-Client-IP" && value == "{client_ip}"));
+    }
+
+    #[test]
+    fn request_headers_add_parses() {
+        let cfg = Config::parse(r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    request-headers {
+                        add "Vary" "accept"
+                    }
+                    static { root "."; }
+                }
+            }
+        "#).unwrap();
+        let ops = &cfg.vhosts[0].locations[0].request_headers;
+        assert!(matches!(&ops[0], HeaderOpConfig::Add { .. }));
+    }
+
+    #[test]
+    fn request_headers_remove_parses() {
+        let cfg = Config::parse(r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    request-headers {
+                        remove "Authorization"
+                    }
+                    static { root "."; }
+                }
+            }
+        "#).unwrap();
+        let ops = &cfg.vhosts[0].locations[0].request_headers;
+        assert!(matches!(&ops[0],
+            HeaderOpConfig::Remove { name } if name == "Authorization"));
+    }
+
+    #[test]
+    fn response_headers_parses() {
+        let cfg = Config::parse(r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    response-headers {
+                        set "X-Frame-Options" "DENY"
+                    }
+                    static { root "."; }
+                }
+            }
+        "#).unwrap();
+        let ops = &cfg.vhosts[0].locations[0].response_headers;
+        assert_eq!(ops.len(), 1);
+        assert!(matches!(&ops[0],
+            HeaderOpConfig::Set { name, value }
+                if name == "X-Frame-Options" && value == "DENY"));
+    }
+
+    #[test]
+    fn header_rules_absent_means_empty_vecs() {
+        let cfg = Config::parse(r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    static { root "."; }
+                }
+            }
+        "#).unwrap();
+        assert!(cfg.vhosts[0].locations[0].request_headers.is_empty());
+        assert!(cfg.vhosts[0].locations[0].response_headers.is_empty());
+    }
+
+    #[test]
+    fn invalid_header_name_is_error() {
+        let result = Config::parse(r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    request-headers {
+                        set "not valid!" "value"
+                    }
+                    static { root "."; }
+                }
+            }
+        "#);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn unknown_op_in_request_headers_is_error() {
+        let result = Config::parse(r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    request-headers {
+                        prepend "X-Foo" "bar"
+                    }
+                    static { root "."; }
+                }
+            }
+        "#);
+        assert!(result.is_err());
     }
 }
