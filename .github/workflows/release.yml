@@ -51,7 +51,7 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             --title "aloha $GITHUB_REF_NAME" \
             --draft \
-            target/debian/aloha_${VERSION}_*.deb \
-            target/generate-rpm/aloha-${VERSION}-1.*.rpm
+            $(ls target/debian/*.deb) \
+            $(ls target/generate-rpm/*.rpm)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
