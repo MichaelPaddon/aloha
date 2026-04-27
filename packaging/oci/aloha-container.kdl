@@ -1,0 +1,39 @@
+// aloha-container.kdl -- container default configuration
+//
+// Designed for rootless podman / docker.  The process runs as the aloha
+// user (set via USER in the Containerfile), so no privilege drop is needed
+// and no server block is present.
+//
+// Listens on port 80 (HTTP) and 443 (HTTPS, ephemeral self-signed cert).
+// Override this file to use a real cert or enable ACME:
+//
+//   podman run -v ./my-config.kdl:/etc/aloha.kdl:ro,Z aloha:latest
+//
+// When using tls "acme", also mount /var/lib/aloha for certificate storage
+// and add state-dir "/var/lib/aloha" to a server block above.
+
+listener {
+    bind "[::]:80"
+}
+
+listener {
+    bind "[::]:443"
+    tls
+}
+
+vhost "localhost" {
+    // Built-in status page.  Useful for container health checks:
+    //   curl -f http://localhost:80/_status
+    // Restrict to internal IPs in production via an access block.
+    location "/_status" {
+        status
+    }
+
+    location "/" {
+        static {
+            root "/var/www/aloha"
+            index-file "index.html"
+            index-file "index.htm"
+        }
+    }
+}

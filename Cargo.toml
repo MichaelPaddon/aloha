@@ -50,6 +50,13 @@ opt-level = 3
 lto       = "thin"
 strip     = "symbols"
 
+# ── OCI image ────────────────────────────────────────────────────
+# Build with:  cargo run-script oci-build
+# Requires:    cargo install cargo-run-script
+
+[package.metadata.scripts]
+oci-build = "podman build -f packaging/oci/Containerfile -t aloha:$CARGO_PKG_VERSION -t aloha:latest ."
+
 # ── Debian package ────────────────────────────────────────────────
 # Build with:  cargo deb
 # Output:      target/debian/aloha_<version>_<arch>.deb

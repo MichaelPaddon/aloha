@@ -1,0 +1,67 @@
+# ── Builder stage ─────────────────────────────────────────────────────────────
+FROM rust:1-slim-trixie AS builder
+
+# aws-lc-rs build requirements: cmake (build system), clang (C compiler),
+# perl (build scripts).  pkg-config is used by several cargo build scripts.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        cmake \
+        clang \
+        perl \
+        pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# ── Dependency caching layer ──────────────────────────────────────────────────
+# Build a stub binary from the manifests alone so that Docker/podman can cache
+# the compiled dependency graph.  Re-used on subsequent builds when only src/
+# changes.
+COPY Cargo.toml Cargo.lock ./
+RUN mkdir src \
+    && echo 'fn main() {}' > src/main.rs \
+    && cargo build --release \
+    # Remove stub output so cargo recompiles main.rs from the real source.
+    # The dep object files in deps/ are preserved — no need to rebuild them.
+    && rm -f target/release/aloha target/release/aloha.d \
+             target/release/deps/aloha-* \
+    && rm -rf src
+
+# ── Real build ────────────────────────────────────────────────────────────────
+COPY src ./src
+RUN cargo build --release
+
+# ── Runtime stage ─────────────────────────────────────────────────────────────
+FROM debian:trixie-slim
+
+# ca-certificates: required so hyper-rustls can verify TLS when aloha acts
+# as an ACME client making HTTPS requests to Let's Encrypt.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && addgroup --system aloha \
+    && adduser --system --ingroup aloha \
+               --no-create-home --home /nonexistent \
+               --shell /usr/sbin/nologin \
+               --gecos "aloha HTTP server" aloha \
+    # Web root — static assets served by the default vhost.
+    && install -d -o aloha -g aloha -m 755 /var/www/aloha \
+    # State dir — ACME certificates and account keys.  700: private keys.
+    && install -d -o aloha -g aloha -m 700 /var/lib/aloha
+
+COPY --from=builder /build/target/release/aloha /usr/bin/aloha
+
+# Default web assets (index.html, config.html, aloha-logo.svg).
+COPY html/ /var/www/aloha/
+
+# Container-friendly config (no privilege drop, ports 80/443).
+COPY packaging/oci/aloha-container.kdl /etc/aloha.kdl
+
+# Run unprivileged.  Port binding works because Docker grants
+# CAP_NET_BIND_SERVICE and rootless podman uses a per-container network
+# namespace where the aloha user can bind any port.
+USER aloha
+
+EXPOSE 80 443
+
+ENTRYPOINT ["/usr/bin/aloha"]
+CMD ["--config", "/etc/aloha.kdl"]
