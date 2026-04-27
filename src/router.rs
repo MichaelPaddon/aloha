@@ -96,17 +96,17 @@ impl Router {
             .map(strip_port);
         let vhost = self.resolve_vhost(host.as_deref(), listener_bind)?;
         let path = req.uri().path();
-        // Locations are ordered; first prefix match wins.
-        for loc in &vhost.locations {
-            if path.starts_with(loc.path.as_str()) {
-                return Some(Route {
-                    handler: loc.handler.clone(),
-                    matched_prefix: loc.path.clone(),
-                    auth_policy: loc.auth_policy.clone(),
-                });
-            }
-        }
-        None
+        // Longest prefix match: the most specific location wins.
+        // This makes declaration order irrelevant — "/_status" always
+        // beats "/" regardless of which is declared first in the config.
+        vhost.locations.iter()
+            .filter(|loc| path.starts_with(loc.path.as_str()))
+            .max_by_key(|loc| loc.path.len())
+            .map(|loc| Route {
+                handler: loc.handler.clone(),
+                matched_prefix: loc.path.clone(),
+                auth_policy: loc.auth_policy.clone(),
+            })
     }
 
     // Resolve the virtual host for a request.  `host` is the value of
@@ -186,23 +186,15 @@ mod tests {
         path: &str,
         bind: &str,
     ) -> Option<String> {
-        use hyper::http::Request;
-        let req = Request::builder()
-            .uri(path)
-            .header("host", host)
-            .body(())
-            .unwrap();
-
         let host_stripped = strip_port(host);
         let vhost =
             router.resolve_vhost(Some(host_stripped), bind)?;
 
-        for loc in &vhost.locations {
-            if req.uri().path().starts_with(loc.path.as_str()) {
-                return Some(loc.path.clone());
-            }
-        }
-        None
+        // Mirror the production longest-prefix-match algorithm.
+        vhost.locations.iter()
+            .filter(|loc| path.starts_with(loc.path.as_str()))
+            .max_by_key(|loc| loc.path.len())
+            .map(|loc| loc.path.clone())
     }
 
     #[test]
@@ -515,10 +507,25 @@ mod tests {
     }
 
     #[test]
-    fn location_prefix_order_first_match_wins() {
-        // "/docs/" is declared before "/"; a request to /docs/foo must
-        // match "/docs/" and not fall through to "/".
-        let config = make_config(
+    fn longer_prefix_wins_regardless_of_declaration_order() {
+        // "/docs/" is longer than "/" and must win for /docs/... paths
+        // even when "/" is declared first.
+        let config_catchall_first = make_config(
+            r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "example.com" {
+                location "/" {
+                    static { root "/www"; }
+                }
+                location "/docs/" {
+                    static { root "/docs"; }
+                }
+            }
+            "#,
+        );
+        let config_specific_first = make_config(
             r#"
             listener {
                 bind "0.0.0.0:80"
@@ -533,15 +540,23 @@ mod tests {
             }
             "#,
         );
-        let router = make_router(&config);
-        assert_eq!(
-            route_str(&router, "example.com", "/docs/readme", "0.0.0.0:80"),
-            Some("/docs/".into())
-        );
-        assert_eq!(
-            route_str(&router, "example.com", "/index.html", "0.0.0.0:80"),
-            Some("/".into())
-        );
+        for config in [config_catchall_first, config_specific_first] {
+            let router = make_router(&config);
+            assert_eq!(
+                route_str(
+                    &router, "example.com", "/docs/readme", "0.0.0.0:80"
+                ),
+                Some("/docs/".into()),
+                "longer prefix /docs/ should win"
+            );
+            assert_eq!(
+                route_str(
+                    &router, "example.com", "/index.html", "0.0.0.0:80"
+                ),
+                Some("/".into()),
+                "catch-all / should win when no longer match"
+            );
+        }
     }
 
     #[test]

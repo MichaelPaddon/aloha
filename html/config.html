@@ -894,7 +894,8 @@
             <tr>
               <td>location</td>
               <td>path prefix <span class="badge badge-req">≥ 1</span></td>
-              <td>URL routing rule. Tested in config order; first prefix match wins.
+              <td>URL routing rule. Longest prefix match wins; declaration
+                  order does not matter.
                   See <a href="#location">location</a>.</td>
             </tr>
           </tbody>
@@ -907,8 +908,11 @@
       <h2><code>location</code></h2>
       <p>
         Maps a URL path prefix to a handler. Locations inside a vhost are tested in
-        declaration order — the first one whose prefix matches the request path wins.
-        Each location contains exactly one handler node.
+        The location with the <strong>longest matching prefix</strong> wins —
+        declaration order does not matter. A catch-all
+        <code>location "/"</code> never masks a more specific
+        <code>location "/_status"</code> regardless of which appears first
+        in the config. Each location contains exactly one handler node.
       </p>
 
       <!-- auth -->

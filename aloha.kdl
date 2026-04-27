@@ -122,6 +122,12 @@ listener {
 // alias adds extra names (literal or regex) that map to the same vhost.
 
 vhost "localhost" {
+    // Built-in status page: current load, request rates, latency histogram.
+    // Responds with HTML by default; add Accept: application/json for JSON.
+    location "/_status" {
+        status
+    }
+
     // Serve static files from /var/www/aloha
     location "/" {
         static {
@@ -137,7 +143,6 @@ vhost "localhost" {
 //     alias "www.example.com"
 //
 //     // Redirect bare domain to www
-//     // (put more-specific paths before the catch-all "/")
 //     location "/old-section/" {
 //         redirect {
 //             to "/new-section/"

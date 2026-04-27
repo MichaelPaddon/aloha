@@ -307,9 +307,11 @@ vhost "~.+\.example\.com" {
 
 ## `location`
 
-Maps a URL path prefix to a handler. Locations inside a vhost are tested in
-declaration order — the first one whose prefix matches the request path wins.
-Each location contains exactly one handler node.
+Maps a URL path prefix to a handler. The location with the **longest matching
+prefix** wins — declaration order does not matter. This means a catch-all
+`location "/"` never masks a more specific `location "/_status"` regardless
+of which appears first in the config. Each location contains exactly one
+handler node.
 
 ### `auth` — access control
 
