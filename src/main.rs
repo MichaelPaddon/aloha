@@ -114,8 +114,13 @@ async fn main() -> anyhow::Result<()> {
     // clone of the Arc, and AppState can record per-request data.
     let metrics = Arc::new(metrics::Metrics::new());
 
+    let summary = Arc::new(
+        handler::status::ServerSummary::from_config(&config)
+    );
+
     let router = Arc::new(
-        Router::new(&config, &metrics).context("building router")?,
+        Router::new(&config, &metrics, &summary)
+            .context("building router")?,
     );
 
     // Phase 1: create shared ACME challenge map and app state.

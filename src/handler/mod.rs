@@ -33,22 +33,32 @@ impl Handler {
     pub fn from_config(
         cfg: &HandlerConfig,
         metrics: &Arc<Metrics>,
+        summary: &Arc<status::ServerSummary>,
     ) -> anyhow::Result<Self> {
         match cfg {
-            HandlerConfig::Static { root, index_files, strip_prefix } => {
-                Ok(Handler::Static(static_files::StaticHandler::new(
+            HandlerConfig::Static {
+                root,
+                index_files,
+                strip_prefix,
+            } => Ok(Handler::Static(
+                static_files::StaticHandler::new(
                     root,
                     index_files.clone(),
                     *strip_prefix,
-                )))
-            }
+                ),
+            )),
             HandlerConfig::Proxy { upstream, strip_prefix } => {
                 Ok(Handler::Proxy(
-                    proxy::ProxyHandler::new(upstream, *strip_prefix)?
+                    proxy::ProxyHandler::new(
+                        upstream, *strip_prefix,
+                    )?,
                 ))
             }
             HandlerConfig::Redirect { to, code } => {
-                Ok(Handler::Redirect { to: to.clone(), code: *code })
+                Ok(Handler::Redirect {
+                    to: to.clone(),
+                    code: *code,
+                })
             }
             HandlerConfig::FastCgi { socket, root, index } => {
                 Ok(Handler::FastCgi(fcgi::FcgiHandler::new(
@@ -64,16 +74,19 @@ impl Handler {
                     index.clone(),
                 )))
             }
-            HandlerConfig::Status => {
-                Ok(Handler::Status(
-                    status::StatusHandler::new(metrics.clone())
-                ))
-            }
+            HandlerConfig::Status => Ok(Handler::Status(
+                status::StatusHandler::new(
+                    metrics.clone(),
+                    summary.clone(),
+                ),
+            )),
             HandlerConfig::Cgi { root } => {
                 #[cfg(unix)]
                 return Ok(Handler::Cgi(cgi::CgiHandler::new(root)));
                 #[cfg(not(unix))]
-                anyhow::bail!("cgi handler is only supported on Unix")
+                anyhow::bail!(
+                    "cgi handler is only supported on Unix"
+                )
             }
         }
     }

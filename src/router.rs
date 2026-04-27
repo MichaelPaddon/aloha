@@ -7,6 +7,7 @@
 use crate::access::AccessPolicy;
 use crate::config::{BasicAuthConfig, Config, ListenerConfig, VHostConfig};
 use crate::handler::Handler;
+use crate::handler::status::ServerSummary;
 use crate::metrics::Metrics;
 use hyper::Request;
 use hyper::body::Incoming;
@@ -47,6 +48,7 @@ impl Router {
     pub fn new(
         config: &Config,
         metrics: &Arc<Metrics>,
+        summary: &Arc<ServerSummary>,
     ) -> anyhow::Result<Self> {
         let mut vhosts: HashMap<String, Arc<VHost>> = HashMap::new();
         let mut patterns: Vec<(Regex, Arc<VHost>)> = Vec::new();
@@ -58,7 +60,8 @@ impl Router {
             HashMap::new();
 
         for vcfg in &config.vhosts {
-            let vhost = Arc::new(build_vhost(vcfg, metrics)?);
+            let vhost =
+                Arc::new(build_vhost(vcfg, metrics, summary)?);
 
             let all_names =
                 std::iter::once(&vcfg.name).chain(vcfg.aliases.iter());
@@ -159,12 +162,15 @@ fn strip_port(host: &str) -> &str {
 fn build_vhost(
     vcfg: &VHostConfig,
     metrics: &Arc<Metrics>,
+    summary: &Arc<ServerSummary>,
 ) -> anyhow::Result<VHost> {
     let mut locations = Vec::with_capacity(vcfg.locations.len());
     for loc in &vcfg.locations {
-        let handler = Arc::new(
-            Handler::from_config(&loc.handler, metrics)?
-        );
+        let handler = Arc::new(Handler::from_config(
+            &loc.handler,
+            metrics,
+            summary,
+        )?);
         locations.push(Location {
             path: loc.path.clone(),
             handler,
@@ -187,7 +193,12 @@ mod tests {
 
     fn make_router(config: &Config) -> Router {
         let metrics = Arc::new(crate::metrics::Metrics::new());
-        Router::new(config, &metrics).unwrap()
+        let summary = Arc::new(
+            crate::handler::status::ServerSummary::from_config(
+                config,
+            ),
+        );
+        Router::new(config, &metrics, &summary).unwrap()
     }
 
     // Route a synthetic request and return the matched location prefix,
