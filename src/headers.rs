@@ -14,8 +14,9 @@ pub struct Template {
 
 enum TemplatePart {
     Literal(String),
-    Var(KnownVar),
-    // Unrecognised {name} -- preserved verbatim in rendered output.
+    // Known variable + optional fallback text used when the value is empty.
+    Var(KnownVar, Option<String>),
+    // Unrecognised {name} or {name|default} -- preserved verbatim.
     Unknown(String),
 }
 
@@ -43,18 +44,24 @@ impl Template {
             }
             let after = &rest[open + 1..];
             if let Some(close) = after.find('}') {
-                let name = &after[..close];
-                parts.push(match name {
-                    "client_ip" => TemplatePart::Var(KnownVar::ClientIp),
-                    "username"  => TemplatePart::Var(KnownVar::Username),
-                    "groups"    => TemplatePart::Var(KnownVar::Groups),
-                    "method"    => TemplatePart::Var(KnownVar::Method),
-                    "path"      => TemplatePart::Var(KnownVar::Path),
-                    "host"      => TemplatePart::Var(KnownVar::Host),
-                    "scheme"    => TemplatePart::Var(KnownVar::Scheme),
-                    other => TemplatePart::Unknown(
-                        format!("{{{other}}}"),
-                    ),
+                let token = &after[..close];
+                // Split on the first '|' to get an optional fallback.
+                let (var_name, fallback) =
+                    if let Some(pipe) = token.find('|') {
+                        (&token[..pipe], Some(token[pipe + 1..].to_owned()))
+                    } else {
+                        (token, None)
+                    };
+                parts.push(match var_name {
+                    "client_ip" => TemplatePart::Var(KnownVar::ClientIp, fallback),
+                    "username"  => TemplatePart::Var(KnownVar::Username, fallback),
+                    "groups"    => TemplatePart::Var(KnownVar::Groups,   fallback),
+                    "method"    => TemplatePart::Var(KnownVar::Method,   fallback),
+                    "path"      => TemplatePart::Var(KnownVar::Path,     fallback),
+                    "host"      => TemplatePart::Var(KnownVar::Host,     fallback),
+                    "scheme"    => TemplatePart::Var(KnownVar::Scheme,   fallback),
+                    // Unknown variable: pass through the original token verbatim.
+                    _ => TemplatePart::Unknown(format!("{{{token}}}")),
                 });
                 rest = &after[close + 1..];
             } else {
@@ -77,15 +84,24 @@ impl Template {
             match part {
                 TemplatePart::Literal(s) => out.push_str(s),
                 TemplatePart::Unknown(s) => out.push_str(s),
-                TemplatePart::Var(v)     => match v {
-                    KnownVar::ClientIp => out.push_str(ctx.client_ip),
-                    KnownVar::Username => out.push_str(ctx.username),
-                    KnownVar::Groups   => out.push_str(ctx.groups),
-                    KnownVar::Method   => out.push_str(ctx.method),
-                    KnownVar::Path     => out.push_str(ctx.path),
-                    KnownVar::Host     => out.push_str(ctx.host),
-                    KnownVar::Scheme   => out.push_str(ctx.scheme),
-                },
+                TemplatePart::Var(v, default) => {
+                    let value = match v {
+                        KnownVar::ClientIp => ctx.client_ip,
+                        KnownVar::Username => ctx.username,
+                        KnownVar::Groups   => ctx.groups,
+                        KnownVar::Method   => ctx.method,
+                        KnownVar::Path     => ctx.path,
+                        KnownVar::Host     => ctx.host,
+                        KnownVar::Scheme   => ctx.scheme,
+                    };
+                    if value.is_empty() {
+                        if let Some(d) = default {
+                            out.push_str(d);
+                        }
+                    } else {
+                        out.push_str(value);
+                    }
+                }
             }
         }
         out
@@ -96,8 +112,8 @@ impl Template {
     pub fn references_principal(&self) -> bool {
         self.parts.iter().any(|p| matches!(
             p,
-            TemplatePart::Var(KnownVar::Username)
-            | TemplatePart::Var(KnownVar::Groups)
+            TemplatePart::Var(KnownVar::Username, _)
+            | TemplatePart::Var(KnownVar::Groups, _)
         ))
     }
 }
@@ -197,6 +213,7 @@ fn apply(headers: &mut HeaderMap, ops: &[HeaderOp], ctx: &RequestContext<'_>) {
         match op {
             HeaderOp::Set { name, template } => {
                 let rendered = template.render(ctx);
+                if rendered.is_empty() { continue; }
                 match HeaderValue::from_str(&rendered) {
                     Ok(val) => { headers.insert(name.clone(), val); }
                     Err(_) => tracing::warn!(
@@ -209,6 +226,7 @@ fn apply(headers: &mut HeaderMap, ops: &[HeaderOp], ctx: &RequestContext<'_>) {
             }
             HeaderOp::Add { name, template } => {
                 let rendered = template.render(ctx);
+                if rendered.is_empty() { continue; }
                 match HeaderValue::from_str(&rendered) {
                     Ok(val) => { headers.append(name.clone(), val); }
                     Err(_) => tracing::warn!(
@@ -559,5 +577,96 @@ mod tests {
         };
         apply_request_headers(&mut h, &ops, &c);
         assert_eq!(h["x-user"], "alice");
+    }
+
+    #[test]
+    fn template_default_used_when_variable_is_empty() {
+        let t = Template::parse("{username|anonymous}");
+        assert_eq!(t.render(&ctx("", "", "")), "anonymous");
+    }
+
+    #[test]
+    fn template_default_not_used_when_variable_is_set() {
+        let t = Template::parse("{username|anonymous}");
+        assert_eq!(t.render(&ctx("", "alice", "")), "alice");
+    }
+
+    #[test]
+    fn template_default_in_mixed_template() {
+        let t = Template::parse("user={username|anon},ip={client_ip}");
+        assert_eq!(t.render(&ctx("1.2.3.4", "", "")), "user=anon,ip=1.2.3.4");
+    }
+
+    #[test]
+    fn template_empty_default_behaves_like_no_default() {
+        // {username|} with empty default still renders empty for anon.
+        let t = Template::parse("{username|}");
+        assert_eq!(t.render(&ctx("", "", "")), "");
+    }
+
+    #[test]
+    fn template_unknown_var_with_pipe_passes_through_verbatim() {
+        // Unrecognised variable: preserve {widget|fallback} as-is.
+        let t = Template::parse("{widget|fallback}");
+        assert_eq!(t.render(&ctx("", "", "")), "{widget|fallback}");
+    }
+
+    #[test]
+    fn template_default_references_principal_still_true() {
+        assert!(Template::parse("{username|anon}").references_principal());
+    }
+
+    #[test]
+    fn apply_set_uses_default_for_anonymous_user() {
+        let mut h = HeaderMap::new();
+        let ops = vec![set_op("x-user", "{username|anonymous}")];
+        let principal = anon_principal();
+        let (username, groups) = principal_strings(&principal);
+        let c = RequestContext {
+            client_ip: "1.2.3.4", username, groups: &groups,
+            method: "GET", path: "/", host: "example.com", scheme: "http",
+        };
+        apply_request_headers(&mut h, &ops, &c);
+        assert_eq!(h["x-user"], "anonymous");
+    }
+
+    #[test]
+    fn apply_set_empty_rendered_is_noop() {
+        // Anonymous user: {username} renders to ""; header must not be set.
+        let mut h = HeaderMap::new();
+        let ops = vec![set_op("x-auth-user", "{username}")];
+        let principal = anon_principal();
+        let (username, groups) = principal_strings(&principal);
+        let c = RequestContext {
+            client_ip: "1.2.3.4",
+            username,
+            groups: &groups,
+            method: "GET",
+            path: "/",
+            host: "example.com",
+            scheme: "http",
+        };
+        apply_request_headers(&mut h, &ops, &c);
+        assert!(h.get("x-auth-user").is_none());
+    }
+
+    #[test]
+    fn apply_add_empty_rendered_is_noop() {
+        // Anonymous user: {groups} renders to ""; append must not fire.
+        let mut h = HeaderMap::new();
+        let ops = vec![add_op("x-auth-groups", "{groups}")];
+        let principal = anon_principal();
+        let (username, groups) = principal_strings(&principal);
+        let c = RequestContext {
+            client_ip: "1.2.3.4",
+            username,
+            groups: &groups,
+            method: "GET",
+            path: "/",
+            host: "example.com",
+            scheme: "http",
+        };
+        apply_request_headers(&mut h, &ops, &c);
+        assert!(h.get("x-auth-groups").is_none());
     }
 }

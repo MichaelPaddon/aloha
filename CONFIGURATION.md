@@ -570,6 +570,17 @@ request time. Unrecognised placeholders are passed through unchanged.
 | `{host}`      | Value of the `Host` request header |
 | `{scheme}`    | `"https"` for TLS listeners, `"http"` for plain listeners |
 
+A fallback value can be specified with `{variable|default}`: if the variable
+resolves to an empty string, `default` is used instead.
+
+```kdl
+set "X-Auth-User"   "{username|anonymous}"
+set "X-Auth-Groups" "{groups|none}"
+```
+
+This is useful for variables that are empty for anonymous requests
+(`{username}`, `{groups}`) or any other case where the variable may be absent.
+
 Variables that reference the authenticated identity (`{username}`,
 `{groups}`) cause the configured auth back-end to run even when there is no
 `access` block. If no credentials are present the variables render as empty
@@ -593,6 +604,11 @@ strings.
   `request-headers` will be overwritten by the proxy's append. To fully
   control these headers, do not rely on `request-headers`; instead accept
   the proxy's appended value at the backend.
+
+- **Empty rendered values**: `set` and `add` are silently skipped when the
+  rendered value is empty. In particular, `set "X-Auth-User" "{username}"`
+  injects the header for authenticated requests and leaves it absent for
+  anonymous ones.
 
 - **Invalid header values**: If a rendered value contains characters that
   are not valid in an HTTP header (e.g. control characters), the operation

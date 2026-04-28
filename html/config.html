@@ -1237,6 +1237,18 @@
           </tbody>
         </table>
       </div>
+      <p>
+        A fallback can be specified with <code>{variable|default}</code>: if
+        the variable resolves to an empty string, the default text is used
+        instead.
+      </p>
+<pre><code><span class="kw">set</span> <span class="str">"X-Auth-User"</span>   <span class="str">"{username|anonymous}"</span>
+<span class="kw">set</span> <span class="str">"X-Auth-Groups"</span> <span class="str">"{groups|none}"</span></code></pre>
+      <p>
+        This is most useful for <code>{username}</code> and
+        <code>{groups}</code>, which are empty for anonymous requests, but
+        works for any variable.
+      </p>
       <div class="callout info">
         <span class="callout-icon">i</span>
         <span>Variables that reference the authenticated identity
@@ -1264,6 +1276,13 @@
           <em>after</em> <code>request-headers</code> rules run.
           A <code>remove</code> rule for those headers will be overwritten by
           the proxy's own logic.
+        </li>
+        <li>
+          <strong>Empty rendered values:</strong> <code>set</code> and
+          <code>add</code> are silently skipped when the rendered value is
+          empty. In particular,
+          <code>set "X-Auth-User" "{username}"</code> injects the header for
+          authenticated requests and leaves it absent for anonymous ones.
         </li>
         <li>
           <strong>Invalid header values:</strong> If a rendered value contains
