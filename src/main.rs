@@ -8,6 +8,7 @@ mod auth;
 mod compress;
 mod config;
 mod error;
+mod geoip;
 mod handler;
 mod headers;
 mod listener;
@@ -131,11 +132,23 @@ async fn main() -> anyhow::Result<()> {
     let authenticator: Arc<dyn auth::Authenticator> =
         build_authenticator(&config.server.auth);
 
+    let geoip: Option<Arc<geoip::CountryReader>> =
+        config.server.geoip.as_ref()
+            .map(|g| geoip::open(&g.db))
+            .transpose()
+            .context("opening GeoIP database")?
+            .map(Arc::new);
+
+    if let Some(ref g) = config.server.geoip {
+        tracing::info!(db = %g.db, "geoip: database loaded");
+    }
+
     let state = Arc::new(AppState {
         router,
         acme_challenges: challenges.clone(),
         authenticator,
         metrics: metrics.clone(),
+        geoip,
     });
 
     // Background task: advance the request-rate ring buffer every 5 s.

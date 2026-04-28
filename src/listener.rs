@@ -7,6 +7,7 @@
 use crate::access::AccessOutcome;
 use crate::acme::ChallengeMap;
 use crate::auth::{Authenticator, Principal};
+use crate::geoip;
 use crate::headers::principal_strings;
 use crate::compress;
 use crate::config::{ListenerConfig, TcpProxyConfig, Timeouts};
@@ -47,6 +48,8 @@ pub struct AppState {
     pub acme_challenges: ChallengeMap,
     pub authenticator: Arc<dyn Authenticator>,
     pub metrics: Arc<Metrics>,
+    // Optional GeoIP reader; present when server.geoip is configured.
+    pub geoip: Option<Arc<geoip::CountryReader>>,
 }
 
 // One AlohaService is cloned per accepted connection.
@@ -156,8 +159,25 @@ impl hyper::service::Service<Request<Incoming>> for AlohaService {
                             Principal::Anonymous
                         };
 
+                        // Look up country only when the policy needs it.
+                        let country: Option<String> = match (
+                            &state.geoip,
+                            &route.access_policy,
+                        ) {
+                            (Some(reader), Some(policy))
+                                if policy.needs_geoip =>
+                            {
+                                geoip::lookup_country(reader, peer.ip())
+                            }
+                            _ => None,
+                        };
+
                         if let Some(policy) = &route.access_policy {
-                            match policy.evaluate(peer.ip(), &principal) {
+                            match policy.evaluate(
+                                peer.ip(),
+                                &principal,
+                                country.as_deref(),
+                            ) {
                                 AccessOutcome::Allow => {}
                                 AccessOutcome::Deny(401) => {
                                     let realm = route

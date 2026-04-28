@@ -56,6 +56,7 @@ server {
 | `user`      | string  | --                   | Unix username to switch to after all sockets are bound. Only effective when started as root; silently ignored otherwise. |
 | `group`     | string  | user's primary group | Unix group to switch to. Defaults to the primary GID of `user` from `/etc/passwd`. |
 | `auth`      | block   | --                   | Authentication back-end. See [Authentication](#authentication). |
+| `geoip`     | block   | --                   | GeoIP database for country-based access control. See [GeoIP](#geoip). |
 | `tls`       | block   | --                   | Global TLS defaults inherited by every TLS listener. See [TLS protocol options](#tls-protocol-options). |
 
 ### Privilege drop
@@ -254,6 +255,76 @@ server {
 
 ---
 
+## GeoIP
+
+aloha can restrict access by the client's country of origin using a MaxMind
+MMDB database. Configure the path to the database once in the `server` block;
+then use `country` conditions in any `access` block.
+
+```kdl
+server {
+    geoip {
+        db "/etc/aloha/GeoLite2-Country.mmdb"
+    }
+}
+```
+
+| Child node | Type | Default | Description |
+|------------|------|---------|-------------|
+| `db`       | path | --      | **Required.** Filesystem path to the MaxMind MMDB file. |
+
+The database is loaded into memory at startup. Compatible databases:
+**GeoLite2-Country** (smallest, country codes only), **GeoLite2-City**
+(larger, also has country codes), or any MMDB file that contains a
+`country.iso_code` field.
+
+The GeoLite2 databases are available free from
+[maxmind.com](https://dev.maxmind.com/geoip/geolite2-free-geolocation-data)
+after creating an account. The file must be readable by the aloha process
+at startup (after privilege drop, if `server user=` is set).
+
+Once configured, use the `country` condition inside an `access` block:
+
+```kdl
+// Allow only requests from US, Canada, and UK.
+location "/admin/" {
+    access {
+        allow { country "US" "CA" "GB" }
+        deny  code=403
+    }
+    static { root "/var/www/admin" }
+}
+
+// Block known high-risk countries; allow everyone else.
+location "/api/" {
+    access {
+        deny  { country "CN" "RU" "KP" }
+        allow
+    }
+    proxy { upstream "http://127.0.0.1:3000" }
+}
+```
+
+Country codes are ISO 3166-1 alpha-2 (two uppercase letters). They are
+matched case-insensitively in the config. Private and reserved IP ranges
+(127.0.0.0/8, 10.0.0.0/8, etc.) do not appear in the database and are
+treated as if no country is known -- they will **not** satisfy a `country`
+condition. Combine with an `ip` condition if you need to allow private
+ranges:
+
+```kdl
+access {
+    allow { ip "10.0.0.0/8" }
+    allow { country "US" }
+    deny  code=403
+}
+```
+
+A startup error is returned if `country` conditions appear in any `access`
+block but no `server { geoip { ... } }` is configured.
+
+---
+
 ## Authentication
 
 aloha supports HTTP Basic authentication validated against the system PAM
@@ -433,6 +504,7 @@ match. Within the same type, conditions are **OR**-ed: any one match suffices.
 | Condition       | Argument     | Description |
 |-----------------|--------------|-------------|
 | `ip`            | CIDR or IP   | Client IP address or range. `10.0.0.0/8`, `192.168.1.1`, `::1` are all valid. IPv4-mapped IPv6 addresses are normalised automatically. Repeatable -- multiple `ip` entries are OR-ed. |
+| `country`       | code …       | ISO 3166-1 alpha-2 country code(s), e.g. `"US"`. Requires `server { geoip { db ... } }`. Repeatable. Private/reserved IPs have no country and never match. See [GeoIP](#geoip). |
 | `authenticated` | --           | Any authenticated (non-anonymous) user. |
 | `user`          | username     | A specific authenticated username. Repeatable. |
 | `group`         | group name   | The authenticated user is a member of this group. Repeatable. |

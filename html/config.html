@@ -375,6 +375,7 @@
           <li><a href="#tls-acme">acme mode</a></li>
           <li><a href="#tls-options">tls options</a></li>
         </ul>
+        <li><a href="#geoip">GeoIP</a></li>
         <li><a href="#authentication">Authentication</a></li>
         <ul class="nav-list sub">
           <li><a href="#auth-pam">PAM</a></li>
@@ -502,6 +503,12 @@
               <td><span class="badge badge-opt">optional</span>
                   Authentication back-end. See
                   <a href="#authentication">Authentication</a>.</td>
+            </tr>
+            <tr>
+              <td>geoip</td><td>block</td><td>--</td>
+              <td><span class="badge badge-opt">optional</span>
+                  GeoIP database for country-based access control. See
+                  <a href="#geoip">GeoIP</a>.</td>
             </tr>
             <tr>
               <td>tls</td><td>block</td><td>--</td>
@@ -820,6 +827,79 @@
       </div>
     </section>
 
+    <!-- GeoIP -->
+    <section id="geoip">
+      <h2>GeoIP</h2>
+      <p>
+        aloha can restrict access by the client's country of origin using a
+        MaxMind MMDB database. Configure the path to the database once in the
+        <code>server</code> block; then use <code>country</code> conditions
+        in any <code>access</code> block.
+      </p>
+<pre><code><span class="kw">server</span> {
+    <span class="kw">geoip</span> {
+        <span class="kw">db</span> <span class="str">"/etc/aloha/GeoLite2-Country.mmdb"</span>
+    }
+}</code></pre>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Child node</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>db</td><td>path</td><td>--</td>
+              <td><span class="badge badge-req">required</span>
+                  Filesystem path to the MaxMind MMDB file.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        The database is loaded into memory at startup. Compatible databases:
+        <strong>GeoLite2-Country</strong> (smallest, country codes only),
+        <strong>GeoLite2-City</strong> (larger, also has country codes), or
+        any MMDB file that contains a <code>country.iso_code</code> field.
+        The file must be readable by the aloha process at startup (after
+        privilege drop, if <code>server user=</code> is set).
+      </p>
+      <p>Once configured, use the <code>country</code> condition in access blocks:</p>
+<pre><code><span class="cm">// Allow only US, Canada, and UK</span>
+<span class="kw">location</span> <span class="str">"/admin/"</span> {
+    <span class="kw">access</span> {
+        <span class="kw">allow</span> { <span class="kw">country</span> <span class="str">"US"</span> <span class="str">"CA"</span> <span class="str">"GB"</span> }
+        <span class="kw">deny</span>  <span class="prop">code=</span><span class="num">403</span>
+    }
+    <span class="kw">static</span> { <span class="kw">root</span> <span class="str">"/var/www/admin"</span> }
+}
+
+<span class="cm">// Block specific countries; allow everyone else</span>
+<span class="kw">location</span> <span class="str">"/api/"</span> {
+    <span class="kw">access</span> {
+        <span class="kw">deny</span>  { <span class="kw">country</span> <span class="str">"CN"</span> <span class="str">"RU"</span> <span class="str">"KP"</span> }
+        <span class="kw">allow</span>
+    }
+    <span class="kw">proxy</span> { <span class="kw">upstream</span> <span class="str">"http://127.0.0.1:3000"</span> }
+}</code></pre>
+      <p>
+        Country codes are ISO 3166-1 alpha-2 (two uppercase letters).
+        Multiple codes on one <code>country</code> node are OR-ed.
+        Private and reserved IP ranges (127.0.0.0/8, 10.0.0.0/8, etc.) are
+        not in the database and will <strong>not</strong> satisfy a
+        <code>country</code> condition. Combine with <code>ip</code> if you
+        need to allow private ranges:
+      </p>
+<pre><code><span class="kw">access</span> {
+    <span class="kw">allow</span> { <span class="kw">ip</span> <span class="str">"10.0.0.0/8"</span> }
+    <span class="kw">allow</span> { <span class="kw">country</span> <span class="str">"US"</span> }
+    <span class="kw">deny</span>  <span class="prop">code=</span><span class="num">403</span>
+}</code></pre>
+      <div class="callout warn">
+        <span class="callout-icon">!</span>
+        <span>A startup error is returned if <code>country</code> conditions
+        appear anywhere but no <code>server { geoip { db ... } }</code> is
+        configured.</span>
+      </div>
+    </section>
+
     <!-- Authentication -->
     <section id="authentication">
       <h2>Authentication</h2>
@@ -1091,6 +1171,14 @@
                   <code>192.168.1.1</code>, <code>::1</code> are all valid.
                   IPv4-mapped IPv6 addresses are normalised automatically.
                   Repeatable &mdash; multiple entries are OR-ed.</td>
+            </tr>
+            <tr>
+              <td>country</td><td>code …</td>
+              <td>ISO 3166-1 alpha-2 country code(s), e.g. <code>"US"</code>.
+                  Requires <code>server { geoip { db ... } }</code>. Multiple
+                  codes on one node are OR-ed. Private/reserved IPs have no
+                  country and never match.
+                  See <a href="#geoip">GeoIP</a>.</td>
             </tr>
             <tr>
               <td>authenticated</td><td>--</td>

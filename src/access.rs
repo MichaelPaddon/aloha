@@ -1,6 +1,6 @@
-// Firewall-style access control: IP, user, and group rules evaluated
-// per-request against the authenticated principal.  Rules use first-match
-// semantics; an implicit deny-403 fires when no rule matches.
+// Firewall-style access control: IP, country, user, and group rules
+// evaluated per-request against the authenticated principal.  Rules use
+// first-match semantics; an implicit deny-403 fires when no rule matches.
 
 use crate::auth::Principal;
 use ipnet::IpNet;
@@ -11,6 +11,8 @@ use std::net::IpAddr;
 #[derive(Clone, Debug)]
 pub enum AccessCondition {
     Ip(IpNet),
+    // ISO 3166-1 alpha-2 country code, stored uppercase (e.g. "US").
+    Country(String),
     User(String),
     Group(String),
     Authenticated,
@@ -32,6 +34,20 @@ pub struct AccessRule {
 #[derive(Clone, Debug)]
 pub struct AccessPolicy {
     pub rules: Vec<AccessRule>,
+    /// Pre-computed: true iff any rule contains a `Country` condition.
+    /// Used by listener.rs to skip the GeoIP lookup when not needed.
+    pub needs_geoip: bool,
+}
+
+impl AccessPolicy {
+    pub fn new(rules: Vec<AccessRule>) -> Self {
+        let needs_geoip = rules.iter().any(|r| {
+            r.conditions
+                .iter()
+                .any(|c| matches!(c, AccessCondition::Country(_)))
+        });
+        AccessPolicy { rules, needs_geoip }
+    }
 }
 
 pub enum AccessOutcome {
@@ -47,10 +63,11 @@ impl AccessPolicy {
         &self,
         peer: IpAddr,
         principal: &Principal,
+        country: Option<&str>,
     ) -> AccessOutcome {
         let peer = normalise(peer);
         for rule in &self.rules {
-            if rule_matches(&rule.conditions, peer, principal) {
+            if rule_matches(&rule.conditions, peer, principal, country) {
                 return match &rule.action {
                     AccessAction::Allow => AccessOutcome::Allow,
                     AccessAction::Deny { code } => AccessOutcome::Deny(*code),
@@ -71,6 +88,7 @@ fn rule_matches(
     conditions: &[AccessCondition],
     peer: IpAddr,
     principal: &Principal,
+    country: Option<&str>,
 ) -> bool {
     if conditions.is_empty() {
         return true;
@@ -79,6 +97,8 @@ fn rule_matches(
     // Collect conditions by type and check each bucket.
     let mut has_ip = false;
     let mut ip_ok = false;
+    let mut has_country = false;
+    let mut country_ok = false;
     let mut has_user = false;
     let mut user_ok = false;
     let mut has_group = false;
@@ -91,6 +111,12 @@ fn rule_matches(
                 has_ip = true;
                 if net.contains(&peer) {
                     ip_ok = true;
+                }
+            }
+            AccessCondition::Country(code) => {
+                has_country = true;
+                if country.map(|c| c == code.as_str()).unwrap_or(false) {
+                    country_ok = true;
                 }
             }
             AccessCondition::User(u) => {
@@ -116,6 +142,9 @@ fn rule_matches(
     }
 
     if has_ip && !ip_ok {
+        return false;
+    }
+    if has_country && !country_ok {
         return false;
     }
     if has_user && !user_ok {
@@ -169,7 +198,7 @@ mod tests {
     }
 
     fn policy(rules: Vec<AccessRule>) -> AccessPolicy {
-        AccessPolicy { rules }
+        AccessPolicy::new(rules)
     }
 
     fn allow_rule(conds: Vec<AccessCondition>) -> AccessRule {
@@ -203,7 +232,7 @@ mod tests {
     fn no_rules_implicit_deny() {
         let p = policy(vec![]);
         assert!(matches!(
-            p.evaluate(ip("1.2.3.4"), &anon()),
+            p.evaluate(ip("1.2.3.4"), &anon(), None),
             AccessOutcome::Deny(403)
         ));
     }
@@ -217,7 +246,7 @@ mod tests {
             deny_rule(vec![], 403),
         ]);
         assert!(matches!(
-            p.evaluate(ip("10.1.2.3"), &anon()),
+            p.evaluate(ip("10.1.2.3"), &anon(), None),
             AccessOutcome::Allow
         ));
     }
@@ -229,14 +258,13 @@ mod tests {
             deny_rule(vec![], 403),
         ]);
         assert!(matches!(
-            p.evaluate(ip("1.2.3.4"), &anon()),
+            p.evaluate(ip("1.2.3.4"), &anon(), None),
             AccessOutcome::Deny(403)
         ));
     }
 
     #[test]
     fn two_ip_conditions_are_or() {
-        // Either network should allow.
         let p = policy(vec![
             allow_rule(vec![
                 AccessCondition::Ip(net("10.0.0.0/8")),
@@ -245,16 +273,15 @@ mod tests {
             deny_rule(vec![], 403),
         ]);
         assert!(matches!(
-            p.evaluate(ip("10.0.0.1"), &anon()),
+            p.evaluate(ip("10.0.0.1"), &anon(), None),
             AccessOutcome::Allow
         ));
         assert!(matches!(
-            p.evaluate(ip("192.168.1.1"), &anon()),
+            p.evaluate(ip("192.168.1.1"), &anon(), None),
             AccessOutcome::Allow
         ));
-        // Neither range -> deny.
         assert!(matches!(
-            p.evaluate(ip("8.8.8.8"), &anon()),
+            p.evaluate(ip("8.8.8.8"), &anon(), None),
             AccessOutcome::Deny(403)
         ));
     }
@@ -270,19 +297,16 @@ mod tests {
             ]),
             deny_rule(vec![], 403),
         ]);
-        // Right IP, right group -> allow.
         assert!(matches!(
-            p.evaluate(ip("10.0.0.1"), &authed("alice", &["admin"])),
+            p.evaluate(ip("10.0.0.1"), &authed("alice", &["admin"]), None),
             AccessOutcome::Allow
         ));
-        // Right IP, wrong group -> deny.
         assert!(matches!(
-            p.evaluate(ip("10.0.0.1"), &authed("alice", &["users"])),
+            p.evaluate(ip("10.0.0.1"), &authed("alice", &["users"]), None),
             AccessOutcome::Deny(403)
         ));
-        // Wrong IP, right group -> deny.
         assert!(matches!(
-            p.evaluate(ip("1.2.3.4"), &authed("alice", &["admin"])),
+            p.evaluate(ip("1.2.3.4"), &authed("alice", &["admin"]), None),
             AccessOutcome::Deny(403)
         ));
     }
@@ -293,7 +317,7 @@ mod tests {
     fn deny_custom_code() {
         let p = policy(vec![deny_rule(vec![], 429)]);
         assert!(matches!(
-            p.evaluate(ip("1.2.3.4"), &anon()),
+            p.evaluate(ip("1.2.3.4"), &anon(), None),
             AccessOutcome::Deny(429)
         ));
     }
@@ -307,19 +331,22 @@ mod tests {
             "/blocked/",
             302,
         )]);
-        match p.evaluate(ip("1.2.3.4"), &anon()) {
+        match p.evaluate(ip("1.2.3.4"), &anon(), None) {
             AccessOutcome::Redirect(to, code) => {
                 assert_eq!(to, "/blocked/");
                 assert_eq!(code, 302);
             }
-            other => panic!("expected Redirect, got {:?}", std::mem::discriminant(&other)),
+            other => panic!(
+                "expected Redirect, got {:?}",
+                std::mem::discriminant(&other)
+            ),
         }
     }
 
     #[test]
     fn redirect_custom_code() {
         let p = policy(vec![redirect_rule(vec![], "/x/", 301)]);
-        match p.evaluate(ip("1.2.3.4"), &anon()) {
+        match p.evaluate(ip("1.2.3.4"), &anon(), None) {
             AccessOutcome::Redirect(_, code) => assert_eq!(code, 301),
             _ => panic!("expected Redirect"),
         }
@@ -340,7 +367,7 @@ mod tests {
             ]);
             assert!(
                 matches!(
-                    p.evaluate(ip("1.2.3.4"), &anon()),
+                    p.evaluate(ip("1.2.3.4"), &anon(), None),
                     AccessOutcome::Deny(403)
                 ),
                 "anonymous should not match identity condition"
@@ -355,11 +382,11 @@ mod tests {
             deny_rule(vec![], 403),
         ]);
         assert!(matches!(
-            p.evaluate(ip("1.2.3.4"), &authed("alice", &[])),
+            p.evaluate(ip("1.2.3.4"), &authed("alice", &[]), None),
             AccessOutcome::Allow
         ));
         assert!(matches!(
-            p.evaluate(ip("1.2.3.4"), &anon()),
+            p.evaluate(ip("1.2.3.4"), &anon(), None),
             AccessOutcome::Deny(403)
         ));
     }
@@ -371,11 +398,11 @@ mod tests {
             deny_rule(vec![], 403),
         ]);
         assert!(matches!(
-            p.evaluate(ip("1.2.3.4"), &authed("alice", &[])),
+            p.evaluate(ip("1.2.3.4"), &authed("alice", &[]), None),
             AccessOutcome::Allow
         ));
         assert!(matches!(
-            p.evaluate(ip("1.2.3.4"), &authed("bob", &[])),
+            p.evaluate(ip("1.2.3.4"), &authed("bob", &[]), None),
             AccessOutcome::Deny(403)
         ));
     }
@@ -387,11 +414,11 @@ mod tests {
             deny_rule(vec![], 403),
         ]);
         assert!(matches!(
-            p.evaluate(ip("1.2.3.4"), &authed("alice", &["admin"])),
+            p.evaluate(ip("1.2.3.4"), &authed("alice", &["admin"]), None),
             AccessOutcome::Allow
         ));
         assert!(matches!(
-            p.evaluate(ip("1.2.3.4"), &authed("bob", &["users"])),
+            p.evaluate(ip("1.2.3.4"), &authed("bob", &["users"]), None),
             AccessOutcome::Deny(403)
         ));
     }
@@ -404,11 +431,10 @@ mod tests {
             allow_rule(vec![AccessCondition::Ip(net("10.0.0.0/8"))]),
             deny_rule(vec![], 403),
         ]);
-        // ::ffff:10.0.0.1 should normalise to 10.0.0.1 and match.
         let mapped: IpAddr =
             "::ffff:10.0.0.1".parse::<std::net::Ipv6Addr>().unwrap().into();
         assert!(matches!(
-            p.evaluate(mapped, &anon()),
+            p.evaluate(mapped, &anon(), None),
             AccessOutcome::Allow
         ));
     }
@@ -417,13 +443,12 @@ mod tests {
 
     #[test]
     fn first_matching_rule_wins() {
-        // First rule allows, second would deny. First match should win.
         let p = policy(vec![
             allow_rule(vec![AccessCondition::Ip(net("10.0.0.0/8"))]),
             deny_rule(vec![AccessCondition::Ip(net("10.0.0.0/8"))], 403),
         ]);
         assert!(matches!(
-            p.evaluate(ip("10.0.0.1"), &anon()),
+            p.evaluate(ip("10.0.0.1"), &anon(), None),
             AccessOutcome::Allow
         ));
     }
@@ -434,11 +459,11 @@ mod tests {
     fn no_condition_rule_always_matches() {
         let p = policy(vec![allow_rule(vec![])]);
         assert!(matches!(
-            p.evaluate(ip("1.2.3.4"), &anon()),
+            p.evaluate(ip("1.2.3.4"), &anon(), None),
             AccessOutcome::Allow
         ));
         assert!(matches!(
-            p.evaluate(ip("8.8.8.8"), &authed("bob", &[])),
+            p.evaluate(ip("8.8.8.8"), &authed("bob", &[]), None),
             AccessOutcome::Allow
         ));
     }
@@ -455,15 +480,15 @@ mod tests {
             deny_rule(vec![], 403),
         ]);
         assert!(matches!(
-            p.evaluate(ip("1.2.3.4"), &authed("alice", &[])),
+            p.evaluate(ip("1.2.3.4"), &authed("alice", &[]), None),
             AccessOutcome::Allow
         ));
         assert!(matches!(
-            p.evaluate(ip("1.2.3.4"), &authed("bob", &[])),
+            p.evaluate(ip("1.2.3.4"), &authed("bob", &[]), None),
             AccessOutcome::Allow
         ));
         assert!(matches!(
-            p.evaluate(ip("1.2.3.4"), &authed("charlie", &[])),
+            p.evaluate(ip("1.2.3.4"), &authed("charlie", &[]), None),
             AccessOutcome::Deny(403)
         ));
     }
@@ -478,15 +503,142 @@ mod tests {
             deny_rule(vec![], 403),
         ]);
         assert!(matches!(
-            p.evaluate(ip("1.2.3.4"), &authed("alice", &["admin"])),
+            p.evaluate(ip("1.2.3.4"), &authed("alice", &["admin"]), None),
             AccessOutcome::Allow
         ));
         assert!(matches!(
-            p.evaluate(ip("1.2.3.4"), &authed("bob", &["ops"])),
+            p.evaluate(ip("1.2.3.4"), &authed("bob", &["ops"]), None),
             AccessOutcome::Allow
         ));
         assert!(matches!(
-            p.evaluate(ip("1.2.3.4"), &authed("charlie", &["users"])),
+            p.evaluate(ip("1.2.3.4"), &authed("charlie", &["users"]), None),
+            AccessOutcome::Deny(403)
+        ));
+    }
+
+    // -- needs_geoip flag ------------------------------------------
+
+    #[test]
+    fn needs_geoip_true_when_country_condition_present() {
+        let p = policy(vec![allow_rule(vec![
+            AccessCondition::Country("US".into()),
+        ])]);
+        assert!(p.needs_geoip);
+    }
+
+    #[test]
+    fn needs_geoip_false_when_no_country_condition() {
+        let p = policy(vec![allow_rule(vec![
+            AccessCondition::Ip(net("10.0.0.0/8")),
+        ])]);
+        assert!(!p.needs_geoip);
+    }
+
+    // -- Country conditions ----------------------------------------
+
+    #[test]
+    fn country_allow_matching_code() {
+        let p = policy(vec![
+            allow_rule(vec![AccessCondition::Country("US".into())]),
+            deny_rule(vec![], 403),
+        ]);
+        assert!(matches!(
+            p.evaluate(ip("1.2.3.4"), &anon(), Some("US")),
+            AccessOutcome::Allow
+        ));
+    }
+
+    #[test]
+    fn country_allow_no_match_falls_through_to_deny() {
+        let p = policy(vec![
+            allow_rule(vec![AccessCondition::Country("US".into())]),
+            deny_rule(vec![], 403),
+        ]);
+        assert!(matches!(
+            p.evaluate(ip("1.2.3.4"), &anon(), Some("DE")),
+            AccessOutcome::Deny(403)
+        ));
+    }
+
+    #[test]
+    fn country_deny_blocks_matching_code() {
+        let p = policy(vec![
+            deny_rule(vec![AccessCondition::Country("CN".into())], 403),
+            allow_rule(vec![]),
+        ]);
+        assert!(matches!(
+            p.evaluate(ip("1.2.3.4"), &anon(), Some("CN")),
+            AccessOutcome::Deny(403)
+        ));
+        assert!(matches!(
+            p.evaluate(ip("1.2.3.4"), &anon(), Some("US")),
+            AccessOutcome::Allow
+        ));
+    }
+
+    #[test]
+    fn country_or_semantics_multiple_codes() {
+        let p = policy(vec![
+            allow_rule(vec![
+                AccessCondition::Country("US".into()),
+                AccessCondition::Country("CA".into()),
+                AccessCondition::Country("GB".into()),
+            ]),
+            deny_rule(vec![], 403),
+        ]);
+        assert!(matches!(
+            p.evaluate(ip("1.2.3.4"), &anon(), Some("US")),
+            AccessOutcome::Allow
+        ));
+        assert!(matches!(
+            p.evaluate(ip("1.2.3.4"), &anon(), Some("CA")),
+            AccessOutcome::Allow
+        ));
+        assert!(matches!(
+            p.evaluate(ip("1.2.3.4"), &anon(), Some("GB")),
+            AccessOutcome::Allow
+        ));
+        assert!(matches!(
+            p.evaluate(ip("1.2.3.4"), &anon(), Some("DE")),
+            AccessOutcome::Deny(403)
+        ));
+    }
+
+    #[test]
+    fn country_none_never_satisfies_country_condition() {
+        // IP not in database: country = None should not match any Country cond.
+        let p = policy(vec![
+            allow_rule(vec![AccessCondition::Country("US".into())]),
+            deny_rule(vec![], 403),
+        ]);
+        assert!(matches!(
+            p.evaluate(ip("127.0.0.1"), &anon(), None),
+            AccessOutcome::Deny(403)
+        ));
+    }
+
+    #[test]
+    fn country_and_ip_both_required() {
+        let p = policy(vec![
+            allow_rule(vec![
+                AccessCondition::Ip(net("10.0.0.0/8")),
+                AccessCondition::Country("US".into()),
+            ]),
+            deny_rule(vec![], 403),
+        ]);
+        // Right IP, right country -> allow.
+        assert!(matches!(
+            p.evaluate(ip("10.0.0.1"), &anon(), Some("US")),
+            AccessOutcome::Allow
+        ));
+        // Right IP, wrong country -> deny.
+        assert!(matches!(
+            p.evaluate(ip("10.0.0.1"), &anon(), Some("DE")),
+            AccessOutcome::Deny(403)
+        ));
+        // Wrong IP, right country -> deny.
+        assert!(matches!(
+            p.evaluate(ip("1.2.3.4"), &anon(), Some("US")),
             AccessOutcome::Deny(403)
         ));
     }

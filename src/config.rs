@@ -35,6 +35,16 @@ pub struct ServerConfig {
     pub group: Option<String>,
     // Authentication back-end; None means anonymous-only.
     pub auth: Option<AuthBackend>,
+    // GeoIP database configuration; None means no geo conditions can be used.
+    pub geoip: Option<GeoIpConfig>,
+}
+
+/// Path to a MaxMind MMDB database used for country lookups.
+#[derive(Debug, Clone)]
+pub struct GeoIpConfig {
+    /// Filesystem path to the MMDB file
+    /// (e.g. `/etc/aloha/GeoLite2-Country.mmdb`).
+    pub db: String,
 }
 
 /// Authentication back-end activated at the server level.
@@ -442,6 +452,21 @@ impl Config {
                 }
             }
         }
+        // If any access policy uses country conditions, a geoip db
+        // must be configured.
+        let uses_country = self.vhosts.iter().any(|v| {
+            v.locations.iter().any(|loc| {
+                loc.access.as_ref()
+                    .map(|p| p.needs_geoip)
+                    .unwrap_or(false)
+            })
+        });
+        if uses_country && self.server.geoip.is_none() {
+            bail!(
+                "access 'country' conditions require \
+                 server {{ geoip {{ db \"...\" }} }}"
+            );
+        }
         Ok(())
     }
 
@@ -483,13 +508,34 @@ fn parse_server(node: &KdlNode, src: &str, name: &str) -> anyhow::Result<ServerC
         })
         .map(|n| parse_auth_backend(n, src, name))
         .transpose()?;
+    let geoip = node
+        .children()
+        .and_then(|doc| {
+            doc.nodes().iter().find(|n| n.name().value() == "geoip")
+        })
+        .map(|n| parse_geoip(n, src, name))
+        .transpose()?;
     Ok(ServerConfig {
         state_dir: child_str(node, "state-dir"),
         tls_defaults,
         user:  child_str(node, "user"),
         group: child_str(node, "group"),
         auth,
+        geoip,
     })
+}
+
+fn parse_geoip(
+    node: &KdlNode,
+    src: &str,
+    name: &str,
+) -> anyhow::Result<GeoIpConfig> {
+    let line = node_line(src, node);
+    let db = req_child_str(node, "db")
+        .with_context(|| {
+            format!("{name}:{line}: geoip block requires a 'db' child")
+        })?;
+    Ok(GeoIpConfig { db })
 }
 
 // Parse an `auth "pam" { ... }` or `auth "ldap" { ... }` node inside
@@ -949,13 +995,43 @@ fn parse_access_policy(
                     })?;
                     conditions.push(AccessCondition::Group(g));
                 }
+                "country" => {
+                    // Each argument is one ISO country code; all are added
+                    // as separate Country conditions (OR-within-type).
+                    let entries: Vec<_> = cond
+                        .entries()
+                        .iter()
+                        .filter(|e| e.name().is_none())
+                        .collect();
+                    if entries.is_empty() {
+                        bail!(
+                            "{name}:{cond_line}: 'country' requires \
+                             at least one country code argument"
+                        );
+                    }
+                    for entry in entries {
+                        let code = entry
+                            .value()
+                            .as_string()
+                            .ok_or_else(|| {
+                                anyhow!(
+                                    "{name}:{cond_line}: country code \
+                                     must be a string"
+                                )
+                            })?
+                            .to_uppercase();
+                        conditions.push(
+                            AccessCondition::Country(code),
+                        );
+                    }
+                }
                 "authenticated" => {
                     conditions.push(AccessCondition::Authenticated);
                 }
                 other => bail!(
                     "{name}:{cond_line}: unknown access condition \
-                     '{other}'; expected 'ip', 'user', 'group', \
-                     or 'authenticated'"
+                     '{other}'; expected 'ip', 'country', 'user', \
+                     'group', or 'authenticated'"
                 ),
             }
         }
@@ -963,7 +1039,7 @@ fn parse_access_policy(
         rules.push(AccessRule { conditions, action });
     }
 
-    Ok(AccessPolicy { rules })
+    Ok(AccessPolicy::new(rules))
 }
 
 fn parse_handler(
