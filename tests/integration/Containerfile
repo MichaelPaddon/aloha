@@ -1,0 +1,15 @@
+FROM debian:trixie-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl \
+        python3 \
+        libpam0g \
+        libpam-runtime \
+        passwd \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY target/release/aloha /usr/bin/aloha
+COPY tests/integration/run.sh /opt/tests/run.sh
+RUN chmod +x /opt/tests/run.sh /usr/bin/aloha
+
+CMD ["/opt/tests/run.sh"]
