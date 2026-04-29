@@ -74,7 +74,7 @@ assert_body() {
 # Optional third arg "https" polls with TLS (--insecure).
 start_server() {
     local config="$1" port="$2" proto="${3:-http}"
-    "$ALOHA" "$config" >"$TMPDIR/aloha.out" 2>&1 &
+    "$ALOHA" --config "$config" >"$TMPDIR/aloha.out" 2>&1 &
     ALOHA_PID=$!
     local tries=0 code
     while true; do
@@ -463,7 +463,7 @@ listener {
 }
 EOF
     # TCP proxy has no HTTP layer to poll; give it time to bind.
-    "$ALOHA" "$TMPDIR/tcp.kdl" >"$TMPDIR/aloha.out" 2>&1 &
+    "$ALOHA" --config "$TMPDIR/tcp.kdl" >"$TMPDIR/aloha.out" 2>&1 &
     ALOHA_PID=$!
     sleep 0.5
     if ! kill -0 "$ALOHA_PID" 2>/dev/null; then
