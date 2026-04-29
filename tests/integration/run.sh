@@ -9,11 +9,13 @@ ALOHA=/usr/bin/aloha
 PASS=0
 FAIL=0
 ALOHA_PID=""
+SLAPD_PID=""
 BACKEND_PIDS=()
 TMPDIR=$(mktemp -d)
 
 cleanup() {
     stop_server
+    teardown_ldap
     for pid in "${BACKEND_PIDS[@]+"${BACKEND_PIDS[@]}"}"; do
         kill "$pid" 2>/dev/null || true
     done
@@ -482,6 +484,205 @@ EOF
     BACKEND_PIDS=("${BACKEND_PIDS[@]/$backend_pid}")
 }
 
+# --- LDAP helpers ---------------------------------------------------
+
+# Start a local OpenLDAP server with two test users and one group.
+# Returns 1 (and prints a SKIP message) if slapd is unavailable.
+setup_ldap() {
+    if ! command -v slapd >/dev/null 2>&1; then
+        echo "  SKIP: slapd not found"
+        return 1
+    fi
+
+    mkdir -p /tmp/ldap-db
+
+    # Old-style slapd.conf; still accepted by OpenLDAP 2.5+ via -f.
+    cat >/tmp/slapd.conf <<'SLAPD_CONF'
+include /etc/ldap/schema/core.schema
+include /etc/ldap/schema/cosine.schema
+include /etc/ldap/schema/inetorgperson.schema
+include /etc/ldap/schema/nis.schema
+# In Debian packages the MDB backend is a loadable module.
+modulepath /usr/lib/ldap
+moduleload back_mdb
+pidfile /tmp/slapd.pid
+database mdb
+maxsize 1073741824
+suffix "dc=test,dc=local"
+rootdn "cn=admin,dc=test,dc=local"
+rootpw secret
+directory /tmp/ldap-db
+SLAPD_CONF
+
+    # Generate SSHA password hashes at runtime.
+    local alice_pw bob_pw
+    alice_pw=$(slappasswd -s alicepass 2>/dev/null) || {
+        echo "  SKIP: slappasswd failed"
+        return 1
+    }
+    bob_pw=$(slappasswd -s bobpass 2>/dev/null)
+
+    # Seed the directory: two users, one group (alice is a member; bob is not).
+    cat >/tmp/ldap-init.ldif <<EOF
+dn: dc=test,dc=local
+objectClass: dcObject
+objectClass: organization
+dc: test
+o: Test
+
+dn: ou=people,dc=test,dc=local
+objectClass: organizationalUnit
+ou: people
+
+dn: ou=groups,dc=test,dc=local
+objectClass: organizationalUnit
+ou: groups
+
+dn: uid=alice,ou=people,dc=test,dc=local
+objectClass: inetOrgPerson
+uid: alice
+cn: Alice
+sn: Test
+userPassword: $alice_pw
+
+dn: uid=bob,ou=people,dc=test,dc=local
+objectClass: inetOrgPerson
+uid: bob
+cn: Bob
+sn: Test
+userPassword: $bob_pw
+
+dn: cn=testgroup,ou=groups,dc=test,dc=local
+objectClass: posixGroup
+cn: testgroup
+gidNumber: 2000
+memberUid: alice
+EOF
+
+    slapadd -f /tmp/slapd.conf -l /tmp/ldap-init.ldif \
+        >/tmp/slapadd.log 2>&1 || {
+        echo "  ERROR: slapadd failed:" >&2
+        cat /tmp/slapadd.log >&2
+        return 1
+    }
+
+    slapd -f /tmp/slapd.conf -h "ldap://127.0.0.1:3890/" \
+        >/tmp/slapd.log 2>&1 &
+    SLAPD_PID=$!
+
+    # Wait until slapd is accepting connections.
+    local tries=0
+    while ! ldapsearch -x -H "ldap://127.0.0.1:3890" \
+            -b "dc=test,dc=local" -s base "(objectClass=*)" \
+            >/dev/null 2>&1; do
+        if ! kill -0 "$SLAPD_PID" 2>/dev/null; then
+            echo "  ERROR: slapd exited during startup:" >&2
+            cat /tmp/slapd.log >&2
+            SLAPD_PID=""
+            return 1
+        fi
+        tries=$((tries + 1))
+        if [ $tries -ge 50 ]; then
+            echo "  ERROR: timeout waiting for slapd" >&2
+            cat /tmp/slapd.log >&2
+            return 1
+        fi
+        sleep 0.1
+    done
+}
+
+teardown_ldap() {
+    if [ -n "${SLAPD_PID:-}" ]; then
+        kill "$SLAPD_PID" 2>/dev/null || true
+        wait "$SLAPD_PID" 2>/dev/null || true
+        SLAPD_PID=""
+    fi
+    rm -rf /tmp/ldap-db /tmp/slapd.conf /tmp/ldap-init.ldif \
+        /tmp/slapd.pid /tmp/slapd.log /tmp/slapadd.log
+}
+
+suite_ldap_auth() {
+    echo "=== LDAP authentication ==="
+
+    setup_ldap || return
+
+    # Single aloha process with two listeners, each backed by a
+    # different vhost: one tests credential validation, the other
+    # tests group-based access control.
+    cat >"$TMPDIR/ldap.kdl" <<'EOF'
+server {
+    auth "ldap" {
+        url "ldap://127.0.0.1:3890"
+        bind-dn "uid={user},ou=people,dc=test,dc=local"
+        base-dn "ou=groups,dc=test,dc=local"
+    }
+}
+listener {
+    bind "127.0.0.1:8090"
+    default-vhost "ldap-auth"
+}
+listener {
+    bind "127.0.0.1:8091"
+    default-vhost "ldap-group"
+}
+vhost "ldap-auth" {
+    location "/" {
+        static { root "/tmp/www"; index-file "index.html"; }
+        auth { realm "LDAP Test"; }
+        access {
+            allow { authenticated; }
+            deny code=401
+        }
+    }
+}
+vhost "ldap-group" {
+    location "/" {
+        static { root "/tmp/www"; index-file "index.html"; }
+        auth { realm "LDAP Group Test"; }
+        access {
+            allow { group "testgroup"; }
+            deny code=403
+        }
+    }
+}
+EOF
+    start_server "$TMPDIR/ldap.kdl" 8090 \
+        || { fail "ldap/server_start" "aloha failed"; teardown_ldap; return; }
+
+    # -- Credential validation (port 8090) ---------------------------
+
+    # No credentials: must challenge with 401 + WWW-Authenticate.
+    assert_status "ldap/challenge_401"    401 "http://127.0.0.1:8090/"
+    assert_header "ldap/www_authenticate" "WWW-Authenticate" "LDAP Test" \
+        "http://127.0.0.1:8090/"
+
+    # Correct credentials: must pass LDAP bind and return 200.
+    assert_status "ldap/valid_creds"    200 "http://127.0.0.1:8090/" \
+        -u "alice:alicepass"
+
+    # Wrong password: LDAP bind fails → stays anonymous → 401.
+    assert_status "ldap/wrong_password" 401 "http://127.0.0.1:8090/" \
+        -u "alice:badpass"
+
+    # Empty password: aloha rejects before attempting any LDAP bind.
+    # (prevents accidental anonymous bind on LDAP servers that allow it)
+    assert_status "ldap/empty_password" 401 "http://127.0.0.1:8090/" \
+        -u "alice:"
+
+    # -- Group-based access control (port 8091) ----------------------
+
+    # alice is in testgroup → allow.
+    assert_status "ldap/group_allowed" 200 "http://127.0.0.1:8091/" \
+        -u "alice:alicepass"
+
+    # bob is not in testgroup → deny 403.
+    assert_status "ldap/group_denied"  403 "http://127.0.0.1:8091/" \
+        -u "bob:bobpass"
+
+    stop_server
+    teardown_ldap
+}
+
 # --- main -----------------------------------------------------------
 
 setup_webroot
@@ -496,6 +697,7 @@ suite_reverse_proxy
 suite_cgi
 suite_tls
 suite_tcp_proxy
+suite_ldap_auth
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

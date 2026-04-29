@@ -6,6 +6,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libpam0g \
         libpam-runtime \
         passwd \
+        slapd \
+        ldap-utils \
     && rm -rf /var/lib/apt/lists/*
 
 COPY target/release/aloha /usr/bin/aloha
