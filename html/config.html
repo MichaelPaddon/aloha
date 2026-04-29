@@ -387,7 +387,6 @@
         </ul>
         <li><a href="#location">location</a></li>
         <ul class="nav-list sub">
-          <li><a href="#access-control">access control</a></li>
           <li><a href="#auth-realm">auth realm</a></li>
           <li><a href="#header-injection">header injection</a></li>
           <li><a href="#handler-static">static</a></li>
@@ -398,6 +397,7 @@
           <li><a href="#handler-redirect">redirect</a></li>
           <li><a href="#handler-status">status</a></li>
         </ul>
+        <li><a href="#access-control">Access control</a></li>
       </ul>
     </div>
     <div class="nav-section">
@@ -635,6 +635,18 @@
                   Prepend a HAProxy PROXY protocol header so the upstream sees
                   the real client IP. <code>"v2"</code> is binary and preferred.</td>
             </tr>
+            <tr>
+              <td>access</td><td>block</td><td>--</td>
+              <td><span class="badge badge-opt">optional</span>
+                  IP/country firewall rules. Same syntax as
+                  <a href="#access-control">access control</a> for
+                  <code>location</code> blocks, but only <code>ip</code> and
+                  <code>country</code> conditions are supported (<code>user</code>,
+                  <code>group</code>, and <code>authenticated</code> require HTTP
+                  authentication and are rejected at parse time).
+                  Denied connections are closed silently; redirect rules are
+                  treated as deny.</td>
+            </tr>
           </tbody>
         </table>
       </div>
@@ -642,6 +654,17 @@
         A config consisting entirely of <code>tcp-proxy</code> listeners is
         valid with no <code>vhost</code> at all.
       </p>
+<pre><code><span class="cm">// Restrict a database port to an internal CIDR block</span>
+<span class="kw">listener</span> {
+    <span class="kw">bind</span> <span class="str">"[::]:5432"</span>
+    <span class="kw">tcp-proxy</span> {
+        <span class="kw">upstream</span> <span class="str">"db.internal:5432"</span>
+        <span class="kw">access</span> {
+            <span class="kw">allow</span> { <span class="kw">ip</span> <span class="str">"10.0.0.0/8"</span> }
+            <span class="kw">deny</span>  <span class="prop">code=</span><span class="num">403</span>
+        }
+    }
+}</code></pre>
 
       <h3 id="timeouts"><code>timeouts</code> child node</h3>
       <p>
@@ -1110,112 +1133,6 @@
             See <a href="#header-injection">Header injection</a>.</li>
       </ul>
 
-      <!-- access control -->
-      <h3 id="access-control">Access control</h3>
-      <p>
-        An <code>access</code> block inside a <code>location</code> enforces
-        per-request allow/deny rules using client IP and authenticated identity.
-        Rules are evaluated top to bottom; the first matching rule wins. If no
-        rule matches, the request is denied with 403.
-      </p>
-<pre><code><span class="kw">location</span> <span class="str">"/admin/"</span> {
-    <span class="kw">access</span> {
-        <span class="kw">allow</span> { <span class="kw">ip</span> <span class="str">"10.0.0.0/8"</span>; <span class="kw">group</span> <span class="str">"admin"</span> }
-        <span class="kw">deny</span>  <span class="prop">code=</span><span class="num">403</span>
-    }
-    <span class="kw">static</span> { <span class="kw">root</span> <span class="str">"/var/www/admin"</span> }
-}</code></pre>
-      <p>
-        Each rule is one of <code>allow</code>, <code>deny</code>, or
-        <code>redirect</code>. The child nodes inside a rule are the conditions
-        that must hold for the rule to fire.
-      </p>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>Rule node</th><th>Properties</th><th>Description</th></tr></thead>
-          <tbody>
-            <tr>
-              <td>allow</td><td>--</td>
-              <td>Grant access.</td>
-            </tr>
-            <tr>
-              <td>deny</td><td><code>code=N</code> (default 403)</td>
-              <td>Deny with the given HTTP status code. Use
-                  <code>code=401</code> together with an <code>auth</code>
-                  block to issue a Basic auth challenge.</td>
-            </tr>
-            <tr>
-              <td>redirect</td>
-              <td><code>to="..."</code>, <code>code=N</code> (default 302)</td>
-              <td>Redirect to the given URL. Useful for sending
-                  unauthenticated users to a login page.</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-      <p>
-        A rule with no conditions is a catch-all that always matches.
-      </p>
-      <p>
-        Conditions inside a rule are <strong>AND-ed</strong> across types: all
-        condition types present must match. Within the same type, conditions are
-        <strong>OR-ed</strong>: any one match suffices.
-      </p>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>Condition</th><th>Argument</th><th>Description</th></tr></thead>
-          <tbody>
-            <tr>
-              <td>ip</td><td>CIDR or IP</td>
-              <td>Client IP address or range. <code>10.0.0.0/8</code>,
-                  <code>192.168.1.1</code>, <code>::1</code> are all valid.
-                  IPv4-mapped IPv6 addresses are normalised automatically.
-                  Repeatable &mdash; multiple entries are OR-ed.</td>
-            </tr>
-            <tr>
-              <td>country</td><td>code …</td>
-              <td>ISO 3166-1 alpha-2 country code(s), e.g. <code>"US"</code>.
-                  Requires <code>server { geoip { db ... } }</code>. Multiple
-                  codes on one node are OR-ed. Private/reserved IPs have no
-                  country and never match.
-                  See <a href="#geoip">GeoIP</a>.</td>
-            </tr>
-            <tr>
-              <td>authenticated</td><td>--</td>
-              <td>Any authenticated (non-anonymous) user.</td>
-            </tr>
-            <tr>
-              <td>user</td><td>username</td>
-              <td>A specific authenticated username. Repeatable.</td>
-            </tr>
-            <tr>
-              <td>group</td><td>group name</td>
-              <td>The authenticated user is a member of this group. Repeatable.</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-      <p><strong>Examples:</strong></p>
-<pre><code><span class="cm">// Require authentication (401 challenge), allow only staff group</span>
-<span class="kw">auth</span> { <span class="kw">realm</span> <span class="str">"Staff Portal"</span> }
-<span class="kw">access</span> {
-    <span class="kw">allow</span> { <span class="kw">group</span> <span class="str">"staff"</span> }
-    <span class="kw">deny</span>  <span class="prop">code=</span><span class="num">401</span>
-}
-
-<span class="cm">// Allow internal IPs without auth, require auth for external</span>
-<span class="kw">access</span> {
-    <span class="kw">allow</span> { <span class="kw">ip</span> <span class="str">"10.0.0.0/8"</span> }
-    <span class="kw">allow</span> { <span class="kw">authenticated</span> }
-    <span class="kw">deny</span>  <span class="prop">code=</span><span class="num">401</span>
-}
-
-<span class="cm">// Redirect unauthenticated users to a login page</span>
-<span class="kw">access</span> {
-    <span class="kw">allow</span> { <span class="kw">authenticated</span> }
-    <span class="kw">redirect</span> <span class="prop">to=</span><span class="str">"/login/"</span> <span class="prop">code=</span><span class="num">302</span>
-}</code></pre>
-
       <!-- auth realm -->
       <h3 id="auth-realm"><code>auth</code> &mdash; Basic auth realm</h3>
       <p>
@@ -1672,6 +1589,138 @@
         updated every 5 seconds and converge to accurate values as the buffer
         fills.
       </p>
+    </section>
+
+    <!-- Access control -->
+    <section id="access-control">
+      <h2>Access control</h2>
+      <p>
+        An <code>access</code> block enforces firewall-style allow/deny rules
+        based on client IP and, for HTTP locations, authenticated identity.
+        Rules are evaluated top to bottom; the first matching rule wins. If no
+        rule matches, the request (or connection) is denied with 403.
+      </p>
+      <p>
+        Access blocks are supported in two places:
+      </p>
+      <ul>
+        <li>Inside a <code>location</code> block &mdash; all conditions are
+            available, including identity-based ones that require HTTP
+            authentication.</li>
+        <li>Inside a <code>tcp-proxy</code> block &mdash; only <code>ip</code>
+            and <code>country</code> conditions are supported. Identity
+            conditions (<code>user</code>, <code>group</code>,
+            <code>authenticated</code>) are rejected at parse time because TCP
+            proxies have no HTTP authentication layer. Denied connections are
+            closed silently; <code>redirect</code> rules are treated as deny.</li>
+      </ul>
+<pre><code><span class="kw">location</span> <span class="str">"/admin/"</span> {
+    <span class="kw">access</span> {
+        <span class="kw">allow</span> { <span class="kw">ip</span> <span class="str">"10.0.0.0/8"</span>; <span class="kw">group</span> <span class="str">"admin"</span> }
+        <span class="kw">deny</span>  <span class="prop">code=</span><span class="num">403</span>
+    }
+    <span class="kw">static</span> { <span class="kw">root</span> <span class="str">"/var/www/admin"</span> }
+}</code></pre>
+      <p>
+        Each rule is one of <code>allow</code>, <code>deny</code>, or
+        <code>redirect</code>. The child nodes inside a rule are the conditions
+        that must hold for the rule to fire.
+      </p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Rule node</th><th>Properties</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>allow</td><td>--</td>
+              <td>Grant access.</td>
+            </tr>
+            <tr>
+              <td>deny</td><td><code>code=N</code> (default 403)</td>
+              <td>Deny with the given HTTP status code. Use
+                  <code>code=401</code> together with an <code>auth</code>
+                  block to issue a Basic auth challenge.</td>
+            </tr>
+            <tr>
+              <td>redirect</td>
+              <td><code>to="..."</code>, <code>code=N</code> (default 302)</td>
+              <td>Redirect to the given URL. Useful for sending
+                  unauthenticated users to a login page.
+                  Not available in <code>tcp-proxy</code> blocks.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        A rule with no conditions is a catch-all that always matches.
+      </p>
+      <p>
+        Conditions inside a rule are <strong>AND-ed</strong> across types: all
+        condition types present must match. Within the same type, conditions are
+        <strong>OR-ed</strong>: any one match suffices.
+      </p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Condition</th><th>Argument</th><th>Supported in</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>ip</td><td>CIDR or IP</td><td>location, tcp-proxy</td>
+              <td>Client IP address or range. <code>10.0.0.0/8</code>,
+                  <code>192.168.1.1</code>, <code>::1</code> are all valid.
+                  IPv4-mapped IPv6 addresses are normalised automatically.
+                  Repeatable &mdash; multiple entries are OR-ed.</td>
+            </tr>
+            <tr>
+              <td>country</td><td>code …</td><td>location, tcp-proxy</td>
+              <td>ISO 3166-1 alpha-2 country code(s), e.g. <code>"US"</code>.
+                  Requires <code>server { geoip { db ... } }</code>. Multiple
+                  codes on one node are OR-ed. Private/reserved IPs have no
+                  country and never match.
+                  See <a href="#geoip">GeoIP</a>.</td>
+            </tr>
+            <tr>
+              <td>authenticated</td><td>--</td><td>location only</td>
+              <td>Any authenticated (non-anonymous) user.</td>
+            </tr>
+            <tr>
+              <td>user</td><td>username</td><td>location only</td>
+              <td>A specific authenticated username. Repeatable.</td>
+            </tr>
+            <tr>
+              <td>group</td><td>group name</td><td>location only</td>
+              <td>The authenticated user is a member of this group. Repeatable.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p><strong>Examples:</strong></p>
+<pre><code><span class="cm">// Require authentication (401 challenge), allow only staff group</span>
+<span class="kw">auth</span> { <span class="kw">realm</span> <span class="str">"Staff Portal"</span> }
+<span class="kw">access</span> {
+    <span class="kw">allow</span> { <span class="kw">group</span> <span class="str">"staff"</span> }
+    <span class="kw">deny</span>  <span class="prop">code=</span><span class="num">401</span>
+}
+
+<span class="cm">// Allow internal IPs without auth, require auth for external</span>
+<span class="kw">access</span> {
+    <span class="kw">allow</span> { <span class="kw">ip</span> <span class="str">"10.0.0.0/8"</span> }
+    <span class="kw">allow</span> { <span class="kw">authenticated</span> }
+    <span class="kw">deny</span>  <span class="prop">code=</span><span class="num">401</span>
+}
+
+<span class="cm">// Redirect unauthenticated users to a login page</span>
+<span class="kw">access</span> {
+    <span class="kw">allow</span> { <span class="kw">authenticated</span> }
+    <span class="kw">redirect</span> <span class="prop">to=</span><span class="str">"/login/"</span> <span class="prop">code=</span><span class="num">302</span>
+}
+
+<span class="cm">// Restrict a TCP proxy to a specific country (requires GeoIP)</span>
+<span class="kw">tcp-proxy</span> {
+    <span class="kw">upstream</span> <span class="str">"db.internal:5432"</span>
+    <span class="kw">access</span> {
+        <span class="kw">allow</span> { <span class="kw">country</span> <span class="str">"US"</span> <span class="str">"CA"</span> }
+        <span class="kw">deny</span>  <span class="prop">code=</span><span class="num">403</span>
+    }
+}</code></pre>
     </section>
 
     <hr class="divider">

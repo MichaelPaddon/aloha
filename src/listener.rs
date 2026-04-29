@@ -4,7 +4,7 @@
 // accepted connection gets a cheap clone of AlohaService (Arc refs only)
 // and is driven to completion before the graceful-shutdown drain finishes.
 
-use crate::access::AccessOutcome;
+use crate::access::{AccessOutcome, AccessPolicy};
 use crate::acme::ChallengeMap;
 use crate::auth::{Authenticator, Principal};
 use crate::geoip;
@@ -536,6 +536,8 @@ pub async fn run_tcp_proxy(
     listener: TcpListener,
     acceptor: Option<Arc<ArcSwap<TlsAcceptor>>>,
     mut shutdown: watch::Receiver<bool>,
+    access: Option<Arc<AccessPolicy>>,
+    geoip: Option<Arc<geoip::CountryReader>>,
 ) -> anyhow::Result<()> {
     let name = cfg.local_name();
     let local_addr = listener.local_addr().ok();
@@ -559,6 +561,8 @@ pub async fn run_tcp_proxy(
                         let upstream = proxy.upstream.clone();
                         let proto = proxy.proxy_protocol;
                         let conn_shutdown = shutdown.clone();
+                        let conn_access = access.clone();
+                        let conn_geoip = geoip.clone();
                         // load_full() cheaply bumps the Arc refcount,
                         // picking up any hot-swapped cert since last accept.
                         let acc = acceptor
@@ -570,6 +574,7 @@ pub async fn run_tcp_proxy(
                                     Ok(tls) => tcp_proxy_connection(
                                         tls, peer_addr, local_addr,
                                         &upstream, proto, conn_shutdown,
+                                        conn_access, conn_geoip,
                                     ).await,
                                     Err(e) => {
                                         debug!(%peer_addr,
@@ -581,6 +586,7 @@ pub async fn run_tcp_proxy(
                                 tcp_proxy_connection(
                                     stream, peer_addr, local_addr,
                                     &upstream, proto, conn_shutdown,
+                                    conn_access, conn_geoip,
                                 ).await
                             };
                             if let Err(e) = result {
@@ -612,12 +618,35 @@ async fn tcp_proxy_connection<C>(
     upstream: &str,
     proxy_protocol: Option<crate::config::ProxyProtocolVersion>,
     mut shutdown: watch::Receiver<bool>,
+    access: Option<Arc<AccessPolicy>>,
+    geoip: Option<Arc<geoip::CountryReader>>,
 ) -> anyhow::Result<()>
 where
     C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send,
 {
     if *shutdown.borrow() {
         return Ok(());
+    }
+
+    if let Some(policy) = &access {
+        let country = if policy.needs_geoip {
+            geoip.as_ref()
+                .and_then(|r| geoip::lookup_country(r, peer_addr.ip()))
+        } else {
+            None
+        };
+        match policy.evaluate(
+            peer_addr.ip(),
+            &Principal::Anonymous,
+            country.as_deref(),
+        ) {
+            AccessOutcome::Allow => {}
+            // Redirect is meaningless over raw TCP; treat as deny.
+            _ => {
+                debug!(%peer_addr, "tcp proxy: access denied");
+                return Ok(());
+            }
+        }
     }
 
     let mut backend = tokio::net::TcpStream::connect(upstream).await?;

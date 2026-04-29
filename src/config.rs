@@ -119,6 +119,10 @@ pub struct TcpProxyConfig {
     /// Prepend a PROXY protocol header so the backend sees the real
     /// client IP even though it only sees aloha's connection.
     pub proxy_protocol: Option<ProxyProtocolVersion>,
+    /// Optional IP/country-based access control.  User, group, and
+    /// `authenticated` conditions are rejected at parse time because TCP
+    /// proxies have no HTTP authentication layer.
+    pub access: Option<AccessPolicy>,
 }
 
 #[derive(Debug, Clone)]
@@ -664,7 +668,12 @@ fn parse_tcp_proxy(
             ),
         })
         .transpose()?;
-    Ok(TcpProxyConfig { upstream, proxy_protocol })
+    let access = node
+        .children()
+        .and_then(|d| d.nodes().iter().find(|n| n.name().value() == "access"))
+        .map(|n| parse_access_policy(n, src, name, true))
+        .transpose()?;
+    Ok(TcpProxyConfig { upstream, proxy_protocol, access })
 }
 
 fn parse_timeouts(node: &KdlNode) -> Timeouts {
@@ -815,7 +824,7 @@ fn parse_location(node: &KdlNode, src: &str, name: &str) -> anyhow::Result<Locat
     let access = children
         .iter()
         .find(|n| n.name().value() == "access")
-        .map(|n| parse_access_policy(n, src, name))
+        .map(|n| parse_access_policy(n, src, name, false))
         .transpose()?;
     let auth = children
         .iter()
@@ -908,10 +917,13 @@ fn parse_header_ops(
 //       redirect to="/login/" { user "unverified" }
 //       deny code=403      // catch-all: no children = always matches
 //   }
+// `tcp_only` rejects conditions that require HTTP authentication
+// (user, group, authenticated), since TCP proxies have no auth layer.
 fn parse_access_policy(
     node: &KdlNode,
     src: &str,
     name: &str,
+    tcp_only: bool,
 ) -> anyhow::Result<AccessPolicy> {
     use ipnet::IpNet;
     use std::net::IpAddr;
@@ -984,12 +996,26 @@ fn parse_access_policy(
                     conditions.push(AccessCondition::Ip(net));
                 }
                 "user" => {
+                    if tcp_only {
+                        bail!(
+                            "{name}:{cond_line}: 'user' conditions are not \
+                             supported in tcp-proxy access blocks \
+                             (no HTTP authentication available)"
+                        );
+                    }
                     let u = req_arg_str(cond, 0).with_context(|| {
                         format!("{name}:{cond_line}")
                     })?;
                     conditions.push(AccessCondition::User(u));
                 }
                 "group" => {
+                    if tcp_only {
+                        bail!(
+                            "{name}:{cond_line}: 'group' conditions are not \
+                             supported in tcp-proxy access blocks \
+                             (no HTTP authentication available)"
+                        );
+                    }
                     let g = req_arg_str(cond, 0).with_context(|| {
                         format!("{name}:{cond_line}")
                     })?;
@@ -1026,6 +1052,13 @@ fn parse_access_policy(
                     }
                 }
                 "authenticated" => {
+                    if tcp_only {
+                        bail!(
+                            "{name}:{cond_line}: 'authenticated' conditions \
+                             are not supported in tcp-proxy access blocks \
+                             (no HTTP authentication available)"
+                        );
+                    }
                     conditions.push(AccessCondition::Authenticated);
                 }
                 other => bail!(
@@ -1707,6 +1740,144 @@ mod tests {
         .unwrap();
         // tcp-proxy listeners bypass HTTP; default_vhost should be None.
         assert!(cfg.listeners[0].default_vhost.is_none());
+    }
+
+    #[test]
+    fn tcp_proxy_access_ip_parses() {
+        let cfg = Config::parse(
+            r#"
+            listener {
+                bind "[::]:5432"
+                tcp-proxy {
+                    upstream "db.internal:5432"
+                    access {
+                        allow {
+                            ip "10.0.0.0/8"
+                        }
+                        deny code=403
+                    }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        let proxy = cfg.listeners[0].tcp_proxy.as_ref().unwrap();
+        let policy = proxy.access.as_ref().unwrap();
+        assert_eq!(policy.rules.len(), 2);
+        assert!(!policy.needs_geoip);
+    }
+
+    #[test]
+    fn tcp_proxy_access_country_parses() {
+        let cfg = Config::parse(
+            r#"
+            listener {
+                bind "[::]:5432"
+                tcp-proxy {
+                    upstream "db.internal:5432"
+                    access {
+                        allow {
+                            country "US" "CA"
+                        }
+                        deny code=403
+                    }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        let proxy = cfg.listeners[0].tcp_proxy.as_ref().unwrap();
+        let policy = proxy.access.as_ref().unwrap();
+        assert!(policy.needs_geoip);
+    }
+
+    #[test]
+    fn tcp_proxy_access_absent_means_none() {
+        let cfg = Config::parse(
+            r#"
+            listener {
+                bind "[::]:5432"
+                tcp-proxy {
+                    upstream "db.internal:5432"
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        let proxy = cfg.listeners[0].tcp_proxy.as_ref().unwrap();
+        assert!(proxy.access.is_none());
+    }
+
+    #[test]
+    fn tcp_proxy_access_rejects_user_condition() {
+        let err = Config::parse(
+            r#"
+            listener {
+                bind "[::]:5432"
+                tcp-proxy {
+                    upstream "db.internal:5432"
+                    access {
+                        allow {
+                            user "alice"
+                        }
+                    }
+                }
+            }
+            "#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("not supported in tcp-proxy"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn tcp_proxy_access_rejects_group_condition() {
+        let err = Config::parse(
+            r#"
+            listener {
+                bind "[::]:5432"
+                tcp-proxy {
+                    upstream "db.internal:5432"
+                    access {
+                        allow {
+                            group "admins"
+                        }
+                    }
+                }
+            }
+            "#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("not supported in tcp-proxy"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn tcp_proxy_access_rejects_authenticated_condition() {
+        let err = Config::parse(
+            r#"
+            listener {
+                bind "[::]:5432"
+                tcp-proxy {
+                    upstream "db.internal:5432"
+                    access {
+                        allow {
+                            authenticated
+                        }
+                    }
+                }
+            }
+            "#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("not supported in tcp-proxy"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

@@ -145,6 +145,7 @@ listener {
 |------------------|------------------|---------|-------------|
 | `upstream`       | `"host:port"`    | --      | **Required.** Address to forward connections to. |
 | `proxy-protocol` | `"v1"` \| `"v2"` | --      | Send a HAProxy PROXY protocol header to the upstream so it can see the real client IP. `"v1"` is text; `"v2"` is binary and preferred. |
+| `access`         | block            | --      | IP/country firewall rules. Same syntax as [Access control](#access-control) for `location` blocks, but only `ip` and `country` conditions are supported. Identity conditions (`user`, `group`, `authenticated`) require HTTP authentication and are rejected at parse time. Denied connections are closed silently; `redirect` rules are treated as deny. |
 
 A config consisting entirely of `tcp-proxy` listeners is valid with no
 `vhost` at all.
@@ -283,7 +284,8 @@ The GeoLite2 databases are available free from
 after creating an account. The file must be readable by the aloha process
 at startup (after privilege drop, if `server user=` is set).
 
-Once configured, use the `country` condition inside an `access` block:
+Once configured, use the `country` condition inside an `access` block in a
+`location` or `tcp-proxy`:
 
 ```kdl
 // Allow only requests from US, Canada, and UK.
@@ -468,10 +470,20 @@ In addition to a handler, a location can carry:
 
 ## Access control
 
-An `access` block inside a `location` enforces per-request allow/deny rules
-using a combination of client IP and authenticated identity. Rules are
-evaluated top to bottom; the first matching rule wins. If no rule matches,
-the request is denied with 403.
+An `access` block enforces firewall-style allow/deny rules based on client IP
+and, for HTTP locations, authenticated identity. Rules are evaluated top to
+bottom; the first matching rule wins. If no rule matches, the request (or
+connection) is denied with 403.
+
+Access blocks are supported in two places:
+
+- Inside a **`location`** block -- all conditions are available, including
+  identity-based ones that require HTTP authentication.
+- Inside a **`tcp-proxy`** block -- only `ip` and `country` conditions are
+  supported. Identity conditions (`user`, `group`, `authenticated`) are
+  rejected at parse time because TCP proxies have no HTTP authentication
+  layer. Denied connections are closed silently; `redirect` rules are treated
+  as deny.
 
 ```kdl
 location "/admin/" {
@@ -492,7 +504,7 @@ rule are the conditions that must hold for the rule to fire.
 |------------|-----------------------|-------------|
 | `allow`    | --                    | Grant access. |
 | `deny`     | `code=N` (default 403)| Deny with the given HTTP status code. Use `code=401` together with an `auth` block to issue a Basic auth challenge. |
-| `redirect` | `to="..."`, `code=N` (default 302) | Redirect to the given URL. Useful for sending unauthenticated users to a login page. |
+| `redirect` | `to="..."`, `code=N` (default 302) | Redirect to the given URL. Useful for sending unauthenticated users to a login page. Not available in `tcp-proxy` blocks. |
 
 A rule with no conditions is a catch-all that always matches.
 
@@ -501,13 +513,13 @@ A rule with no conditions is a catch-all that always matches.
 Conditions inside a rule are **AND**-ed across types: all types present must
 match. Within the same type, conditions are **OR**-ed: any one match suffices.
 
-| Condition       | Argument     | Description |
-|-----------------|--------------|-------------|
-| `ip`            | CIDR or IP   | Client IP address or range. `10.0.0.0/8`, `192.168.1.1`, `::1` are all valid. IPv4-mapped IPv6 addresses are normalised automatically. Repeatable -- multiple `ip` entries are OR-ed. |
-| `country`       | code …       | ISO 3166-1 alpha-2 country code(s), e.g. `"US"`. Requires `server { geoip { db ... } }`. Repeatable. Private/reserved IPs have no country and never match. See [GeoIP](#geoip). |
-| `authenticated` | --           | Any authenticated (non-anonymous) user. |
-| `user`          | username     | A specific authenticated username. Repeatable. |
-| `group`         | group name   | The authenticated user is a member of this group. Repeatable. |
+| Condition       | Argument     | Supported in            | Description |
+|-----------------|--------------|-------------------------|-------------|
+| `ip`            | CIDR or IP   | location, tcp-proxy     | Client IP address or range. `10.0.0.0/8`, `192.168.1.1`, `::1` are all valid. IPv4-mapped IPv6 addresses are normalised automatically. Repeatable -- multiple `ip` entries are OR-ed. |
+| `country`       | code …       | location, tcp-proxy     | ISO 3166-1 alpha-2 country code(s), e.g. `"US"`. Requires `server { geoip { db ... } }`. Repeatable. Private/reserved IPs have no country and never match. See [GeoIP](#geoip). |
+| `authenticated` | --           | location only           | Any authenticated (non-anonymous) user. |
+| `user`          | username     | location only           | A specific authenticated username. Repeatable. |
+| `group`         | group name   | location only           | The authenticated user is a member of this group. Repeatable. |
 
 ### Examples
 
@@ -552,6 +564,17 @@ access {
     allow { ip "10.0.0.0/8" }
     allow { authenticated }
     deny  code=401
+}
+```
+
+Restrict a TCP proxy port to a specific country (requires GeoIP):
+```kdl
+tcp-proxy {
+    upstream "db.internal:5432"
+    access {
+        allow { country "US" "CA" }
+        deny  code=403
+    }
 }
 ```
 

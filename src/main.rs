@@ -143,6 +143,9 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!(db = %g.db, "geoip: database loaded");
     }
 
+    // Retain a clone for TCP proxy listeners, which don't share AppState.
+    let tcp_geoip = geoip.clone();
+
     let state = Arc::new(AppState {
         router,
         acme_challenges: challenges.clone(),
@@ -178,10 +181,14 @@ async fn main() -> anyhow::Result<()> {
     // Phase 2a: plain TCP proxy listeners (no TLS, no HTTP, no ACME dependency).
     for (cfg, socket) in tcp_proxy_plain_bound {
         let proxy = cfg.tcp_proxy.clone().unwrap();
+        let access = proxy.access.as_ref().map(|p| Arc::new(p.clone()));
+        let geo = tcp_geoip.clone();
         let rx = shutdown_rx.clone();
         handles.spawn(async move {
             if let Err(e) =
-                listener::run_tcp_proxy(cfg, proxy, socket, None, rx).await
+                listener::run_tcp_proxy(
+                    cfg, proxy, socket, None, rx, access, geo,
+                ).await
             {
                 tracing::error!("TCP proxy error: {e:#}");
             }
@@ -287,9 +294,11 @@ async fn main() -> anyhow::Result<()> {
         let rx = shutdown_rx.clone();
         if let Some(proxy) = cfg.tcp_proxy.clone() {
             // TLS-terminating TCP proxy: accept TLS, forward plaintext.
+            let access = proxy.access.as_ref().map(|p| Arc::new(p.clone()));
+            let geo = tcp_geoip.clone();
             handles.spawn(async move {
                 if let Err(e) = listener::run_tcp_proxy(
-                    cfg, proxy, socket, Some(acceptor), rx,
+                    cfg, proxy, socket, Some(acceptor), rx, access, geo,
                 )
                 .await
                 {
