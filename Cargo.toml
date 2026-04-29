@@ -54,18 +54,26 @@ opt-level = 3
 lto       = "thin"
 strip     = "symbols"
 
-# ── OCI image ────────────────────────────────────────────────────
-# Build with:  cargo run-script oci-build
-# Requires:    cargo install cargo-run-script
-
 [package.metadata.scripts]
-oci-build = '''
+
+# Build with:  cargo run-script smoke
+# Requires:    cargo install cargo-run-script
+smoke = '''
+set -e
+cargo build --release
+podman build -f tests/integration/Containerfile -t aloha-test .
+podman run aloha-test
+'''
+
+# Build with:  cargo run-script oci
+# Requires:    cargo install cargo-run-script
+oci = '''
 set -e
 VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
 podman build -f packaging/oci/Containerfile -t "aloha:$VERSION" -t aloha:latest .
 '''
 
-# ── Debian package ────────────────────────────────────────────────
+# -- Debian package ------------------------------------------------
 # Build with:  cargo deb
 # Output:      target/debian/aloha_<version>_<arch>.deb
 
@@ -134,7 +142,7 @@ mode   = "644"
 # they have local changes.
 conf-files = ["/etc/aloha.kdl"]
 
-# ── RPM package ───────────────────────────────────────────────────
+# -- RPM package ---------------------------------------------------
 # Build with:  cargo generate-rpm   (after cargo build --release)
 # Output:      target/generate-rpm/aloha-<version>-1.<arch>.rpm
 # Or simply:   make rpm
