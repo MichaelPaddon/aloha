@@ -3,11 +3,13 @@ FROM rust:1-slim-trixie AS builder
 
 # aws-lc-rs build requirements: cmake (build system), clang (C compiler),
 # perl (build scripts).  pkg-config is used by several cargo build scripts.
+# libpam0g-dev: needed to link against -lpam and -lpam_misc for PAM auth.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         cmake \
         clang \
         perl \
         pkg-config \
+        libpam0g-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
@@ -33,11 +35,12 @@ RUN cargo build --release
 # ── Runtime stage ─────────────────────────────────────────────────────────────
 FROM debian:trixie-slim
 
-# ca-certificates: required so hyper-rustls can verify TLS when aloha acts
-# as an ACME client making HTTPS requests to Let's Encrypt.
+# ca-certificates: required for ACME HTTPS requests to Let's Encrypt.
+# libpam0g: runtime shared library for PAM authentication.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         adduser \
         ca-certificates \
+        libpam0g \
     && rm -rf /var/lib/apt/lists/* \
     && addgroup --system aloha \
     && adduser --system --ingroup aloha \
