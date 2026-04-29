@@ -4,6 +4,7 @@
 
 pub mod cgi_util;
 pub mod fcgi;
+pub mod health;
 pub mod proxy;
 pub mod scgi;
 pub mod static_files;

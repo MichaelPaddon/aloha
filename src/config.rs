@@ -42,6 +42,24 @@ pub struct ServerConfig {
     pub auth: Option<AuthBackend>,
     // GeoIP database configuration; None means no geo conditions can be used.
     pub geoip: Option<GeoIpConfig>,
+    pub health: HealthConfig,
+}
+
+/// Built-in health endpoint configuration.
+///
+/// When enabled (the default), GET/HEAD requests to `/healthz`,
+/// `/livez`, and `/readyz` are intercepted before vhost routing and
+/// answered with a lightweight JSON response.  Disable only if you
+/// need those paths for application traffic.
+#[derive(Debug, Clone)]
+pub struct HealthConfig {
+    pub enabled: bool,
+}
+
+impl Default for HealthConfig {
+    fn default() -> Self {
+        HealthConfig { enabled: true }
+    }
 }
 
 /// Path to a MaxMind MMDB database used for country lookups.
@@ -524,6 +542,17 @@ fn parse_server(node: &KdlNode, src: &str, name: &str) -> anyhow::Result<ServerC
         })
         .map(|n| parse_geoip(n, src, name))
         .transpose()?;
+    let health = node
+        .children()
+        .and_then(|doc| {
+            doc.nodes()
+                .iter()
+                .find(|n| n.name().value() == "health")
+        })
+        .map(|n| HealthConfig {
+            enabled: child_bool(n, "enabled").unwrap_or(true),
+        })
+        .unwrap_or_default();
     Ok(ServerConfig {
         state_dir: child_str(node, "state-dir"),
         tls_defaults,
@@ -532,6 +561,7 @@ fn parse_server(node: &KdlNode, src: &str, name: &str) -> anyhow::Result<ServerC
         keep_groups: child_bool(node, "keep-groups").unwrap_or(false),
         auth,
         geoip,
+        health,
     })
 }
 
@@ -2876,6 +2906,72 @@ mod tests {
         .unwrap();
         assert!(cfg.server.user.is_none());
         assert!(cfg.server.group.is_none());
+    }
+
+    // -- health config ---------------------------------------------
+
+    #[test]
+    fn health_enabled_by_default() {
+        let cfg = Config::parse(
+            r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    static { root "."; }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        assert!(cfg.server.health.enabled);
+    }
+
+    #[test]
+    fn health_explicit_enabled_true() {
+        let cfg = Config::parse(
+            r#"
+            server {
+                health {
+                    enabled true
+                }
+            }
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    static { root "."; }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        assert!(cfg.server.health.enabled);
+    }
+
+    #[test]
+    fn health_explicit_enabled_false() {
+        let cfg = Config::parse(
+            r#"
+            server {
+                health {
+                    enabled false
+                }
+            }
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    static { root "."; }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        assert!(!cfg.server.health.enabled);
     }
 
     // -- auth backend ----------------------------------------------

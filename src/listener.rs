@@ -50,6 +50,8 @@ pub struct AppState {
     pub metrics: Arc<Metrics>,
     // Optional GeoIP reader; present when server.geoip is configured.
     pub geoip: Option<Arc<geoip::CountryReader>>,
+    // When true, /healthz /livez /readyz are intercepted before routing.
+    pub health_enabled: bool,
 }
 
 // One AlohaService is cloned per accepted connection.
@@ -135,6 +137,26 @@ impl hyper::service::Service<Request<Incoming>> for AlohaService {
                     );
                     log_access(&method, &path, resp.status().as_u16(),
                                ms, peer);
+                    return Ok(resp);
+                }
+            }
+
+            // Health endpoint interception: /healthz, /livez, /readyz.
+            // Answered before vhost routing so they work without a Host
+            // header and cannot be shadowed by user-defined locations.
+            if state.health_enabled {
+                if let Some(resp) =
+                    crate::handler::health::try_serve(&req)
+                {
+                    let ms = start.elapsed().as_millis();
+                    state.metrics.dec_active();
+                    state.metrics.record(
+                        resp.status().as_u16(), ms,
+                    );
+                    log_access(
+                        &method, &path,
+                        resp.status().as_u16(), ms, peer,
+                    );
                     return Ok(resp);
                 }
             }

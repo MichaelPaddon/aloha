@@ -153,6 +153,7 @@ async fn main() -> anyhow::Result<()> {
         authenticator,
         metrics: metrics.clone(),
         geoip,
+        health_enabled: config.server.health.enabled,
     });
 
     // Background task: advance the request-rate ring buffer every 5 s.
