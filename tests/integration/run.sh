@@ -210,7 +210,7 @@ vhost "allow-site" {
     location "/" {
         static { root "/tmp/www"; index-file "index.html"; }
         access {
-            allow { ip "127.0.0.1/32" }
+            allow { ip "127.0.0.1/32"; }
             deny
         }
     }
@@ -219,7 +219,7 @@ vhost "deny-site" {
     location "/" {
         static { root "/tmp/www"; index-file "index.html"; }
         access {
-            deny { ip "127.0.0.1/32" }
+            deny { ip "127.0.0.1/32"; }
             allow
         }
     }
@@ -260,7 +260,7 @@ vhost "localhost" {
         static { root "/tmp/www"; index-file "index.html"; }
         auth { realm "Test Realm"; }
         access {
-            allow { authenticated }
+            allow { authenticated; }
             deny code=401
         }
     }
