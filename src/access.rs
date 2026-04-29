@@ -642,4 +642,135 @@ mod tests {
             AccessOutcome::Deny(403)
         ));
     }
+
+    #[test]
+    fn ip_and_user_both_required() {
+        let p = policy(vec![
+            allow_rule(vec![
+                AccessCondition::Ip(net("10.0.0.0/8")),
+                AccessCondition::User("alice".into()),
+            ]),
+            deny_rule(vec![], 403),
+        ]);
+        // Right IP, right user -> allow.
+        assert!(matches!(
+            p.evaluate(ip("10.0.0.1"), &authed("alice", &[]), None),
+            AccessOutcome::Allow
+        ));
+        // Right IP, wrong user -> deny.
+        assert!(matches!(
+            p.evaluate(ip("10.0.0.1"), &authed("bob", &[]), None),
+            AccessOutcome::Deny(403)
+        ));
+        // Wrong IP, right user -> deny.
+        assert!(matches!(
+            p.evaluate(ip("1.2.3.4"), &authed("alice", &[]), None),
+            AccessOutcome::Deny(403)
+        ));
+        // Anonymous regardless of IP -> deny.
+        assert!(matches!(
+            p.evaluate(ip("10.0.0.1"), &anon(), None),
+            AccessOutcome::Deny(403)
+        ));
+    }
+
+    #[test]
+    fn ip_and_authenticated_both_required() {
+        let p = policy(vec![
+            allow_rule(vec![
+                AccessCondition::Ip(net("10.0.0.0/8")),
+                AccessCondition::Authenticated,
+            ]),
+            deny_rule(vec![], 403),
+        ]);
+        // Correct IP + authenticated -> allow.
+        assert!(matches!(
+            p.evaluate(ip("10.0.0.1"), &authed("alice", &[]), None),
+            AccessOutcome::Allow
+        ));
+        // Correct IP + anonymous -> deny.
+        assert!(matches!(
+            p.evaluate(ip("10.0.0.1"), &anon(), None),
+            AccessOutcome::Deny(403)
+        ));
+        // Wrong IP + authenticated -> deny.
+        assert!(matches!(
+            p.evaluate(ip("1.2.3.4"), &authed("alice", &[]), None),
+            AccessOutcome::Deny(403)
+        ));
+    }
+
+    #[test]
+    fn user_and_country_both_required() {
+        let p = policy(vec![
+            allow_rule(vec![
+                AccessCondition::User("alice".into()),
+                AccessCondition::Country("US".into()),
+            ]),
+            deny_rule(vec![], 403),
+        ]);
+        // Right user, right country -> allow.
+        assert!(matches!(
+            p.evaluate(ip("1.2.3.4"), &authed("alice", &[]), Some("US")),
+            AccessOutcome::Allow
+        ));
+        // Right user, wrong country -> deny.
+        assert!(matches!(
+            p.evaluate(ip("1.2.3.4"), &authed("alice", &[]), Some("DE")),
+            AccessOutcome::Deny(403)
+        ));
+        // Wrong user, right country -> deny.
+        assert!(matches!(
+            p.evaluate(ip("1.2.3.4"), &authed("bob", &[]), Some("US")),
+            AccessOutcome::Deny(403)
+        ));
+    }
+
+    #[test]
+    fn three_type_and_ip_country_group() {
+        let p = policy(vec![
+            allow_rule(vec![
+                AccessCondition::Ip(net("10.0.0.0/8")),
+                AccessCondition::Country("US".into()),
+                AccessCondition::Group("admin".into()),
+            ]),
+            deny_rule(vec![], 403),
+        ]);
+        // All three match -> allow.
+        assert!(matches!(
+            p.evaluate(
+                ip("10.0.0.1"),
+                &authed("alice", &["admin"]),
+                Some("US")
+            ),
+            AccessOutcome::Allow
+        ));
+        // IP fails -> deny.
+        assert!(matches!(
+            p.evaluate(
+                ip("1.2.3.4"),
+                &authed("alice", &["admin"]),
+                Some("US")
+            ),
+            AccessOutcome::Deny(403)
+        ));
+        // Country fails -> deny.
+        assert!(matches!(
+            p.evaluate(
+                ip("10.0.0.1"),
+                &authed("alice", &["admin"]),
+                Some("DE")
+            ),
+            AccessOutcome::Deny(403)
+        ));
+        // Group fails -> deny.
+        assert!(matches!(
+            p.evaluate(
+                ip("10.0.0.1"),
+                &authed("alice", &["users"]),
+                Some("US")
+            ),
+            AccessOutcome::Deny(403)
+        ));
+    }
 }

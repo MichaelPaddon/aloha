@@ -27,6 +27,9 @@ jobs:
       - name: Install packaging tools
         run: cargo install cargo-deb cargo-generate-rpm
 
+      - name: Run tests
+        run: cargo test
+
       - name: Build release binary
         run: cargo build --release
 
