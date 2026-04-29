@@ -66,6 +66,7 @@ pub fn prepare_state_dir(
 pub fn drop_privileges(
     user: &str,
     group: Option<&str>,
+    keep_groups: bool,
 ) -> anyhow::Result<()> {
     // Not root -- nothing to do.
     if !nix::unistd::getuid().is_root() {
@@ -90,8 +91,16 @@ pub fn drop_privileges(
     };
     let uid: Uid = pw.uid;
 
-    // Clear all supplementary groups before changing GID.
-    setgroups(&[gid]).context("setgroups")?;
+    // Skipping setgroups preserves supplementary groups inherited at
+    // startup (e.g. via podman --keep-groups).  Only safe in container
+    // environments where the inherited groups are explicitly controlled.
+    if keep_groups {
+        tracing::warn!(
+            "keep-groups enabled: supplementary groups are NOT cleared"
+        );
+    } else {
+        setgroups(&[gid]).context("setgroups")?;
+    }
     setgid(gid).context("setgid")?;
     setuid(uid).context("setuid")?;
 
@@ -104,6 +113,7 @@ pub fn drop_privileges(
         user,
         uid = uid.as_raw(),
         gid = gid.as_raw(),
+        keep_groups,
         "dropped privileges"
     );
     Ok(())

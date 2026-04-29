@@ -33,6 +33,11 @@ pub struct ServerConfig {
     pub user: Option<String>,
     // Unix group to switch to; defaults to the user's primary group.
     pub group: Option<String>,
+    // When true, skip setgroups() so supplementary groups inherited at
+    // startup (e.g. from podman --keep-groups) survive the privilege
+    // drop.  Only set this in controlled container environments where
+    // the inherited groups are known and intentional.
+    pub keep_groups: bool,
     // Authentication back-end; None means anonymous-only.
     pub auth: Option<AuthBackend>,
     // GeoIP database configuration; None means no geo conditions can be used.
@@ -524,6 +529,7 @@ fn parse_server(node: &KdlNode, src: &str, name: &str) -> anyhow::Result<ServerC
         tls_defaults,
         user:  child_str(node, "user"),
         group: child_str(node, "group"),
+        keep_groups: child_bool(node, "keep-groups").unwrap_or(false),
         auth,
         geoip,
     })
@@ -2430,6 +2436,48 @@ mod tests {
         assert!(cfg.server.group.is_none());
     }
 
+    #[test]
+    fn keep_groups_parses() {
+        let cfg = Config::parse(
+            r#"
+            server {
+                user "aloha"
+                keep-groups true
+            }
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    static { root "."; }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        assert!(cfg.server.keep_groups);
+    }
+
+    #[test]
+    fn keep_groups_defaults_false() {
+        let cfg = Config::parse(
+            r#"
+            server {
+                user "aloha"
+            }
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    static { root "."; }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        assert!(!cfg.server.keep_groups);
+    }
 
         // -- access blocks ---------------------------------------------
 

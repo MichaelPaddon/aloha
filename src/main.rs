@@ -102,6 +102,7 @@ async fn main() -> anyhow::Result<()> {
             privdrop::drop_privileges(
                 user,
                 config.server.group.as_deref(),
+                config.server.keep_groups,
             )?;
         } else if nix::unistd::getuid().is_root() {
             tracing::warn!(
