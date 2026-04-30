@@ -52,10 +52,19 @@ jobs:
           podman push ghcr.io/$OWNER/aloha:$VERSION
           podman push ghcr.io/$OWNER/aloha:latest
 
+      - name: Generate release notes
+        run: |
+          {
+            awk '/^---$/{found=1; next} found && /^## /{exit} found && NF{print}' README.md
+            echo ""
+            echo "See the [README](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/README.md) for configuration and usage."
+          } > release-notes.md
+
       - name: Create GitHub release
         run: |
           gh release create "$GITHUB_REF_NAME" \
             --title "aloha $GITHUB_REF_NAME" \
+            --notes-file release-notes.md \
             --draft \
             $(ls target/debian/*.deb) \
             $(ls target/generate-rpm/*.rpm)
