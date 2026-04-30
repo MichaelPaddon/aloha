@@ -499,6 +499,14 @@
                   <code>user</code> from <code>/etc/passwd</code>.</td>
             </tr>
             <tr>
+              <td>keep-groups</td><td>bool</td><td>false</td>
+              <td><span class="badge badge-opt">optional</span>
+                  Skip the <code>setgroups()</code> call during privilege drop,
+                  preserving supplementary groups inherited at startup.
+                  Intended for container deployments that pass extra groups via
+                  <code>podman run --group-add keep-groups</code>.</td>
+            </tr>
+            <tr>
               <td>auth</td><td>block</td><td>--</td>
               <td><span class="badge badge-opt">optional</span>
                   Authentication back-end. See
@@ -528,8 +536,16 @@
         The syscall sequence is <code>setgroups</code> -&gt; <code>setgid</code>
         -&gt; <code>setuid</code>.
       </p>
+      <p>
+        In container deployments using
+        <code>podman run --group-add keep-groups</code>, set
+        <code>keep-groups true</code> to preserve the supplementary groups
+        passed in by podman instead of replacing them with
+        <code>setgroups()</code>.
+      </p>
 <pre><code><span class="kw">server</span> { <span class="kw">user</span> <span class="str">"www-data"</span> }                 <span class="cm">// group from /etc/passwd</span>
-<span class="kw">server</span> { <span class="kw">user</span> <span class="str">"aloha"</span>; <span class="kw">group</span> <span class="str">"aloha"</span> }  <span class="cm">// explicit group</span></code></pre>
+<span class="kw">server</span> { <span class="kw">user</span> <span class="str">"aloha"</span>; <span class="kw">group</span> <span class="str">"aloha"</span> }  <span class="cm">// explicit group</span>
+<span class="kw">server</span> { <span class="kw">user</span> <span class="str">"aloha"</span>; <span class="kw">keep-groups</span> <span class="kw">true</span> }  <span class="cm">// container: preserve inherited groups</span></code></pre>
     </section>
 
     <!-- listener -->
