@@ -1924,7 +1924,7 @@ mod tests {
                 bind "0.0.0.0:80"
             }
             vhost "h" {
-                location "/_status" {
+                location "/status" {
                     status
                 }
             }

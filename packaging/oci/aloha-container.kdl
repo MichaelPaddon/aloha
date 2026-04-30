@@ -30,9 +30,9 @@ listener {
 
 vhost "localhost" {
     // Built-in status page.  Useful for container health checks:
-    //   curl -f http://localhost:80/_status
+    //   curl -f http://localhost:80/status
     // Restrict to internal IPs in production via an access block.
-    location "/_status" {
+    location "/status" {
         status
     }
 

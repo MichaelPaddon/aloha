@@ -135,6 +135,7 @@ impl hyper::service::Service<Request<Incoming>> for AlohaService {
                     state.metrics.record(
                         resp.status().as_u16(), ms,
                     );
+                    state.metrics.record_path(&path);
                     log_access(&method, &path, resp.status().as_u16(),
                                ms, peer);
                     return Ok(resp);
@@ -153,6 +154,7 @@ impl hyper::service::Service<Request<Incoming>> for AlohaService {
                     state.metrics.record(
                         resp.status().as_u16(), ms,
                     );
+                    state.metrics.record_path(&path);
                     log_access(
                         &method, &path,
                         resp.status().as_u16(), ms, peer,
@@ -319,6 +321,7 @@ impl hyper::service::Service<Request<Incoming>> for AlohaService {
             let ms = start.elapsed().as_millis();
             state.metrics.dec_active();
             state.metrics.record(status, ms);
+            state.metrics.record_path(&path);
             log_access(&method, &path, status, ms, peer);
             Ok(resp)
         })

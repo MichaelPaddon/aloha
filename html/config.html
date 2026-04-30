@@ -1539,7 +1539,7 @@
         Serves a live server status page. The page auto-refreshes every
         10 seconds. No child nodes are required.
       </p>
-<pre><code><span class="kw">location</span> <span class="str">"/_status"</span> {
+<pre><code><span class="kw">location</span> <span class="str">"/status"</span> {
     <span class="kw">status</span>
 }</code></pre>
       <p>Protect with an <code>access</code> block to restrict visibility.</p>
@@ -1806,7 +1806,7 @@ Vary: Accept-Encoding</code></pre>
     <span class="kw">alias</span> <span class="str">"www.example.com"</span>
 
     <span class="cm">// Status page -- internal access only</span>
-    <span class="kw">location</span> <span class="str">"/_status"</span> {
+    <span class="kw">location</span> <span class="str">"/status"</span> {
         <span class="kw">access</span> {
             <span class="kw">allow</span> { <span class="kw">ip</span> <span class="str">"10.0.0.0/8"</span> }
             <span class="kw">deny</span>  <span class="prop">code=</span><span class="num">403</span>

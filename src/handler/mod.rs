@@ -35,6 +35,7 @@ impl Handler {
         cfg: &HandlerConfig,
         metrics: &Arc<Metrics>,
         summary: &Arc<status::ServerSummary>,
+        cert_state: Option<&crate::cert_state::SharedCertState>,
     ) -> anyhow::Result<Self> {
         match cfg {
             HandlerConfig::Static {
@@ -75,12 +76,16 @@ impl Handler {
                     index.clone(),
                 )))
             }
-            HandlerConfig::Status => Ok(Handler::Status(
-                status::StatusHandler::new(
+            HandlerConfig::Status => {
+                let mut h = status::StatusHandler::new(
                     metrics.clone(),
                     summary.clone(),
-                ),
-            )),
+                );
+                if let Some(cs) = cert_state {
+                    h = h.with_cert_state(cs.clone());
+                }
+                Ok(Handler::Status(h))
+            }
             HandlerConfig::Cgi { root } => {
                 #[cfg(unix)]
                 return Ok(Handler::Cgi(cgi::CgiHandler::new(root)));

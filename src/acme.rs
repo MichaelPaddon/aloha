@@ -95,6 +95,7 @@ pub struct AcmeManager {
     challenges: ChallengeMap,
     tls_opts: TlsOptions,
     provisioner: Arc<dyn Provisioner>,
+    cert_state: Option<crate::cert_state::SharedCertState>,
 }
 
 impl AcmeManager {
@@ -126,7 +127,24 @@ impl AcmeManager {
                  certificates are NOT trusted by browsers"
             );
         }
-        Self { config, challenges, tls_opts, provisioner }
+        Self {
+            config,
+            challenges,
+            tls_opts,
+            provisioner,
+            cert_state: None,
+        }
+    }
+
+    // Attach a shared cert-state sink so the status page can show
+    // expiry countdowns.  Called from main.rs after construction,
+    // before spawning the renewal loop.
+    pub fn with_cert_state(
+        mut self,
+        state: crate::cert_state::SharedCertState,
+    ) -> Self {
+        self.cert_state = Some(state);
+        self
     }
 
     // Return the directory where cert.pem and key.pem are stored.
@@ -152,6 +170,8 @@ impl AcmeManager {
                 "ACME certificate acquired"
             );
         }
+        // Publish expiry info regardless of whether renewal happened.
+        self.publish_cert_state();
         self.build_acceptor()
     }
 
@@ -184,6 +204,7 @@ impl AcmeManager {
                 Ok(()) => match self.build_acceptor() {
                     Ok(new_acc) => {
                         acceptor.store(Arc::new(new_acc));
+                        self.publish_cert_state();
                         last_failed = false;
                         tracing::info!(
                             cert = self.config.cert_name(),
@@ -257,6 +278,43 @@ impl AcmeManager {
             &dir.join("key.pem"),
         )?;
         tls::make_acceptor(chain, key, &self.tls_opts)
+    }
+
+    // Publish the current cert's expiry into the shared state so the
+    // status page can display countdown timers.  No-op if no sink is
+    // configured or if the cert file cannot be read/parsed.
+    fn publish_cert_state(&self) {
+        let Some(ref shared) = self.cert_state else {
+            return;
+        };
+        let cert_path = self.cert_dir().join("cert.pem");
+        let Ok(pem) = std::fs::read(&cert_path) else {
+            return;
+        };
+        let Ok(expiry_ts) = cert_expiry_timestamp(&pem) else {
+            return;
+        };
+        let next_renewal_ts = expiry_ts - 30 * 24 * 3600;
+        let entry = crate::cert_state::CertState {
+            domains: self.config.domains.clone(),
+            expiry_ts,
+            next_renewal_ts,
+        };
+        match shared.write() {
+            Ok(mut v) => {
+                let key = &self.config.domains;
+                if let Some(e) = v.iter_mut()
+                    .find(|c| &c.domains == key)
+                {
+                    *e = entry;
+                } else {
+                    v.push(entry);
+                }
+            }
+            Err(e) => {
+                tracing::warn!("cert_state lock poisoned: {e}");
+            }
+        }
     }
 
     // Acquire a certificate via the provisioner and persist it.

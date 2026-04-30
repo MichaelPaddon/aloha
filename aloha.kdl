@@ -124,7 +124,7 @@ listener {
 vhost "localhost" {
     // Built-in status page: current load, request rates, latency histogram.
     // Responds with HTML by default; add Accept: application/json for JSON.
-    location "/_status" {
+    location "/status" {
         status
     }
 

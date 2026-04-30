@@ -453,7 +453,7 @@ vhost "~.+\.example\.com" {
 
 Maps a URL path prefix to a handler. The location with the **longest matching
 prefix** wins -- declaration order does not matter. This means a catch-all
-`location "/"` never masks a more specific `location "/_status"` regardless
+`location "/"` never masks a more specific `location "/status"` regardless
 of which appears first in the config. Each location contains exactly one
 handler node.
 
@@ -854,7 +854,7 @@ location "/old/" {
 Serves a live server status page. The page auto-refreshes every 10 seconds.
 
 ```kdl
-location "/_status" {
+location "/status" {
     status
 }
 ```
@@ -981,7 +981,7 @@ vhost "example.com" {
     alias "www.example.com"
 
     // Status page -- internal access only
-    location "/_status" {
+    location "/status" {
         access {
             allow { ip "10.0.0.0/8" }
             deny  code=403

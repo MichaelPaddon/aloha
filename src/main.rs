@@ -5,6 +5,7 @@
 mod access;
 mod acme;
 mod auth;
+mod cert_state;
 mod compress;
 mod config;
 mod error;
@@ -121,8 +122,12 @@ async fn main() -> anyhow::Result<()> {
         handler::status::ServerSummary::from_config(&config)
     );
 
+    // Shared certificate state: written by each AcmeManager after
+    // renewal, read by StatusHandler for countdown timers.
+    let cert_state = cert_state::new_shared();
+
     let router = Arc::new(
-        Router::new(&config, &metrics, &summary)
+        Router::new(&config, &metrics, &summary, Some(&cert_state))
             .context("building router")?,
     );
 
@@ -232,21 +237,24 @@ async fn main() -> anyhow::Result<()> {
                         "state_dir required for ACME \
                          (validated earlier)",
                     );
-                    let mgr = Arc::new(AcmeManager::new(
-                        AcmeConfig {
-                            domains: domains.clone(),
-                            name: name.clone(),
-                            email: email.clone(),
-                            staging: *staging,
-                            server: server.clone(),
-                            state_dir: sd.clone(),
-                            retry_interval: Duration::from_secs(
-                                *retry_interval_secs,
-                            ),
-                        },
-                        challenges.clone(),
-                        resolved,
-                    ));
+                    let mgr = Arc::new(
+                        AcmeManager::new(
+                            AcmeConfig {
+                                domains: domains.clone(),
+                                name: name.clone(),
+                                email: email.clone(),
+                                staging: *staging,
+                                server: server.clone(),
+                                state_dir: sd.clone(),
+                                retry_interval: Duration::from_secs(
+                                    *retry_interval_secs,
+                                ),
+                            },
+                            challenges.clone(),
+                            resolved,
+                        )
+                        .with_cert_state(cert_state.clone()),
+                    );
                     // Try to get an initial cert.  If ACME fails,
                     // fall back to self-signed and keep retrying in
                     // the background rather than crashing -- crashing

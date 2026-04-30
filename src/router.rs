@@ -55,6 +55,7 @@ impl Router {
         config: &Config,
         metrics: &Arc<Metrics>,
         summary: &Arc<ServerSummary>,
+        cert_state: Option<&crate::cert_state::SharedCertState>,
     ) -> anyhow::Result<Self> {
         let mut vhosts: HashMap<String, Arc<VHost>> = HashMap::new();
         let mut patterns: Vec<(Regex, Arc<VHost>)> = Vec::new();
@@ -66,8 +67,9 @@ impl Router {
             HashMap::new();
 
         for vcfg in &config.vhosts {
-            let vhost =
-                Arc::new(build_vhost(vcfg, metrics, summary)?);
+            let vhost = Arc::new(
+                build_vhost(vcfg, metrics, summary, cert_state)?
+            );
 
             let all_names =
                 std::iter::once(&vcfg.name).chain(vcfg.aliases.iter());
@@ -114,7 +116,7 @@ impl Router {
         let vhost = self.resolve_vhost(host.as_deref(), listener_bind)?;
         let path = req.uri().path();
         // Longest prefix match: the most specific location wins.
-        // This makes declaration order irrelevant -- "/_status" always
+        // This makes declaration order irrelevant -- "/status" always
         // beats "/" regardless of which is declared first in the config.
         vhost.locations.iter()
             .filter(|loc| path.starts_with(loc.path.as_str()))
@@ -170,6 +172,7 @@ fn build_vhost(
     vcfg: &VHostConfig,
     metrics: &Arc<Metrics>,
     summary: &Arc<ServerSummary>,
+    cert_state: Option<&crate::cert_state::SharedCertState>,
 ) -> anyhow::Result<VHost> {
     let mut locations = Vec::with_capacity(vcfg.locations.len());
     for loc in &vcfg.locations {
@@ -177,6 +180,7 @@ fn build_vhost(
             &loc.handler,
             metrics,
             summary,
+            cert_state,
         )?);
         let header_rules = if loc.request_headers.is_empty()
             && loc.response_headers.is_empty()
@@ -243,7 +247,7 @@ mod tests {
                 config,
             ),
         );
-        Router::new(config, &metrics, &summary).unwrap()
+        Router::new(config, &metrics, &summary, None).unwrap()
     }
 
     // Route a synthetic request and return the matched location prefix,
