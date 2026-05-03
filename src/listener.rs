@@ -165,7 +165,7 @@ impl hyper::service::Service<Request<Incoming>> for AlohaService {
                     );
                     state.metrics.record_path(&path);
                     log_access(&method, &path, resp.status().as_u16(),
-                               ms, peer);
+                               ms, peer, &host, "-");
                     return Ok(resp);
                 }
             }
@@ -186,6 +186,7 @@ impl hyper::service::Service<Request<Incoming>> for AlohaService {
                     log_access(
                         &method, &path,
                         resp.status().as_u16(), ms, peer,
+                        &host, "-",
                     );
                     return Ok(resp);
                 }
@@ -236,11 +237,14 @@ impl hyper::service::Service<Request<Incoming>> for AlohaService {
                                         .as_ref()
                                         .map(|a| a.realm.as_str())
                                         .unwrap_or("Restricted");
-                                    return response_www_auth(
-                                        realm,
-                                        Some(&state.error_pages),
-                                    )
-                                    .await;
+                                    return (
+                                        response_www_auth(
+                                            realm,
+                                            Some(&state.error_pages),
+                                        )
+                                        .await,
+                                        String::from("-"),
+                                    );
                                 }
                                 AccessOutcome::Deny(code) => {
                                     tracing::warn!(
@@ -249,14 +253,20 @@ impl hyper::service::Service<Request<Incoming>> for AlohaService {
                                         status = code,
                                         "access denied"
                                     );
-                                    return response_status(
-                                        code,
-                                        Some(&state.error_pages),
-                                    )
-                                    .await;
+                                    return (
+                                        response_status(
+                                            code,
+                                            Some(&state.error_pages),
+                                        )
+                                        .await,
+                                        String::from("-"),
+                                    );
                                 }
                                 AccessOutcome::Redirect(to, code) => {
-                                    return response_redirect(&to, code);
+                                    return (
+                                        response_redirect(&to, code),
+                                        String::from("-"),
+                                    );
                                 }
                             }
                             principal
@@ -326,26 +336,32 @@ impl hyper::service::Service<Request<Incoming>> for AlohaService {
                             }
                         }
 
-                        resp
+                        let log_user = if username.is_empty() {
+                            "-".to_string()
+                        } else {
+                            username.to_string()
+                        };
+                        (resp, log_user)
                     }
-                    None => response_404(),
+                    None => (response_404(), String::from("-")),
                 }
             };
 
             // Apply per-request handler timeout when configured.
-            let resp = if let Some(dur) = handler_timeout {
+            let (resp, log_user) = if let Some(dur) = handler_timeout {
                 match tokio::time::timeout(dur, serve_fut).await {
                     Ok(r) => r,
                     Err(_) => {
                         tracing::warn!(
                             %peer, path, "handler timed out"
                         );
-                        Response::builder()
+                        (Response::builder()
                             .status(StatusCode::REQUEST_TIMEOUT)
                             .body(bytes_body(Bytes::from_static(
                                 b"<h1>408 Request Timeout</h1>",
                             )))
-                            .expect("known-valid status")
+                            .expect("known-valid status"),
+                         String::from("-"))
                     }
                 }
             } else {
@@ -363,24 +379,28 @@ impl hyper::service::Service<Request<Incoming>> for AlohaService {
             state.metrics.dec_active();
             state.metrics.record(status, ms);
             state.metrics.record_path(&path);
-            log_access(&method, &path, status, ms, peer);
+            log_access(&method, &path, status, ms, peer, &host, &log_user);
             Ok(resp)
         })
     }
 }
 
 // Emit one access-log line per completed request at INFO level.
-// Fields are structured so log aggregators can parse them; the
-// human-readable format is also easy to read with plain `grep`.
+// Fields mirror Combined Log Format: peer, user ("-" when
+// unauthenticated), host, method, path, status, elapsed ms.
 fn log_access(
     method: &hyper::Method,
     path: &str,
     status: u16,
     ms: u128,
     peer: SocketAddr,
+    host: &str,
+    user: &str,
 ) {
     tracing::info!(
         %peer,
+        user,
+        host,
         %method,
         path,
         status,
