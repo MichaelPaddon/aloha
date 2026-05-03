@@ -103,9 +103,7 @@ impl Authenticator for LdapAuthenticator {
                 groups,
             }),
             Ok(Err(e)) => {
-                tracing::debug!(
-                    "LDAP auth failed for {username}: {e}"
-                );
+                tracing::warn!(username, "auth failed: {e}");
                 Principal::Anonymous
             }
             Err(_) => {
@@ -252,7 +250,7 @@ impl Authenticator for PamAuthenticator {
                 groups,
             }),
             Ok(Err(e)) => {
-                tracing::debug!("PAM auth failed for {username}: {e}");
+                tracing::warn!(username, "auth failed: {e}");
                 Principal::Anonymous
             }
             Err(e) => {

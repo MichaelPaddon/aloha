@@ -226,6 +226,11 @@ impl hyper::service::Service<Request<Incoming>> for AlohaService {
                             match outcome {
                                 AccessOutcome::Allow => {}
                                 AccessOutcome::Deny(401) => {
+                                    tracing::warn!(
+                                        %peer, %method,
+                                        path, host,
+                                        "auth failed"
+                                    );
                                     let realm = route
                                         .basic_auth
                                         .as_ref()
@@ -238,6 +243,12 @@ impl hyper::service::Service<Request<Incoming>> for AlohaService {
                                     .await;
                                 }
                                 AccessOutcome::Deny(code) => {
+                                    tracing::warn!(
+                                        %peer, %method,
+                                        path, host,
+                                        status = code,
+                                        "access denied"
+                                    );
                                     return response_status(
                                         code,
                                         Some(&state.error_pages),
