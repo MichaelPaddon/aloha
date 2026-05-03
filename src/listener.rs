@@ -111,6 +111,14 @@ impl hyper::service::Service<Request<Incoming>> for AlohaService {
             let start = Instant::now();
             let method = req.method().clone();
             let path = req.uri().path().to_owned();
+            let query = req.uri().query()
+                .unwrap_or("")
+                .to_owned();
+            let path_and_query = req.uri()
+                .path_and_query()
+                .map(|pq| pq.as_str())
+                .unwrap_or("/")
+                .to_owned();
             let host = req
                 .headers()
                 .get(hyper::header::HOST)
@@ -260,65 +268,49 @@ impl hyper::service::Service<Request<Incoming>> for AlohaService {
                             principal
                         };
 
+                        // Build request context once; used by the
+                        // redirect handler for template rendering and
+                        // by both header-rule passes below.
+                        let peer_ip = peer.ip().to_string();
+                        let (username, groups_str) =
+                            principal_strings(&principal);
+                        let req_ctx = RequestContext {
+                            client_ip:      &peer_ip,
+                            username,
+                            groups:         &groups_str,
+                            method:         method.as_str(),
+                            path:           &path,
+                            query:          &query,
+                            path_and_query: &path_and_query,
+                            host:           &host,
+                            scheme: if is_tls { "https" } else { "http" },
+                        };
+
                         // Apply request-header rules before the handler
                         // consumes the request.
                         if let Some(rules) = &route.header_rules {
                             if !rules.request.is_empty() {
-                                let (username, groups) =
-                                    principal_strings(&principal);
-                                let peer_ip =
-                                    peer.ip().to_string();
-                                let ctx = RequestContext {
-                                    client_ip: &peer_ip,
-                                    username,
-                                    groups: &groups,
-                                    method: method.as_str(),
-                                    path: &path,
-                                    host: &host,
-                                    scheme: if is_tls {
-                                        "https"
-                                    } else {
-                                        "http"
-                                    },
-                                };
                                 headers::apply_request_headers(
                                     req.headers_mut(),
                                     &rules.request,
-                                    &ctx,
+                                    &req_ctx,
                                 );
                             }
                         }
 
                         let mut resp = route
                             .handler
-                            .serve(req, &route.matched_prefix)
+                            .serve(req, &route.matched_prefix, &req_ctx)
                             .await;
 
                         // Apply response-header rules to the response
                         // before it reaches the client.
                         if let Some(rules) = &route.header_rules {
                             if !rules.response.is_empty() {
-                                let (username, groups) =
-                                    principal_strings(&principal);
-                                let peer_ip =
-                                    peer.ip().to_string();
-                                let ctx = RequestContext {
-                                    client_ip: &peer_ip,
-                                    username,
-                                    groups: &groups,
-                                    method: method.as_str(),
-                                    path: &path,
-                                    host: &host,
-                                    scheme: if is_tls {
-                                        "https"
-                                    } else {
-                                        "http"
-                                    },
-                                };
                                 headers::apply_response_headers(
                                     resp.headers_mut(),
                                     &rules.response,
-                                    &ctx,
+                                    &req_ctx,
                                 );
                             }
                         }
@@ -754,5 +746,169 @@ async fn drain_connections(name: &str, mut connections: JoinSet<()>) {
             DRAIN_TIMEOUT.as_secs(),
             connections.len(),
         );
+    }
+}
+
+// -- Tests ---------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::AnonymousAuthenticator;
+    use crate::config::{Config, ListenerConfig, Timeouts};
+    use crate::error::ErrorPages;
+    use crate::metrics::Metrics;
+    use crate::router::Router;
+    use bytes::Bytes;
+    use http_body_util::{BodyExt, Empty};
+    use hyper::Request;
+    use std::collections::HashMap;
+    use tokio::net::TcpListener as TokioTcpListener;
+    use tokio::sync::watch;
+
+    // Spin up an in-process test HTTP server backed by a given AppState.
+    // Returns the bound address and a shutdown sender.
+    async fn start_server(
+        state: Arc<AppState>,
+    ) -> (std::net::SocketAddr, watch::Sender<bool>) {
+        let std_listener =
+            std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = std_listener.local_addr().unwrap();
+        std_listener.set_nonblocking(true).unwrap();
+        let listener = TokioTcpListener::from_std(std_listener).unwrap();
+        let (tx, rx) = watch::channel(false);
+        let cfg = ListenerConfig {
+            bind: Some(addr.to_string()),
+            fd: None,
+            tls: None,
+            default_vhost: None,
+            timeouts: Timeouts::default(),
+            tcp_proxy: None,
+        };
+        tokio::spawn(run_plain(cfg, listener, state, rx));
+        (addr, tx)
+    }
+
+    // Send a plain-HTTP GET and return (status, headers, body bytes).
+    async fn http_get(
+        addr: std::net::SocketAddr,
+        host: &str,
+        path_and_query: &str,
+    ) -> (hyper::StatusCode, hyper::HeaderMap, Bytes) {
+        let stream =
+            tokio::net::TcpStream::connect(addr).await.unwrap();
+        let io = hyper_util::rt::TokioIo::new(stream);
+        let (mut sender, conn) =
+            hyper::client::conn::http1::handshake(io).await.unwrap();
+        tokio::spawn(conn);
+        let req = Request::builder()
+            .uri(path_and_query)
+            .header("host", host)
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+        let resp = sender.send_request(req).await.unwrap();
+        let status = resp.status();
+        let headers = resp.headers().clone();
+        let body = resp
+            .into_body()
+            .collect()
+            .await
+            .map(|c| c.to_bytes())
+            .unwrap_or_default();
+        (status, headers, body)
+    }
+
+    // Build an AppState with a single vhost that catch-all redirects to HTTPS.
+    fn redirect_state() -> Arc<AppState> {
+        let config = Config::parse(r#"
+            listener {
+                bind "127.0.0.1:1"
+            }
+            vhost "example.com" {
+                location "/" {
+                    redirect {
+                        to "https://{host}{path_and_query}"
+                        code 301
+                    }
+                }
+            }
+        "#).unwrap();
+        let metrics = Arc::new(Metrics::new());
+        let summary = Arc::new(
+            crate::handler::status::ServerSummary::from_config(&config),
+        );
+        let router = Router::new(&config, &metrics, &summary, None)
+            .unwrap();
+        Arc::new(AppState {
+            router: Arc::new(router),
+            acme_challenges: Default::default(),
+            authenticator: Arc::new(AnonymousAuthenticator),
+            metrics,
+            geoip: None,
+            health_enabled: false,
+            error_pages: Arc::new(ErrorPages::new(HashMap::new())),
+        })
+    }
+
+    /// A request to /.well-known/acme-challenge/{token} must return the
+    /// challenge key-auth even when a catch-all redirect location is
+    /// configured for the vhost.  The ACME intercept runs before routing.
+    #[tokio::test]
+    async fn acme_challenge_not_blocked_by_redirect() {
+        let state = redirect_state();
+        state.acme_challenges.lock().unwrap().insert(
+            "tok123".to_string(),
+            "tok123.keyauth".to_string(),
+        );
+        let (addr, tx) = start_server(state).await;
+
+        let (status, _, body) = http_get(
+            addr,
+            "example.com",
+            "/.well-known/acme-challenge/tok123",
+        )
+        .await;
+        assert_eq!(status, 200, "ACME challenge must be served");
+        assert_eq!(body.as_ref(), b"tok123.keyauth");
+
+        tx.send(true).unwrap();
+    }
+
+    /// Requests to non-ACME paths on a vhost with a catch-all redirect
+    /// must receive a 301 with an https:// Location.
+    #[tokio::test]
+    async fn redirect_applies_to_normal_paths() {
+        let state = redirect_state();
+        let (addr, tx) = start_server(state).await;
+
+        let (status, headers, _) =
+            http_get(addr, "example.com", "/foo?bar=1").await;
+        assert_eq!(status, 301);
+        assert_eq!(
+            headers.get("location").unwrap(),
+            "https://example.com/foo?bar=1",
+        );
+
+        tx.send(true).unwrap();
+    }
+
+    /// An ACME path with an *unknown* token falls through to the router
+    /// (the challenge map miss is not intercepted) and hits the redirect.
+    #[tokio::test]
+    async fn acme_path_unknown_token_falls_through_to_router() {
+        let state = redirect_state();
+        // Do NOT insert any token -- miss falls through to routing.
+        let (addr, tx) = start_server(state).await;
+
+        let (status, _, _) = http_get(
+            addr,
+            "example.com",
+            "/.well-known/acme-challenge/nosuchtoken",
+        )
+        .await;
+        // Falls through to the catch-all redirect location.
+        assert_eq!(status, 301);
+
+        tx.send(true).unwrap();
     }
 }

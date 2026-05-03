@@ -1268,7 +1268,14 @@
             <tr><td>{groups}</td>
                 <td>Authenticated user's groups, comma-joined; empty if anonymous</td></tr>
             <tr><td>{method}</td><td>HTTP request method (GET, POST, ...)</td></tr>
-            <tr><td>{path}</td><td>Request URI path</td></tr>
+            <tr><td>{path}</td><td>Request URI path (without query string)</td></tr>
+            <tr><td>{query}</td>
+                <td>Query string without the leading <code>?</code>;
+                    empty string if absent</td></tr>
+            <tr><td>{path_and_query}</td>
+                <td>Request path plus query string,
+                    e.g. <code>/api/v1?foo=bar</code>; equals the path
+                    when there is no query</td></tr>
             <tr><td>{host}</td><td>Value of the Host request header</td></tr>
             <tr><td>{scheme}</td>
                 <td><code>"https"</code> for TLS listeners,
@@ -1555,7 +1562,10 @@
             <tr>
               <td>to</td><td>URL or path</td><td>--</td>
               <td><span class="badge badge-req">required</span>
-                  Destination written to the <code>Location</code> header.</td>
+                  Destination written to the <code>Location</code> header.
+                  Supports <a href="#header-template-variables">template
+                  variables</a> such as <code>{host}</code> and
+                  <code>{path_and_query}</code>.</td>
             </tr>
             <tr>
               <td>code</td><td>integer</td><td><code>301</code></td>
@@ -1566,6 +1576,22 @@
           </tbody>
         </table>
       </div>
+      <p>
+        Template variables make it possible to build the destination from
+        the incoming request. The canonical example is redirecting all
+        plain HTTP traffic to HTTPS. ACME challenge paths and health
+        endpoints are intercepted before routing and are never affected
+        by a location handler.
+      </p>
+<pre><code><span class="cm">// Redirect all HTTP traffic to HTTPS.</span>
+<span class="cm">// ACME challenges (/.well-known/acme-challenge/) still work on</span>
+<span class="cm">// the plain listener -- they are intercepted before routing runs.</span>
+<span class="kw">location</span> <span class="str">"/"</span> {
+    <span class="kw">redirect</span> {
+        <span class="kw">to</span>   <span class="str">"https://{host}{path_and_query}"</span>
+        <span class="kw">code</span> <span class="num">301</span>
+    }
+}</code></pre>
 
       <!-- status -->
       <h3 id="handler-status">Handler: <code>status</code></h3>

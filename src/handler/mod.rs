@@ -14,6 +14,7 @@ pub mod cgi;
 
 use crate::config::HandlerConfig;
 use crate::error::{response_redirect, HttpResponse};
+use crate::headers::{RequestContext, Template};
 use crate::metrics::Metrics;
 use hyper::body::Incoming;
 use hyper::Request;
@@ -22,7 +23,7 @@ use std::sync::Arc;
 pub enum Handler {
     Static(static_files::StaticHandler),
     Proxy(proxy::ProxyHandler),
-    Redirect { to: String, code: u16 },
+    Redirect { to: Template, code: u16 },
     FastCgi(fcgi::FcgiHandler),
     Scgi(scgi::ScgiHandler),
     Status(status::StatusHandler),
@@ -58,7 +59,7 @@ impl Handler {
             }
             HandlerConfig::Redirect { to, code } => {
                 Ok(Handler::Redirect {
-                    to: to.clone(),
+                    to: Template::parse(to),
                     code: *code,
                 })
             }
@@ -101,11 +102,14 @@ impl Handler {
         &self,
         req: Request<Incoming>,
         matched_prefix: &str,
+        ctx: &RequestContext<'_>,
     ) -> HttpResponse {
         match self {
             Handler::Static(h) => h.serve(req, matched_prefix).await,
             Handler::Proxy(h)  => h.serve(req, matched_prefix).await,
-            Handler::Redirect { to, code } => response_redirect(to, *code),
+            Handler::Redirect { to, code } => {
+                response_redirect(&to.render(ctx), *code)
+            }
             Handler::FastCgi(h) => h.serve(req, matched_prefix).await,
             Handler::Scgi(h)    => h.serve(req, matched_prefix).await,
             Handler::Status(h)  => h.serve(req, matched_prefix).await,

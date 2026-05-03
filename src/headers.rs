@@ -27,6 +27,8 @@ enum KnownVar {
     Groups,
     Method,
     Path,
+    Query,
+    PathAndQuery,
     Host,
     Scheme,
 }
@@ -53,13 +55,15 @@ impl Template {
                         (token, None)
                     };
                 parts.push(match var_name {
-                    "client_ip" => TemplatePart::Var(KnownVar::ClientIp, fallback),
-                    "username"  => TemplatePart::Var(KnownVar::Username, fallback),
-                    "groups"    => TemplatePart::Var(KnownVar::Groups,   fallback),
-                    "method"    => TemplatePart::Var(KnownVar::Method,   fallback),
-                    "path"      => TemplatePart::Var(KnownVar::Path,     fallback),
-                    "host"      => TemplatePart::Var(KnownVar::Host,     fallback),
-                    "scheme"    => TemplatePart::Var(KnownVar::Scheme,   fallback),
+                    "client_ip"      => TemplatePart::Var(KnownVar::ClientIp,    fallback),
+                    "username"       => TemplatePart::Var(KnownVar::Username,    fallback),
+                    "groups"         => TemplatePart::Var(KnownVar::Groups,      fallback),
+                    "method"         => TemplatePart::Var(KnownVar::Method,      fallback),
+                    "path"           => TemplatePart::Var(KnownVar::Path,        fallback),
+                    "query"          => TemplatePart::Var(KnownVar::Query,       fallback),
+                    "path_and_query" => TemplatePart::Var(KnownVar::PathAndQuery, fallback),
+                    "host"           => TemplatePart::Var(KnownVar::Host,        fallback),
+                    "scheme"         => TemplatePart::Var(KnownVar::Scheme,      fallback),
                     // Unknown variable: pass through the original token verbatim.
                     _ => TemplatePart::Unknown(format!("{{{token}}}")),
                 });
@@ -86,13 +90,15 @@ impl Template {
                 TemplatePart::Unknown(s) => out.push_str(s),
                 TemplatePart::Var(v, default) => {
                     let value = match v {
-                        KnownVar::ClientIp => ctx.client_ip,
-                        KnownVar::Username => ctx.username,
-                        KnownVar::Groups   => ctx.groups,
-                        KnownVar::Method   => ctx.method,
-                        KnownVar::Path     => ctx.path,
-                        KnownVar::Host     => ctx.host,
-                        KnownVar::Scheme   => ctx.scheme,
+                        KnownVar::ClientIp     => ctx.client_ip,
+                        KnownVar::Username     => ctx.username,
+                        KnownVar::Groups       => ctx.groups,
+                        KnownVar::Method       => ctx.method,
+                        KnownVar::Path         => ctx.path,
+                        KnownVar::Query        => ctx.query,
+                        KnownVar::PathAndQuery => ctx.path_and_query,
+                        KnownVar::Host         => ctx.host,
+                        KnownVar::Scheme       => ctx.scheme,
                     };
                     if value.is_empty() {
                         if let Some(d) = default {
@@ -165,13 +171,15 @@ impl HeaderRules {
 
 /// Runtime values available when rendering header templates.
 pub struct RequestContext<'a> {
-    pub client_ip: &'a str,
-    pub username:  &'a str,
-    pub groups:    &'a str,   // comma-joined; "" for anonymous
-    pub method:    &'a str,
-    pub path:      &'a str,
-    pub host:      &'a str,
-    pub scheme:    &'a str,   // "http" or "https"
+    pub client_ip:      &'a str,
+    pub username:       &'a str,
+    pub groups:         &'a str,   // comma-joined; "" for anonymous
+    pub method:         &'a str,
+    pub path:           &'a str,
+    pub query:          &'a str,   // query string without '?'; "" if absent
+    pub path_and_query: &'a str,   // e.g. "/foo?bar=1" or just "/foo"
+    pub host:           &'a str,
+    pub scheme:         &'a str,   // "http" or "https"
 }
 
 /// Extract username and pre-joined groups from a `Principal`.
@@ -260,10 +268,12 @@ mod tests {
             client_ip,
             username,
             groups,
-            method: "GET",
-            path:   "/foo",
-            host:   "example.com",
-            scheme: "http",
+            method:         "GET",
+            path:           "/foo",
+            query:          "",
+            path_and_query: "/foo",
+            host:           "example.com",
+            scheme:         "http",
         }
     }
 
@@ -572,6 +582,8 @@ mod tests {
             groups: &groups,
             method: "GET",
             path: "/",
+            query: "",
+            path_and_query: "/",
             host: "example.com",
             scheme: "http",
         };
@@ -624,7 +636,8 @@ mod tests {
         let (username, groups) = principal_strings(&principal);
         let c = RequestContext {
             client_ip: "1.2.3.4", username, groups: &groups,
-            method: "GET", path: "/", host: "example.com", scheme: "http",
+            method: "GET", path: "/", query: "", path_and_query: "/",
+            host: "example.com", scheme: "http",
         };
         apply_request_headers(&mut h, &ops, &c);
         assert_eq!(h["x-user"], "anonymous");
@@ -643,6 +656,8 @@ mod tests {
             groups: &groups,
             method: "GET",
             path: "/",
+            query: "",
+            path_and_query: "/",
             host: "example.com",
             scheme: "http",
         };
@@ -663,10 +678,54 @@ mod tests {
             groups: &groups,
             method: "GET",
             path: "/",
+            query: "",
+            path_and_query: "/",
             host: "example.com",
             scheme: "http",
         };
         apply_request_headers(&mut h, &ops, &c);
         assert!(h.get("x-auth-groups").is_none());
+    }
+
+    #[test]
+    fn template_known_var_query() {
+        let mut c = ctx("", "", "");
+        c.query = "foo=bar&baz=1";
+        let t = Template::parse("{query}");
+        assert_eq!(t.render(&c), "foo=bar&baz=1");
+    }
+
+    #[test]
+    fn template_known_var_query_empty_when_no_query() {
+        let t = Template::parse("{query}");
+        assert_eq!(t.render(&ctx("", "", "")), "");
+    }
+
+    #[test]
+    fn template_known_var_path_and_query_with_query() {
+        let mut c = ctx("", "", "");
+        c.path_and_query = "/api/v1?foo=bar";
+        let t = Template::parse("{path_and_query}");
+        assert_eq!(t.render(&c), "/api/v1?foo=bar");
+    }
+
+    #[test]
+    fn template_path_and_query_equals_path_when_no_query() {
+        let mut c = ctx("", "", "");
+        c.path = "/api/v1";
+        c.path_and_query = "/api/v1";
+        assert_eq!(
+            Template::parse("{path_and_query}").render(&c),
+            "/api/v1"
+        );
+    }
+
+    #[test]
+    fn template_redirect_target_http_to_https() {
+        let mut c = ctx("", "", "");
+        c.host = "example.com";
+        c.path_and_query = "/docs?v=2";
+        let t = Template::parse("https://{host}{path_and_query}");
+        assert_eq!(t.render(&c), "https://example.com/docs?v=2");
     }
 }

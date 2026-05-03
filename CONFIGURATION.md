@@ -734,15 +734,17 @@ Operations are applied in declaration order.
 Value strings can contain `{variable}` placeholders that are replaced at
 request time. Unrecognised placeholders are passed through unchanged.
 
-| Variable      | Value |
-|---------------|-------|
-| `{client_ip}` | Client IPv4 or IPv6 address |
-| `{username}`  | Authenticated username; empty string if the request is anonymous |
-| `{groups}`    | Authenticated user's groups, comma-joined; empty string if anonymous |
-| `{method}`    | HTTP request method (`GET`, `POST`, ...) |
-| `{path}`      | Request URI path |
-| `{host}`      | Value of the `Host` request header |
-| `{scheme}`    | `"https"` for TLS listeners, `"http"` for plain listeners |
+| Variable           | Value |
+|--------------------|-------|
+| `{client_ip}`      | Client IPv4 or IPv6 address |
+| `{username}`       | Authenticated username; empty string if the request is anonymous |
+| `{groups}`         | Authenticated user's groups, comma-joined; empty string if anonymous |
+| `{method}`         | HTTP request method (`GET`, `POST`, ...) |
+| `{path}`           | Request URI path (without query string) |
+| `{query}`          | Query string without the leading `?`; empty string if absent |
+| `{path_and_query}` | Request path plus query string, e.g. `/api/v1?foo=bar`; equals the path when there is no query |
+| `{host}`           | Value of the `Host` request header |
+| `{scheme}`         | `"https"` for TLS listeners, `"http"` for plain listeners |
 
 A fallback value can be specified with `{variable|default}`: if the variable
 resolves to an empty string, `default` is used instead.
@@ -925,8 +927,23 @@ location "/old/" {
 
 | Child node | Type         | Default | Description |
 |------------|--------------|---------|-------------|
-| `to`       | URL or path  | --      | **Required.** Destination written to the `Location` header. |
+| `to`       | URL or path  | --      | **Required.** Destination written to the `Location` header. Supports [template variables](#header-template-variables). |
 | `code`     | integer      | `301`   | HTTP status code: `301` (permanent) or `302` (temporary). |
+
+The `to` value supports the same `{variable}` placeholders as header rules.
+This makes it possible to build the destination from the incoming request:
+
+```kdl
+// Redirect all HTTP traffic to HTTPS, preserving path and query string.
+// ACME challenge paths and health endpoints are answered before routing
+// and are not affected by this location.
+location "/" {
+    redirect {
+        to   "https://{host}{path_and_query}"
+        code 301
+    }
+}
+```
 
 ### `status` -- built-in status page
 
