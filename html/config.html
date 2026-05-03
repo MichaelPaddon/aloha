@@ -403,6 +403,7 @@
     <div class="nav-section">
       <div class="nav-heading">Reference</div>
       <ul class="nav-list">
+        <li><a href="#error-pages">Custom error pages</a></li>
         <li><a href="#compression">Response compression</a></li>
         <li><a href="#example">Full example</a></li>
       </ul>
@@ -523,6 +524,22 @@
               <td><span class="badge badge-opt">optional</span>
                   Global TLS defaults inherited by every TLS listener.
                   See <a href="#tls-options">TLS protocol options</a>.</td>
+            </tr>
+            <tr>
+              <td>access-policy</td><td>block</td><td>--</td>
+              <td><span class="badge badge-opt">optional</span>
+                  Named, reusable access policy block. Repeatable; each takes a
+                  name as its first argument. Referenced from <code>access</code>
+                  blocks via <code>apply "name"</code>. See
+                  <a href="#access-control">Access control</a>.</td>
+            </tr>
+            <tr>
+              <td>error-page</td><td>--</td><td>--</td>
+              <td><span class="badge badge-opt">optional</span>
+                  Custom HTML body for an error status code. Repeatable. Takes
+                  the status code as first argument, then either a file path or
+                  <code>html="..."</code>. See
+                  <a href="#error-pages">Custom error pages</a>.</td>
             </tr>
           </tbody>
         </table>
@@ -657,9 +674,10 @@
                   IP/country firewall rules. Same syntax as
                   <a href="#access-control">access control</a> for
                   <code>location</code> blocks, but only <code>ip</code> and
-                  <code>country</code> conditions are supported (<code>user</code>,
-                  <code>group</code>, and <code>authenticated</code> require HTTP
-                  authentication and are rejected at parse time).
+                  <code>country</code> conditions are supported. Identity
+                  conditions (<code>user</code>, <code>group</code>,
+                  <code>authenticated</code>) are rejected at startup, as are
+                  <code>apply</code> references to policies that contain them.
                   Denied connections are closed silently; redirect rules are
                   treated as deny.</td>
             </tr>
@@ -1611,87 +1629,88 @@
     <section id="access-control">
       <h2>Access control</h2>
       <p>
-        An <code>access</code> block enforces firewall-style allow/deny rules
-        based on client IP and, for HTTP locations, authenticated identity.
-        Rules are evaluated top to bottom; the first matching rule wins. If no
-        rule matches, the request (or connection) is denied with 403.
+        An <code>access</code> block contains a sequence of statements evaluated
+        top to bottom. Each statement either terminates the decision immediately
+        or passes control to the next statement. If the block falls through
+        without a terminal decision, the request is denied (403 for
+        IP/country-only blocks, 401 for blocks containing identity conditions).
       </p>
       <p>
         Access blocks are supported in two places:
       </p>
       <ul>
         <li>Inside a <code>location</code> block &mdash; all conditions are
-            available, including identity-based ones that require HTTP
-            authentication.</li>
+            available.</li>
         <li>Inside a <code>tcp-proxy</code> block &mdash; only <code>ip</code>
             and <code>country</code> conditions are supported. Identity
-            conditions (<code>user</code>, <code>group</code>,
-            <code>authenticated</code>) are rejected at parse time because TCP
-            proxies have no HTTP authentication layer. Denied connections are
-            closed silently; <code>redirect</code> rules are treated as deny.</li>
+            conditions are rejected at startup. Denied connections are closed
+            silently; <code>redirect</code> is treated as deny.</li>
       </ul>
-<pre><code><span class="kw">location</span> <span class="str">"/admin/"</span> {
-    <span class="kw">access</span> {
-        <span class="kw">allow</span> { <span class="kw">ip</span> <span class="str">"10.0.0.0/8"</span>; <span class="kw">group</span> <span class="str">"admin"</span> }
-        <span class="kw">deny</span>  <span class="prop">code=</span><span class="num">403</span>
-    }
-    <span class="kw">static</span> { <span class="kw">root</span> <span class="str">"/var/www/admin"</span> }
-}</code></pre>
-      <p>
-        Each rule is one of <code>allow</code>, <code>deny</code>, or
-        <code>redirect</code>. The child nodes inside a rule are the conditions
-        that must hold for the rule to fire.
-      </p>
+
+      <h3>Statement types</h3>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Rule node</th><th>Properties</th><th>Description</th></tr></thead>
+          <thead><tr><th>Statement</th><th>Properties</th><th>Description</th></tr></thead>
           <tbody>
             <tr>
               <td>allow</td><td>--</td>
-              <td>Grant access.</td>
+              <td><strong>Terminal allow.</strong> Immediately permits the
+                  request. Propagates through <code>apply</code> frames —
+                  <code>allow</code> inside a named block always terminates.</td>
             </tr>
             <tr>
               <td>deny</td><td><code>code=N</code> (default 403)</td>
-              <td>Deny with the given HTTP status code. Use
-                  <code>code=401</code> together with an <code>auth</code>
-                  block to issue a Basic auth challenge.</td>
+              <td><strong>Terminal deny.</strong> Immediately rejects with the
+                  given status. Use <code>code=401</code> with an
+                  <code>auth</code> block to issue a Basic auth challenge. The
+                  implicit fall-through default is 401 when the block has
+                  identity conditions, 403 otherwise.</td>
+            </tr>
+            <tr>
+              <td>pass</td><td>--</td>
+              <td><strong>Non-terminal exit.</strong> Exits the current block
+                  successfully; the calling block continues. Useful for filter
+                  policies that should not issue a final decision themselves.</td>
             </tr>
             <tr>
               <td>redirect</td>
               <td><code>to="..."</code>, <code>code=N</code> (default 302)</td>
-              <td>Redirect to the given URL. Useful for sending
-                  unauthenticated users to a login page.
-                  Not available in <code>tcp-proxy</code> blocks.</td>
+              <td><strong>Terminal redirect.</strong> Not available in
+                  <code>tcp-proxy</code> blocks.</td>
+            </tr>
+            <tr>
+              <td>apply</td><td><code>"policy-name"</code></td>
+              <td>Evaluate a <a href="#named-policies">named policy</a>.
+                  Terminal outcomes propagate up immediately; <code>pass</code>
+                  or fall-through continues in the calling block.</td>
             </tr>
           </tbody>
         </table>
       </div>
       <p>
-        A rule with no conditions is a catch-all that always matches.
+        A statement with no conditions is a catch-all that always matches.
       </p>
+
+      <h3>Conditions</h3>
       <p>
-        Conditions inside a rule are <strong>AND-ed</strong> across types: all
-        condition types present must match. Within the same type, conditions are
-        <strong>OR-ed</strong>: any one match suffices.
+        Conditions are specified as child nodes inside the statement block.
+        They are <strong>AND-ed</strong> across types and <strong>OR-ed</strong>
+        within the same type.
       </p>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Condition</th><th>Argument</th><th>Supported in</th><th>Description</th></tr></thead>
+          <thead><tr><th>Condition</th><th>Argument(s)</th><th>Supported in</th><th>Description</th></tr></thead>
           <tbody>
             <tr>
               <td>ip</td><td>CIDR or IP</td><td>location, tcp-proxy</td>
-              <td>Client IP address or range. <code>10.0.0.0/8</code>,
-                  <code>192.168.1.1</code>, <code>::1</code> are all valid.
-                  IPv4-mapped IPv6 addresses are normalised automatically.
-                  Repeatable &mdash; multiple entries are OR-ed.</td>
+              <td>Client address or range. Repeatable — multiple entries OR.
+                  IPv4-mapped IPv6 addresses are normalised automatically.</td>
             </tr>
             <tr>
               <td>country</td><td>code …</td><td>location, tcp-proxy</td>
-              <td>ISO 3166-1 alpha-2 country code(s), e.g. <code>"US"</code>.
-                  Requires <code>server { geoip { db ... } }</code>. Multiple
-                  codes on one node are OR-ed. Private/reserved IPs have no
-                  country and never match.
-                  See <a href="#geoip">GeoIP</a>.</td>
+              <td>ISO 3166-1 alpha-2 code(s). Multiple arguments OR. Requires
+                  <code>server { geoip { db ... } }</code>. Private IPs never
+                  match. See <a href="#geoip">GeoIP</a>.</td>
             </tr>
             <tr>
               <td>authenticated</td><td>--</td><td>location only</td>
@@ -1699,21 +1718,63 @@
             </tr>
             <tr>
               <td>user</td><td>username</td><td>location only</td>
-              <td>A specific authenticated username. Repeatable.</td>
+              <td>Specific authenticated username. Repeatable.</td>
             </tr>
             <tr>
               <td>group</td><td>group name</td><td>location only</td>
-              <td>The authenticated user is a member of this group. Repeatable.</td>
+              <td>Authenticated user is a member of this group. Repeatable.</td>
             </tr>
           </tbody>
         </table>
       </div>
-      <p><strong>Examples:</strong></p>
-<pre><code><span class="cm">// Require authentication (401 challenge), allow only staff group</span>
-<span class="kw">auth</span> { <span class="kw">realm</span> <span class="str">"Staff Portal"</span> }
+      <p>
+        Authentication is <strong>lazy</strong> — the auth back-end is only
+        called when an identity condition is actually evaluated. If an IP or
+        country check fails first, no authentication happens.
+      </p>
+
+      <h3 id="named-policies">Named access policies</h3>
+      <p>
+        Define reusable policy blocks in the <code>server</code> block and
+        reference them with <code>apply</code>:
+      </p>
+<pre><code><span class="kw">server</span> {
+    <span class="kw">access-policy</span> <span class="str">"geo-filter"</span> {
+        <span class="kw">pass</span>  { <span class="kw">country</span> <span class="str">"US"</span> <span class="str">"CA"</span> <span class="str">"GB"</span> }
+        <span class="kw">deny</span>  <span class="prop">code=</span><span class="num">403</span>
+    }
+
+    <span class="kw">access-policy</span> <span class="str">"require-auth"</span> {
+        <span class="kw">pass</span>  { <span class="kw">authenticated</span> }
+        <span class="kw">deny</span>              <span class="cm">// → 401 (identity block default)</span>
+    }
+
+    <span class="kw">access-policy</span> <span class="str">"admin-only"</span> {
+        <span class="kw">allow</span> { <span class="kw">group</span> <span class="str">"admin"</span> }
+        <span class="kw">deny</span>  <span class="prop">code=</span><span class="num">403</span>
+    }
+}</code></pre>
+      <p>
+        Use <code>pass</code> to make a policy a filter — it exits the block
+        successfully when conditions match, letting the caller continue.
+        <code>allow</code> always terminates immediately.
+      </p>
+<pre><code><span class="kw">location</span> <span class="str">"/admin/"</span> {
+    <span class="kw">access</span> {
+        <span class="kw">apply</span> <span class="str">"geo-filter"</span>    <span class="cm">// deny 403 → stop; pass → continue</span>
+        <span class="kw">apply</span> <span class="str">"require-auth"</span>  <span class="cm">// deny 401 → stop; pass → continue</span>
+        <span class="kw">apply</span> <span class="str">"admin-only"</span>    <span class="cm">// allow → terminal; deny → stop</span>
+    }
+    <span class="kw">static</span> { <span class="kw">root</span> <span class="str">"/var/www/admin"</span> }
+}</code></pre>
+
+      <p><strong>More examples:</strong></p>
+<pre><code><span class="cm">// Country AND auth (auth only called for matching countries)</span>
 <span class="kw">access</span> {
-    <span class="kw">allow</span> { <span class="kw">group</span> <span class="str">"staff"</span> }
-    <span class="kw">deny</span>  <span class="prop">code=</span><span class="num">401</span>
+    <span class="kw">pass</span>  { <span class="kw">country</span> <span class="str">"US"</span> <span class="str">"CA"</span> }
+    <span class="kw">deny</span>  <span class="prop">code=</span><span class="num">403</span>
+    <span class="kw">allow</span> { <span class="kw">authenticated</span> }
+    <span class="kw">deny</span>                   <span class="cm">// → 401</span>
 }
 
 <span class="cm">// Allow internal IPs without auth, require auth for external</span>
@@ -1737,6 +1798,48 @@
         <span class="kw">deny</span>  <span class="prop">code=</span><span class="num">403</span>
     }
 }</code></pre>
+    </section>
+
+    <hr class="divider">
+
+    <!-- Custom error pages -->
+    <section id="error-pages">
+      <h2>Custom error pages</h2>
+      <p>
+        Override the default <code>&lt;h1&gt;N&lt;/h1&gt;</code> response body
+        for any HTTP error status code. Define error pages in the
+        <code>server</code> block; they apply to all error responses generated
+        by access policy denials.
+      </p>
+<pre><code><span class="kw">server</span> {
+    <span class="kw">error-page</span> <span class="num">403</span> <span class="str">"/var/www/errors/403.html"</span>
+    <span class="kw">error-page</span> <span class="num">401</span> <span class="prop">html=</span><span class="str">"&lt;h1&gt;Authentication Required&lt;/h1&gt;"</span>
+    <span class="kw">error-page</span> <span class="num">404</span> <span class="str">"/var/www/errors/404.html"</span>
+}</code></pre>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Syntax</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><code>error-page N "path"</code></td>
+              <td>Read HTML from this file on every error response. The file is
+                  read from disk each time, so updates take effect without
+                  restarting aloha.</td>
+            </tr>
+            <tr>
+              <td><code>error-page N html="..."</code></td>
+              <td>Use this literal HTML string as the response body.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        The <code>Content-Type</code> is always
+        <code>text/html; charset=utf-8</code>. The error page replaces only the
+        body; the status code and headers (e.g. <code>WWW-Authenticate</code>
+        for 401 responses) are set normally. If the file is missing or
+        unreadable, aloha falls back to the default minimal body.
+      </p>
     </section>
 
     <hr class="divider">
@@ -1786,6 +1889,26 @@ Vary: Accept-Encoding</code></pre>
     <span class="kw">auth</span> <span class="str">"pam"</span> {
         <span class="kw">service</span> <span class="str">"login"</span>
     }
+
+    <span class="cm">// Reusable access policies</span>
+    <span class="kw">access-policy</span> <span class="str">"internal-only"</span> {
+        <span class="kw">pass</span>  { <span class="kw">ip</span> <span class="str">"10.0.0.0/8"</span> }
+        <span class="kw">deny</span>  <span class="prop">code=</span><span class="num">403</span>
+    }
+
+    <span class="kw">access-policy</span> <span class="str">"require-auth"</span> {
+        <span class="kw">pass</span>  { <span class="kw">authenticated</span> }
+        <span class="kw">deny</span>      <span class="cm">// → 401 (identity block default)</span>
+    }
+
+    <span class="kw">access-policy</span> <span class="str">"require-admin"</span> {
+        <span class="kw">allow</span> { <span class="kw">group</span> <span class="str">"admin"</span> }
+        <span class="kw">deny</span>  <span class="prop">code=</span><span class="num">403</span>
+    }
+
+    <span class="cm">// Custom error pages</span>
+    <span class="kw">error-page</span> <span class="num">403</span> <span class="str">"/var/www/errors/403.html"</span>
+    <span class="kw">error-page</span> <span class="num">401</span> <span class="prop">html=</span><span class="str">"&lt;h1&gt;Authentication Required&lt;/h1&gt;"</span>
 }
 
 <span class="cm">// Plain HTTP -- required for ACME HTTP-01 challenges</span>
@@ -1815,33 +1938,42 @@ Vary: Accept-Encoding</code></pre>
     <span class="kw">tcp-proxy</span> {
         <span class="kw">upstream</span>       <span class="str">"db.internal:5432"</span>
         <span class="kw">proxy-protocol</span> <span class="str">"v2"</span>
+        <span class="kw">access</span> {
+            <span class="kw">allow</span> { <span class="kw">ip</span> <span class="str">"10.0.0.0/8"</span> }
+            <span class="kw">deny</span>  <span class="prop">code=</span><span class="num">403</span>
+        }
     }
 }
 
 <span class="kw">vhost</span> <span class="str">"example.com"</span> {
     <span class="kw">alias</span> <span class="str">"www.example.com"</span>
 
-    <span class="cm">// Status page -- internal access only</span>
+    <span class="cm">// Status page -- internal network only</span>
     <span class="kw">location</span> <span class="str">"/status"</span> {
         <span class="kw">access</span> {
-            <span class="kw">allow</span> { <span class="kw">ip</span> <span class="str">"10.0.0.0/8"</span> }
-            <span class="kw">deny</span>  <span class="prop">code=</span><span class="num">403</span>
+            <span class="kw">apply</span> <span class="str">"internal-only"</span>
+            <span class="kw">allow</span>
         }
         <span class="kw">status</span>
     }
 
-    <span class="cm">// Admin area -- requires auth and group membership</span>
+    <span class="cm">// Admin area -- internal AND authenticated admin</span>
     <span class="kw">location</span> <span class="str">"/admin/"</span> {
-        <span class="kw">auth</span> { <span class="kw">realm</span> <span class="str">"Admin"</span> }
+        <span class="kw">auth</span> {
+            <span class="kw">realm</span> <span class="str">"Admin"</span>
+        }
         <span class="kw">access</span> {
-            <span class="kw">allow</span> { <span class="kw">group</span> <span class="str">"admin"</span> }
-            <span class="kw">deny</span>  <span class="prop">code=</span><span class="num">401</span>
+            <span class="kw">apply</span> <span class="str">"internal-only"</span>   <span class="cm">// 403 if external</span>
+            <span class="kw">apply</span> <span class="str">"require-auth"</span>    <span class="cm">// 401 if unauthenticated</span>
+            <span class="kw">apply</span> <span class="str">"require-admin"</span>   <span class="cm">// 403 if not admin group</span>
         }
         <span class="kw">request-headers</span> {
             <span class="kw">set</span> <span class="str">"X-Auth-User"</span>   <span class="str">"{username}"</span>
             <span class="kw">set</span> <span class="str">"X-Auth-Groups"</span> <span class="str">"{groups}"</span>
         }
-        <span class="kw">proxy</span> { <span class="kw">upstream</span> <span class="str">"http://127.0.0.1:3000"</span> }
+        <span class="kw">proxy</span> {
+            <span class="kw">upstream</span> <span class="str">"http://127.0.0.1:3000"</span>
+        }
     }
 
     <span class="cm">// API -- inject client info, enforce security headers</span>
@@ -1876,7 +2008,10 @@ Vary: Accept-Encoding</code></pre>
 
     <span class="cm">// Old URL redirect</span>
     <span class="kw">location</span> <span class="str">"/old/"</span> {
-        <span class="kw">redirect</span> { <span class="kw">to</span> <span class="str">"/new/"</span>; <span class="kw">code</span> <span class="num">301</span> }
+        <span class="kw">redirect</span> {
+            <span class="kw">to</span>   <span class="str">"/new/"</span>
+            <span class="kw">code</span> <span class="num">301</span>
+        }
     }
 
     <span class="cm">// Static files</span>
@@ -1891,7 +2026,9 @@ Vary: Accept-Encoding</code></pre>
 <span class="cm">// Wildcard subdomain -- regex match</span>
 <span class="kw">vhost</span> <span class="str">"~.+\.example\.com"</span> {
     <span class="kw">location</span> <span class="str">"/"</span> {
-        <span class="kw">static</span> { <span class="kw">root</span> <span class="str">"/var/www/wildcard"</span> }
+        <span class="kw">static</span> {
+            <span class="kw">root</span> <span class="str">"/var/www/wildcard"</span>
+        }
     }
 }</code></pre>
     </section>

@@ -50,14 +50,16 @@ server {
 }
 ```
 
-| Child node  | Type    | Default              | Description |
-|-------------|---------|----------------------|-------------|
-| `state-dir` | path    | --                   | Directory for persistent runtime state: ACME account keys and issued certificates. Required when any listener uses `tls "acme"`. |
-| `user`      | string  | --                   | Unix username to switch to after all sockets are bound. Only effective when started as root; silently ignored otherwise. |
-| `group`     | string  | user's primary group | Unix group to switch to. Defaults to the primary GID of `user` from `/etc/passwd`. |
-| `auth`      | block   | --                   | Authentication back-end. See [Authentication](#authentication). |
-| `geoip`     | block   | --                   | GeoIP database for country-based access control. See [GeoIP](#geoip). |
-| `tls`       | block   | --                   | Global TLS defaults inherited by every TLS listener. See [TLS protocol options](#tls-protocol-options). |
+| Child node       | Type    | Default              | Description |
+|------------------|---------|----------------------|-------------|
+| `state-dir`      | path    | --                   | Directory for persistent runtime state: ACME account keys and issued certificates. Required when any listener uses `tls "acme"`. |
+| `user`           | string  | --                   | Unix username to switch to after all sockets are bound. Only effective when started as root; silently ignored otherwise. |
+| `group`          | string  | user's primary group | Unix group to switch to. Defaults to the primary GID of `user` from `/etc/passwd`. |
+| `auth`           | block   | --                   | Authentication back-end. See [Authentication](#authentication). |
+| `geoip`          | block   | --                   | GeoIP database for country-based access control. See [GeoIP](#geoip). |
+| `tls`            | block   | --                   | Global TLS defaults inherited by every TLS listener. See [TLS protocol options](#tls-protocol-options). |
+| `access-policy`  | block   | --                   | Named, reusable access policy block. Repeatable; each takes a name argument. Referenced from `access` blocks via `apply "name"`. See [Access control](#access-control). |
+| `error-page`     | --      | --                   | Custom HTML body for an error status code. Takes the code as a positional argument plus either a file path or `html="..."`. See [Custom error pages](#custom-error-pages). |
 
 ### Privilege drop
 
@@ -145,7 +147,7 @@ listener {
 |------------------|------------------|---------|-------------|
 | `upstream`       | `"host:port"`    | --      | **Required.** Address to forward connections to. |
 | `proxy-protocol` | `"v1"` \| `"v2"` | --      | Send a HAProxy PROXY protocol header to the upstream so it can see the real client IP. `"v1"` is text; `"v2"` is binary and preferred. |
-| `access`         | block            | --      | IP/country firewall rules. Same syntax as [Access control](#access-control) for `location` blocks, but only `ip` and `country` conditions are supported. Identity conditions (`user`, `group`, `authenticated`) require HTTP authentication and are rejected at parse time. Denied connections are closed silently; `redirect` rules are treated as deny. |
+| `access`         | block            | --      | IP/country firewall rules. Same syntax as [Access control](#access-control) for `location` blocks, but only `ip` and `country` conditions are supported. Identity conditions (`user`, `group`, `authenticated`) require HTTP authentication and are rejected at parse time (and `apply` referencing a policy that contains them is rejected at startup). Denied connections are closed silently; `redirect` rules are treated as deny. |
 
 A config consisting entirely of `tcp-proxy` listeners is valid with no
 `vhost` at all.
@@ -470,56 +472,93 @@ In addition to a handler, a location can carry:
 
 ## Access control
 
-An `access` block enforces firewall-style allow/deny rules based on client IP
-and, for HTTP locations, authenticated identity. Rules are evaluated top to
-bottom; the first matching rule wins. If no rule matches, the request (or
-connection) is denied with 403.
+An `access` block contains a sequence of statements evaluated top to bottom.
+Each statement either terminates the decision immediately or passes control to
+the next statement. If the block falls through without a terminal decision, the
+request is denied with a default code (403 for IP/country-only blocks, 401 for
+blocks that contain identity conditions).
 
 Access blocks are supported in two places:
 
-- Inside a **`location`** block -- all conditions are available, including
+- Inside a **`location`** block — all conditions are available, including
   identity-based ones that require HTTP authentication.
-- Inside a **`tcp-proxy`** block -- only `ip` and `country` conditions are
-  supported. Identity conditions (`user`, `group`, `authenticated`) are
-  rejected at parse time because TCP proxies have no HTTP authentication
-  layer. Denied connections are closed silently; `redirect` rules are treated
-  as deny.
+- Inside a **`tcp-proxy`** block — only `ip` and `country` conditions are
+  supported. Identity conditions are rejected at startup. Denied connections
+  are closed silently; `redirect` rules are treated as deny.
+
+### Statement types
+
+| Statement  | Properties                           | Description |
+|------------|--------------------------------------|-------------|
+| `allow`    | --                                   | **Terminal allow.** Immediately permits the request. Propagates through `apply` frames — `allow` inside a named block always terminates. |
+| `deny`     | `code=N` (default 403)               | **Terminal deny.** Immediately rejects with the given status. Use `code=401` with an `auth` block to issue a Basic auth challenge. The implicit fall-through default is 401 when the block contains identity conditions, 403 otherwise. |
+| `pass`     | --                                   | **Non-terminal exit.** Exits the current block successfully; the calling block continues with its next statement. Useful for "filter" policies that should not themselves issue a final decision. |
+| `redirect` | `to="..."`, `code=N` (default 302)   | **Terminal redirect.** Not available in `tcp-proxy` blocks. |
+| `apply`    | `"policy-name"`                      | Evaluate a [named policy](#named-access-policies). Terminal outcomes (`allow`, `deny`, `redirect`) propagate up immediately; `pass` or fall-through continues in the calling block. |
+
+A statement with no conditions is a catch-all that always matches.
+
+### Conditions
+
+Conditions are specified as child nodes inside the statement block. They are
+**AND-ed** across types and **OR-ed** within the same type.
+
+| Condition       | Argument(s)  | Supported in        | Description |
+|-----------------|--------------|---------------------|-------------|
+| `ip`            | CIDR or IP   | location, tcp-proxy | Client address or range. Repeatable — multiple entries OR. IPv4-mapped IPv6 addresses are normalised. |
+| `country`       | code …       | location, tcp-proxy | ISO 3166-1 alpha-2 code(s). Multiple arguments OR. Requires `server { geoip { ... } }`. Private IPs never match. |
+| `authenticated` | --           | location only       | Any authenticated (non-anonymous) user. |
+| `user`          | username     | location only       | Specific authenticated username. Repeatable. |
+| `group`         | group name   | location only       | Authenticated user is a member of this group. Repeatable. |
+
+Authentication is **lazy** — the auth back-end is only called when an identity
+condition is actually evaluated. If an IP or country check fails first, no
+authentication happens for that request.
+
+### Named access policies
+
+Define reusable policy blocks in the `server` block and reference them with
+`apply` from any `access` block or other policy:
+
+```kdl
+server {
+    access-policy "geo-filter" {
+        pass { country "US" "CA" "GB" }
+        deny  code=403
+    }
+
+    access-policy "require-auth" {
+        pass  { authenticated }
+        deny              // → 401 (block has identity condition)
+    }
+
+    access-policy "admin-only" {
+        allow { group "admin" }
+        deny  code=403
+    }
+}
+```
+
+The `pass` action marks a policy as a "filter": it exits the block
+successfully when its conditions match, letting the calling block proceed.
+`allow` exits terminally (the whole request is allowed immediately).
+
+Use named policies with `apply`:
 
 ```kdl
 location "/admin/" {
     access {
-        allow { ip "10.0.0.0/8"; group "admin" }
-        deny  code=403
+        apply "geo-filter"    // deny 403 → stop; pass → continue
+        apply "require-auth"  // deny 401 → stop; pass → continue
+        apply "admin-only"    // allow → terminal; deny 403 → stop
     }
     static { root "/var/www/admin" }
 }
 ```
 
-Each rule is one of `allow`, `deny`, or `redirect`. The child nodes inside a
-rule are the conditions that must hold for the rule to fire.
-
-### Rule types
-
-| Node       | Properties            | Description |
-|------------|-----------------------|-------------|
-| `allow`    | --                    | Grant access. |
-| `deny`     | `code=N` (default 403)| Deny with the given HTTP status code. Use `code=401` together with an `auth` block to issue a Basic auth challenge. |
-| `redirect` | `to="..."`, `code=N` (default 302) | Redirect to the given URL. Useful for sending unauthenticated users to a login page. Not available in `tcp-proxy` blocks. |
-
-A rule with no conditions is a catch-all that always matches.
-
-### Conditions
-
-Conditions inside a rule are **AND**-ed across types: all types present must
-match. Within the same type, conditions are **OR**-ed: any one match suffices.
-
-| Condition       | Argument     | Supported in            | Description |
-|-----------------|--------------|-------------------------|-------------|
-| `ip`            | CIDR or IP   | location, tcp-proxy     | Client IP address or range. `10.0.0.0/8`, `192.168.1.1`, `::1` are all valid. IPv4-mapped IPv6 addresses are normalised automatically. Repeatable -- multiple `ip` entries are OR-ed. |
-| `country`       | code …       | location, tcp-proxy     | ISO 3166-1 alpha-2 country code(s), e.g. `"US"`. Requires `server { geoip { db ... } }`. Repeatable. Private/reserved IPs have no country and never match. See [GeoIP](#geoip). |
-| `authenticated` | --           | location only           | Any authenticated (non-anonymous) user. |
-| `user`          | username     | location only           | A specific authenticated username. Repeatable. |
-| `group`         | group name   | location only           | The authenticated user is a member of this group. Repeatable. |
+Policies can only be defined at the server level and used in any location or
+tcp-proxy in the config. Circular references between policies are detected at
+startup.
 
 ### Examples
 
@@ -531,10 +570,31 @@ access {
 }
 ```
 
-Allow admin group from any IP, deny everyone else:
+Allow only a country AND require authentication (sequential checks — auth is
+never called for out-of-country requests):
 ```kdl
 access {
-    allow { group "admin" }
+    pass { country "US" "CA" "GB" }
+    deny  code=403              // non-matching country
+    allow { authenticated }
+    deny                        // → 401 (unauthenticated)
+}
+```
+
+Allow internal IPs without auth; require auth for external:
+```kdl
+access {
+    allow { ip "10.0.0.0/8" }
+    allow { authenticated }
+    deny  code=401
+}
+```
+
+Allow a country but block specific IPs within it:
+```kdl
+access {
+    deny  { ip "1.2.3.4/32" }        // block specific IPs first
+    allow { country "US" "CA" }
     deny  code=403
 }
 ```
@@ -546,7 +606,7 @@ auth {
 }
 access {
     allow { group "staff" }
-    deny  code=401   // triggers WWW-Authenticate challenge
+    deny  code=401
 }
 ```
 
@@ -558,16 +618,7 @@ access {
 }
 ```
 
-Allow internal IPs without auth, require auth for external:
-```kdl
-access {
-    allow { ip "10.0.0.0/8" }
-    allow { authenticated }
-    deny  code=401
-}
-```
-
-Restrict a TCP proxy port to a specific country (requires GeoIP):
+Restrict a TCP proxy to a specific country (requires GeoIP):
 ```kdl
 tcp-proxy {
     upstream "db.internal:5432"
@@ -577,6 +628,34 @@ tcp-proxy {
     }
 }
 ```
+
+---
+
+## Custom error pages
+
+Override the default `<h1>N</h1>` response body for any HTTP error status
+code. Define error pages in the `server` block; they apply to all error
+responses generated by access policy denials.
+
+```kdl
+server {
+    error-page 403 "/var/www/errors/403.html"
+    error-page 401 html="<h1>Authentication Required</h1><p>Please log in.</p>"
+    error-page 404 "/var/www/errors/404.html"
+}
+```
+
+| Syntax | Description |
+|--------|-------------|
+| `error-page N "path"` | Read HTML from this file on every error response. The file is read from disk each time, so updates take effect without restarting aloha. |
+| `error-page N html="..."` | Use this literal HTML string as the response body. |
+
+The `Content-Type` header is always `text/html; charset=utf-8`. The error
+page only replaces the body; the status code and any other headers (e.g.
+`WWW-Authenticate` for 401 responses) are set normally.
+
+If the file is missing or unreadable, aloha falls back to the default minimal
+body (`<h1>403 Forbidden</h1>` etc.) and logs a warning.
 
 ---
 
@@ -944,6 +1023,26 @@ server {
     auth "pam" {
         service "login"
     }
+
+    // Reusable access policies
+    access-policy "internal-only" {
+        pass { ip "10.0.0.0/8" }
+        deny  code=403
+    }
+
+    access-policy "require-auth" {
+        pass  { authenticated }
+        deny              // → 401 (identity block default)
+    }
+
+    access-policy "require-admin" {
+        allow { group "admin" }
+        deny  code=403
+    }
+
+    // Custom error pages
+    error-page 403 "/var/www/errors/403.html"
+    error-page 401 html="<h1>Authentication Required</h1>"
 }
 
 // Plain HTTP -- required for ACME HTTP-01 challenges
@@ -973,6 +1072,10 @@ listener {
     tcp-proxy {
         upstream       "db.internal:5432"
         proxy-protocol "v2"
+        access {
+            allow { ip "10.0.0.0/8" }
+            deny  code=403
+        }
     }
 }
 
@@ -980,30 +1083,32 @@ listener {
 vhost "example.com" {
     alias "www.example.com"
 
-    // Status page -- internal access only
+    // Status page -- internal network only
     location "/status" {
         access {
-            allow { ip "10.0.0.0/8" }
-            deny  code=403
+            apply "internal-only"
+            allow
         }
         status
     }
 
-    // Admin area -- requires auth and group membership
+    // Admin area -- internal network AND authenticated admin
     location "/admin/" {
         auth {
             realm "Admin"
         }
         access {
-            allow { group "admin" }
-            deny  code=401
+            apply "internal-only"   // 403 if external
+            apply "require-auth"    // 401 if not authenticated
+            apply "require-admin"   // 403 if not in admin group
         }
-        // Pass identity to the backend
         request-headers {
             set "X-Auth-User"   "{username}"
             set "X-Auth-Groups" "{groups}"
         }
-        proxy { upstream "http://127.0.0.1:3000" }
+        proxy {
+            upstream "http://127.0.0.1:3000"
+        }
     }
 
     // API -- inject client info, strip auth header
@@ -1038,7 +1143,10 @@ vhost "example.com" {
 
     // Old URL redirect
     location "/old/" {
-        redirect { to "/new/"; code 301 }
+        redirect {
+            to   "/new/"
+            code 301
+        }
     }
 
     // Static files
@@ -1053,7 +1161,9 @@ vhost "example.com" {
 // Wildcard subdomain -- regex match
 vhost "~.+\.example\.com" {
     location "/" {
-        static { root "/var/www/wildcard" }
+        static {
+            root "/var/www/wildcard"
+        }
     }
 }
 ```

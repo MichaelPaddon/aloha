@@ -4,14 +4,18 @@
 // regex patterns in config order, then the listener default.  Within
 // a vhost, the longest matching location prefix wins.
 
-use crate::access::AccessPolicy;
+use crate::access::{
+    AccessBlock, AccessCondition, AccessStatement,
+};
 use crate::config::{
-    BasicAuthConfig, Config, HeaderOpConfig, ListenerConfig, VHostConfig,
+    AccessStatementDef, BasicAuthConfig, Config, HeaderOpConfig,
+    ListenerConfig, VHostConfig,
 };
 use crate::handler::Handler;
 use crate::handler::status::ServerSummary;
 use crate::headers::{HeaderOp, HeaderRules, Template};
 use crate::metrics::Metrics;
+use anyhow::bail;
 use hyper::header::HeaderName;
 use hyper::Request;
 use hyper::body::Incoming;
@@ -22,7 +26,7 @@ use std::sync::Arc;
 pub struct Route {
     pub handler: Arc<Handler>,
     pub matched_prefix: String,
-    pub access_policy: Option<Arc<AccessPolicy>>,
+    pub access_policy: Option<Arc<AccessBlock>>,
     pub basic_auth: Option<Arc<BasicAuthConfig>>,
     pub header_rules: Option<Arc<HeaderRules>>,
 }
@@ -35,7 +39,7 @@ struct VHost {
 struct Location {
     path: String,
     handler: Arc<Handler>,
-    access_policy: Option<Arc<AccessPolicy>>,
+    access_policy: Option<Arc<AccessBlock>>,
     basic_auth: Option<Arc<BasicAuthConfig>>,
     header_rules: Option<Arc<HeaderRules>>,
 }
@@ -48,6 +52,8 @@ pub struct Router {
     patterns: Vec<(Regex, Arc<VHost>)>,
     // Maps each listener's local name to its default vhost (if any).
     defaults: HashMap<String, Option<Arc<VHost>>>,
+    // Pre-resolved named access-policy blocks.
+    named_blocks: HashMap<String, Arc<AccessBlock>>,
 }
 
 impl Router {
@@ -57,6 +63,11 @@ impl Router {
         summary: &Arc<ServerSummary>,
         cert_state: Option<&crate::cert_state::SharedCertState>,
     ) -> anyhow::Result<Self> {
+        // Resolve all named access-policy blocks first; location blocks
+        // may reference them via `apply`.
+        let named_blocks =
+            resolve_named_blocks(&config.server.access_policies)?;
+
         let mut vhosts: HashMap<String, Arc<VHost>> = HashMap::new();
         let mut patterns: Vec<(Regex, Arc<VHost>)> = Vec::new();
         // Keyed by the raw config string, including the `~` prefix for
@@ -68,7 +79,7 @@ impl Router {
 
         for vcfg in &config.vhosts {
             let vhost = Arc::new(
-                build_vhost(vcfg, metrics, summary, cert_state)?
+                build_vhost(vcfg, metrics, summary, cert_state, &named_blocks)?
             );
 
             let all_names =
@@ -100,7 +111,7 @@ impl Router {
             })
             .collect();
 
-        Ok(Self { vhosts, patterns, defaults })
+        Ok(Self { vhosts, patterns, defaults, named_blocks })
     }
 
     pub fn route(
@@ -155,6 +166,164 @@ impl Router {
         }
         self.defaults.get(listener_bind).and_then(|v| v.clone())
     }
+
+    /// Resolve a list of AccessStatementDef into an AccessBlock using
+    /// the named policies in this router.  `tcp_only` rejects any
+    /// resolved block that contains identity conditions.
+    pub fn resolve_block(
+        &self,
+        defs: &[AccessStatementDef],
+        tcp_only: bool,
+    ) -> anyhow::Result<AccessBlock> {
+        let stmts = resolve_stmts_from_named(
+            defs, &self.named_blocks, tcp_only,
+        )?;
+        Ok(AccessBlock::new(stmts))
+    }
+}
+
+// -- Named block resolution ----------------------------------------
+
+// Resolve all named blocks, detecting circular references.
+fn resolve_named_blocks(
+    defs: &HashMap<String, Vec<AccessStatementDef>>,
+) -> anyhow::Result<HashMap<String, Arc<AccessBlock>>> {
+    let mut resolved: HashMap<String, Arc<AccessBlock>> = HashMap::new();
+    for name in defs.keys() {
+        let mut visiting = Vec::new();
+        resolve_one(name, defs, &mut resolved, &mut visiting)?;
+    }
+    Ok(resolved)
+}
+
+// Recursively resolve a named policy.  `resolved` is the cache of
+// already-resolved blocks; `visiting` is the current DFS path for
+// cycle detection.
+fn resolve_one(
+    name: &str,
+    defs: &HashMap<String, Vec<AccessStatementDef>>,
+    resolved: &mut HashMap<String, Arc<AccessBlock>>,
+    visiting: &mut Vec<String>,
+) -> anyhow::Result<Arc<AccessBlock>> {
+    if let Some(block) = resolved.get(name) {
+        return Ok(block.clone());
+    }
+    if visiting.iter().any(|v| v == name) {
+        bail!(
+            "circular reference in access-policy '{name}' (chain: {})",
+            visiting.join(" → ")
+        );
+    }
+    let stmts_def = defs.get(name).ok_or_else(|| {
+        anyhow::anyhow!("undefined access-policy '{name}'")
+    })?;
+    visiting.push(name.to_string());
+    let stmts = resolve_stmts_recursive(
+        stmts_def, defs, resolved, visiting, false,
+    )?;
+    visiting.pop();
+    let block = Arc::new(AccessBlock::new(stmts));
+    resolved.insert(name.to_string(), block.clone());
+    Ok(block)
+}
+
+// Resolve statements that may reference other named policies by name.
+// Used during named-block resolution; calls `resolve_one` recursively
+// for each Apply statement.
+fn resolve_stmts_recursive(
+    defs: &[AccessStatementDef],
+    raw_defs: &HashMap<String, Vec<AccessStatementDef>>,
+    resolved: &mut HashMap<String, Arc<AccessBlock>>,
+    visiting: &mut Vec<String>,
+    tcp_only: bool,
+) -> anyhow::Result<Vec<AccessStatement>> {
+    let mut result = Vec::with_capacity(defs.len());
+    for def in defs {
+        let stmt = match def {
+            AccessStatementDef::Rule { conditions, action } => {
+                check_tcp_conditions(conditions, tcp_only)?;
+                AccessStatement::Rule {
+                    conditions: conditions.clone(),
+                    action: action.clone(),
+                }
+            }
+            AccessStatementDef::Apply { name } => {
+                let block =
+                    resolve_one(name, raw_defs, resolved, visiting)?;
+                check_tcp_block(&block, name, tcp_only)?;
+                AccessStatement::Apply(block)
+            }
+        };
+        result.push(stmt);
+    }
+    Ok(result)
+}
+
+// Resolve statements that reference already-resolved named blocks.
+// Used for inline location blocks and Router::resolve_block().
+fn resolve_stmts_from_named(
+    defs: &[AccessStatementDef],
+    named: &HashMap<String, Arc<AccessBlock>>,
+    tcp_only: bool,
+) -> anyhow::Result<Vec<AccessStatement>> {
+    let mut result = Vec::with_capacity(defs.len());
+    for def in defs {
+        let stmt = match def {
+            AccessStatementDef::Rule { conditions, action } => {
+                check_tcp_conditions(conditions, tcp_only)?;
+                AccessStatement::Rule {
+                    conditions: conditions.clone(),
+                    action: action.clone(),
+                }
+            }
+            AccessStatementDef::Apply { name } => {
+                let block = named.get(name.as_str()).ok_or_else(|| {
+                    anyhow::anyhow!("undefined access-policy '{name}'")
+                })?;
+                check_tcp_block(block, name, tcp_only)?;
+                AccessStatement::Apply(block.clone())
+            }
+        };
+        result.push(stmt);
+    }
+    Ok(result)
+}
+
+fn check_tcp_conditions(
+    conditions: &[AccessCondition],
+    tcp_only: bool,
+) -> anyhow::Result<()> {
+    if !tcp_only {
+        return Ok(());
+    }
+    for cond in conditions {
+        if matches!(
+            cond,
+            AccessCondition::User(_)
+                | AccessCondition::Group(_)
+                | AccessCondition::Authenticated
+        ) {
+            bail!(
+                "access-policy used in a tcp-proxy context contains \
+                 identity conditions, which require HTTP authentication"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn check_tcp_block(
+    block: &AccessBlock,
+    name: &str,
+    tcp_only: bool,
+) -> anyhow::Result<()> {
+    if tcp_only && block.needs_auth {
+        bail!(
+            "access-policy '{name}' contains identity conditions and \
+             cannot be used in a tcp-proxy access block"
+        );
+    }
+    Ok(())
 }
 
 // Strip the port suffix from a Host header value.
@@ -173,6 +342,7 @@ fn build_vhost(
     metrics: &Arc<Metrics>,
     summary: &Arc<ServerSummary>,
     cert_state: Option<&crate::cert_state::SharedCertState>,
+    named_blocks: &HashMap<String, Arc<AccessBlock>>,
 ) -> anyhow::Result<VHost> {
     let mut locations = Vec::with_capacity(vcfg.locations.len());
     for loc in &vcfg.locations {
@@ -199,13 +369,18 @@ fn build_vhost(
                 .collect::<anyhow::Result<Vec<_>>>()?;
             Some(Arc::new(HeaderRules::new(req, resp)))
         };
+        let access_policy = if let Some(defs) = &loc.access {
+            let stmts =
+                resolve_stmts_from_named(defs, named_blocks, false)?;
+            Some(Arc::new(AccessBlock::new(stmts)))
+        } else {
+            None
+        };
         locations.push(Location {
             path: loc.path.clone(),
             handler,
-            access_policy: loc.access.as_ref()
-                .map(|p| Arc::new(p.clone())),
-            basic_auth: loc.auth.as_ref()
-                .map(|a| Arc::new(a.clone())),
+            access_policy,
+            basic_auth: loc.auth.as_ref().map(|a| Arc::new(a.clone())),
             header_rules,
         });
     }
@@ -278,7 +453,7 @@ mod tests {
         path: &str,
         bind: &str,
     ) -> Option<(
-        Option<Arc<AccessPolicy>>,
+        Option<Arc<AccessBlock>>,
         Option<Arc<BasicAuthConfig>>,
         Option<Arc<HeaderRules>>,
     )> {
@@ -926,5 +1101,92 @@ mod tests {
         let (_, auth, _) =
             route_meta(&router, "h", "/x/", "0.0.0.0:80").unwrap();
         assert_eq!(auth.unwrap().realm, "Restricted");
+    }
+
+    // -- named access-policy resolution ----------------------------
+
+    #[test]
+    fn named_policy_resolved_in_location() {
+        let config = make_config(
+            r#"
+            server {
+                access-policy "allow-all" {
+                    allow
+                }
+            }
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    access {
+                        apply "allow-all"
+                    }
+                    static { root "."; }
+                }
+            }
+            "#,
+        );
+        let router = make_router(&config);
+        let (policy, _, _) =
+            route_meta(&router, "h", "/", "0.0.0.0:80").unwrap();
+        // Resolved block contains one Apply statement.
+        let block = policy.unwrap();
+        assert_eq!(block.statements.len(), 1);
+        assert!(matches!(
+            &block.statements[0],
+            AccessStatement::Apply(_)
+        ));
+    }
+
+    #[test]
+    fn unknown_named_policy_in_location_is_error() {
+        let config_result = Config::parse(
+            r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    access {
+                        apply "does-not-exist"
+                    }
+                    static { root "."; }
+                }
+            }
+            "#,
+        );
+        // Parse succeeds (apply references not resolved at parse time).
+        if let Ok(config) = config_result {
+            let metrics = Arc::new(crate::metrics::Metrics::new());
+            let summary = Arc::new(
+                crate::handler::status::ServerSummary::from_config(&config)
+            );
+            let result = Router::new(&config, &metrics, &summary, None);
+            assert!(
+                result.is_err(),
+                "unknown policy reference should error at router build"
+            );
+        }
+    }
+
+    #[test]
+    fn circular_named_policy_is_error() {
+        use crate::config::AccessStatementDef;
+        // Manually create a config with a circular policy reference.
+        let mut policies = HashMap::new();
+        policies.insert(
+            "a".to_string(),
+            vec![AccessStatementDef::Apply { name: "b".to_string() }],
+        );
+        policies.insert(
+            "b".to_string(),
+            vec![AccessStatementDef::Apply { name: "a".to_string() }],
+        );
+        let result = resolve_named_blocks(&policies);
+        assert!(
+            result.is_err(),
+            "circular policy reference should be detected"
+        );
     }
 }

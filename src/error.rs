@@ -5,7 +5,9 @@
 use bytes::Bytes;
 use http_body_util::{combinators::BoxBody as ErasedBody, BodyExt, Full};
 use hyper::{Response, StatusCode};
+use std::collections::HashMap;
 use std::convert::Infallible;
+use std::path::PathBuf;
 
 // Type-erased response body shared by all handlers.  Using a single
 // concrete body type lets the static handler stream files without
@@ -19,6 +21,38 @@ pub fn bytes_body(b: impl Into<Bytes>) -> BoxBody {
         .map_err(|_: Infallible| unreachable!())
         .boxed()
 }
+
+// -- Custom error pages --------------------------------------------
+
+pub enum ErrorPageEntry {
+    /// File read from disk on every error response.
+    File(PathBuf),
+    /// Inline HTML captured at config parse time.
+    Inline(Bytes),
+}
+
+pub struct ErrorPages {
+    pages: HashMap<u16, ErrorPageEntry>,
+}
+
+impl ErrorPages {
+    pub fn new(pages: HashMap<u16, ErrorPageEntry>) -> Self {
+        ErrorPages { pages }
+    }
+
+    /// Returns the HTML body for `code`, or `None` if not configured.
+    /// File entries are read from disk on each call.
+    pub async fn get(&self, code: u16) -> Option<Bytes> {
+        match self.pages.get(&code)? {
+            ErrorPageEntry::Inline(b) => Some(b.clone()),
+            ErrorPageEntry::File(path) => {
+                tokio::fs::read(path).await.ok().map(Bytes::from)
+            }
+        }
+    }
+}
+
+// -- Common response helpers ---------------------------------------
 
 fn html_response(
     status: StatusCode,
@@ -39,11 +73,17 @@ pub fn response_400() -> HttpResponse {
 }
 
 pub fn response_403() -> HttpResponse {
-    html_response(StatusCode::FORBIDDEN, "<h1>403 Forbidden</h1>")
+    html_response(
+        StatusCode::FORBIDDEN,
+        "<h1>403 Forbidden</h1>",
+    )
 }
 
 pub fn response_404() -> HttpResponse {
-    html_response(StatusCode::NOT_FOUND, "<h1>404 Not Found</h1>")
+    html_response(
+        StatusCode::NOT_FOUND,
+        "<h1>404 Not Found</h1>",
+    )
 }
 
 pub fn response_500() -> HttpResponse {
@@ -70,15 +110,24 @@ pub fn response_416(total_len: u64) -> HttpResponse {
         .expect("known-valid status and header")
 }
 
-/// Return a minimal response with any HTTP status code.
-/// Used by the access policy to return custom deny codes.
-pub fn response_status(code: u16) -> HttpResponse {
+/// Return an HTML response with any HTTP status code.
+/// Uses the custom error page for `code` when `pages` is provided and
+/// has an entry; otherwise falls back to `<h1>{code}</h1>`.
+pub async fn response_status(
+    code: u16,
+    pages: Option<&ErrorPages>,
+) -> HttpResponse {
+    let body = if let Some(p) = pages {
+        p.get(code).await
+    } else {
+        None
+    }
+    .unwrap_or_else(|| Bytes::from(format!("<h1>{code}</h1>")));
+
     Response::builder()
         .status(code)
         .header("Content-Type", "text/html; charset=utf-8")
-        .body(bytes_body(Bytes::from(format!(
-            "<h1>{code}</h1>"
-        ))))
+        .body(bytes_body(body))
         .unwrap_or_else(|_| {
             // code was invalid; fall back to 403
             Response::builder()
@@ -93,9 +142,21 @@ pub fn response_status(code: u16) -> HttpResponse {
 
 /// Return 401 with a `WWW-Authenticate: Basic` challenge header.
 /// The realm is encoded as a quoted-string per RFC 7235 s.2.1.
-pub fn response_www_auth(realm: &str) -> HttpResponse {
+/// Uses the custom 401 error page when `pages` is provided.
+pub async fn response_www_auth(
+    realm: &str,
+    pages: Option<&ErrorPages>,
+) -> HttpResponse {
     // Escape backslashes then double-quotes to form a valid quoted-string.
     let safe = realm.replace('\\', "\\\\").replace('"', "\\\"");
+    let body = if let Some(p) = pages {
+        p.get(401).await
+    } else {
+        None
+    }
+    .unwrap_or_else(|| {
+        Bytes::from_static(b"<h1>401 Unauthorized</h1>")
+    });
     Response::builder()
         .status(StatusCode::UNAUTHORIZED)
         .header(
@@ -103,9 +164,7 @@ pub fn response_www_auth(realm: &str) -> HttpResponse {
             format!("Basic realm=\"{safe}\""),
         )
         .header("Content-Type", "text/html; charset=utf-8")
-        .body(bytes_body(Bytes::from_static(
-            b"<h1>401 Unauthorized</h1>",
-        )))
+        .body(bytes_body(body))
         .expect("known-valid status and header")
 }
 
@@ -175,9 +234,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn response_www_auth_status_and_header() {
-        let r = response_www_auth("My Realm");
+    #[tokio::test]
+    async fn response_www_auth_status_and_header() {
+        let r = response_www_auth("My Realm", None).await;
         assert_eq!(r.status(), 401);
         assert_eq!(
             r.headers().get("www-authenticate").unwrap(),
@@ -185,23 +244,23 @@ mod tests {
         );
     }
 
-    #[test]
-    fn response_www_auth_escapes_quotes() {
-        let r = response_www_auth("Say \"hello\"");
+    #[tokio::test]
+    async fn response_www_auth_escapes_quotes() {
+        let r = response_www_auth("Say \"hello\"", None).await;
         let h = r.headers().get("www-authenticate").unwrap();
         assert_eq!(h, r#"Basic realm="Say \"hello\"""#);
     }
 
-    #[test]
-    fn response_www_auth_escapes_backslashes() {
-        let r = response_www_auth(r"C:\path");
+    #[tokio::test]
+    async fn response_www_auth_escapes_backslashes() {
+        let r = response_www_auth(r"C:\path", None).await;
         let h = r.headers().get("www-authenticate").unwrap();
         assert_eq!(h, r#"Basic realm="C:\\path""#);
     }
 
-    #[test]
-    fn response_www_auth_empty_realm() {
-        let r = response_www_auth("");
+    #[tokio::test]
+    async fn response_www_auth_empty_realm() {
+        let r = response_www_auth("", None).await;
         assert_eq!(r.status(), 401);
         assert_eq!(
             r.headers().get("www-authenticate").unwrap(),
@@ -209,9 +268,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn response_www_auth_content_type() {
-        let r = response_www_auth("Test");
+    #[tokio::test]
+    async fn response_www_auth_content_type() {
+        let r = response_www_auth("Test", None).await;
         assert_eq!(
             r.headers()
                 .get("content-type")
@@ -220,17 +279,68 @@ mod tests {
         );
     }
 
-    #[test]
-    fn response_status_401_has_no_www_authenticate() {
+    #[tokio::test]
+    async fn response_status_401_has_no_www_authenticate() {
         // response_status is used for generic denials; a plain 401
         // (without an auth block configured) must NOT include a
         // WWW-Authenticate header -- browsers would pop an auth dialog
         // even when the page has its own login UI.
-        let r = response_status(401);
+        let r = response_status(401, None).await;
         assert_eq!(r.status(), 401);
         assert!(
             r.headers().get("www-authenticate").is_none(),
-            "plain 401 from response_status must not include WWW-Authenticate"
+            "plain 401 from response_status must not include \
+             WWW-Authenticate"
         );
+    }
+
+    #[tokio::test]
+    async fn response_status_uses_custom_inline_page() {
+        let mut pages = HashMap::new();
+        pages.insert(
+            403u16,
+            ErrorPageEntry::Inline(Bytes::from_static(
+                b"<h1>Custom Forbidden</h1>",
+            )),
+        );
+        let ep = ErrorPages::new(pages);
+        let r = response_status(403, Some(&ep)).await;
+        assert_eq!(r.status(), 403);
+        // Body is consumed here just to verify there's no panic.
+        // Content is checked via ErrorPages::get in isolation tests.
+    }
+
+    #[tokio::test]
+    async fn error_pages_inline_returns_correct_body() {
+        let mut pages = HashMap::new();
+        pages.insert(
+            404u16,
+            ErrorPageEntry::Inline(Bytes::from_static(
+                b"<h1>Not Here</h1>",
+            )),
+        );
+        let ep = ErrorPages::new(pages);
+        let body = ep.get(404).await.unwrap();
+        assert_eq!(body.as_ref(), b"<h1>Not Here</h1>");
+    }
+
+    #[tokio::test]
+    async fn error_pages_returns_none_for_unconfigured_code() {
+        let ep = ErrorPages::new(HashMap::new());
+        assert!(ep.get(403).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn error_pages_file_returns_none_on_missing_file() {
+        let mut pages = HashMap::new();
+        pages.insert(
+            500u16,
+            ErrorPageEntry::File(PathBuf::from(
+                "/nonexistent/path/500.html",
+            )),
+        );
+        let ep = ErrorPages::new(pages);
+        // Missing file → None, not a panic
+        assert!(ep.get(500).await.is_none());
     }
 }

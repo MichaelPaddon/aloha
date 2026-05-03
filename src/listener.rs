@@ -4,7 +4,10 @@
 // accepted connection gets a cheap clone of AlohaService (Arc refs only)
 // and is driven to completion before the graceful-shutdown drain finishes.
 
-use crate::access::{AccessOutcome, AccessPolicy};
+use crate::access::{
+    AccessBlock, AccessOutcome, AnonymousAuthProvider, AuthProvider,
+    EvalContext,
+};
 use crate::acme::ChallengeMap;
 use crate::auth::{Authenticator, Principal};
 use crate::geoip;
@@ -16,10 +19,11 @@ use crate::metrics::Metrics;
 use crate::proxy_proto;
 use crate::error::{
     bytes_body, response_404, response_redirect, response_status,
-    response_www_auth, BoxBody,
+    response_www_auth, BoxBody, ErrorPages,
 };
 use crate::router::Router;
 use arc_swap::ArcSwap;
+use async_trait::async_trait;
 use bytes::Bytes;
 use hyper::body::Incoming;
 use hyper::{Request, Response, StatusCode};
@@ -52,6 +56,22 @@ pub struct AppState {
     pub geoip: Option<Arc<geoip::CountryReader>>,
     // When true, /healthz /livez /readyz are intercepted before routing.
     pub health_enabled: bool,
+    // Per-status custom error pages; empty if none configured.
+    pub error_pages: Arc<ErrorPages>,
+}
+
+// Wraps the per-request authenticator so it implements AuthProvider
+// for the access evaluator (which doesn't know about hyper::Request).
+struct RequestAuthProvider<'a> {
+    authenticator: &'a dyn Authenticator,
+    request: &'a Request<Incoming>,
+}
+
+#[async_trait]
+impl AuthProvider for RequestAuthProvider<'_> {
+    async fn authenticate(&self) -> Principal {
+        self.authenticator.authenticate(self.request).await
+    }
 }
 
 // One AlohaService is cloned per accepted connection.
@@ -166,23 +186,6 @@ impl hyper::service::Service<Request<Incoming>> for AlohaService {
             let serve_fut = async {
                 match state.router.route(&req, &bind) {
                     Some(route) => {
-                        // Authenticate once when the access policy or
-                        // header rules need the user's identity.
-                        let needs_auth = route.access_policy.is_some()
-                            || route
-                                .header_rules
-                                .as_ref()
-                                .map(|r| r.needs_principal)
-                                .unwrap_or(false);
-                        let principal = if needs_auth {
-                            state
-                                .authenticator
-                                .authenticate(&req)
-                                .await
-                        } else {
-                            Principal::Anonymous
-                        };
-
                         // Look up country only when the policy needs it.
                         let country: Option<String> = match (
                             &state.geoip,
@@ -196,12 +199,23 @@ impl hyper::service::Service<Request<Incoming>> for AlohaService {
                             _ => None,
                         };
 
-                        if let Some(policy) = &route.access_policy {
-                            match policy.evaluate(
+                        // Evaluate access policy with lazy authentication.
+                        // The principal is only fetched from the
+                        // authenticator when an identity condition is
+                        // actually evaluated.
+                        let principal = if let Some(policy) = &route.access_policy {
+                            let auth_provider = RequestAuthProvider {
+                                authenticator: &*state.authenticator,
+                                request: &req,
+                            };
+                            let mut ctx = EvalContext::new(
                                 peer.ip(),
-                                &principal,
                                 country.as_deref(),
-                            ) {
+                                &auth_provider,
+                            );
+                            let outcome = policy.evaluate(&mut ctx).await;
+                            let principal = ctx.take_principal();
+                            match outcome {
                                 AccessOutcome::Allow => {}
                                 AccessOutcome::Deny(401) => {
                                     let realm = route
@@ -209,18 +223,42 @@ impl hyper::service::Service<Request<Incoming>> for AlohaService {
                                         .as_ref()
                                         .map(|a| a.realm.as_str())
                                         .unwrap_or("Restricted");
-                                    return response_www_auth(realm);
+                                    return response_www_auth(
+                                        realm,
+                                        Some(&state.error_pages),
+                                    )
+                                    .await;
                                 }
                                 AccessOutcome::Deny(code) => {
-                                    return response_status(code);
+                                    return response_status(
+                                        code,
+                                        Some(&state.error_pages),
+                                    )
+                                    .await;
                                 }
                                 AccessOutcome::Redirect(to, code) => {
-                                    return response_redirect(
-                                        &to, code,
-                                    );
+                                    return response_redirect(&to, code);
                                 }
                             }
-                        }
+                            principal
+                        } else {
+                            Principal::Anonymous
+                        };
+
+                        // If header rules need the principal and auth
+                        // was not triggered by the access policy
+                        // (principal is still Anonymous), authenticate now.
+                        let principal = if route
+                            .header_rules
+                            .as_ref()
+                            .map(|r| r.needs_principal)
+                            .unwrap_or(false)
+                            && matches!(principal, Principal::Anonymous)
+                        {
+                            state.authenticator.authenticate(&req).await
+                        } else {
+                            principal
+                        };
 
                         // Apply request-header rules before the handler
                         // consumes the request.
@@ -561,7 +599,7 @@ pub async fn run_tcp_proxy(
     listener: TcpListener,
     acceptor: Option<Arc<ArcSwap<TlsAcceptor>>>,
     mut shutdown: watch::Receiver<bool>,
-    access: Option<Arc<AccessPolicy>>,
+    access: Option<Arc<AccessBlock>>,
     geoip: Option<Arc<geoip::CountryReader>>,
 ) -> anyhow::Result<()> {
     let name = cfg.local_name();
@@ -643,7 +681,7 @@ async fn tcp_proxy_connection<C>(
     upstream: &str,
     proxy_protocol: Option<crate::config::ProxyProtocolVersion>,
     mut shutdown: watch::Receiver<bool>,
-    access: Option<Arc<AccessPolicy>>,
+    access: Option<Arc<AccessBlock>>,
     geoip: Option<Arc<geoip::CountryReader>>,
 ) -> anyhow::Result<()>
 where
@@ -660,11 +698,13 @@ where
         } else {
             None
         };
-        match policy.evaluate(
+        let anon = AnonymousAuthProvider;
+        let mut ctx = EvalContext::new(
             peer_addr.ip(),
-            &Principal::Anonymous,
             country.as_deref(),
-        ) {
+            &anon,
+        );
+        match policy.evaluate(&mut ctx).await {
             AccessOutcome::Allow => {}
             // Redirect is meaningless over raw TCP; treat as deny.
             _ => {

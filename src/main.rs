@@ -23,7 +23,8 @@ mod tls;
 use acme::{AcmeConfig, AcmeManager, ChallengeMap};
 use anyhow::Context;
 use arc_swap::ArcSwap;
-use config::{TlsConfig, TlsListenerConfig};
+use config::{ErrorPageDef, TlsConfig, TlsListenerConfig};
+use error::{ErrorPageEntry, ErrorPages};
 use std::time::Duration;
 use listener::AppState;
 use router::Router;
@@ -126,10 +127,8 @@ async fn main() -> anyhow::Result<()> {
     // renewal, read by StatusHandler for countdown timers.
     let cert_state = cert_state::new_shared();
 
-    let router = Arc::new(
-        Router::new(&config, &metrics, &summary, Some(&cert_state))
-            .context("building router")?,
-    );
+    let router = Router::new(&config, &metrics, &summary, Some(&cert_state))
+        .context("building router")?;
 
     // Phase 1: create shared ACME challenge map and app state.
     let challenges: ChallengeMap =
@@ -152,13 +151,31 @@ async fn main() -> anyhow::Result<()> {
     // Retain a clone for TCP proxy listeners, which don't share AppState.
     let tcp_geoip = geoip.clone();
 
+    // Build custom error pages map from config.
+    let mut ep_map = HashMap::new();
+    for (code, def) in &config.server.error_pages {
+        let entry = match def {
+            ErrorPageDef::File(path) => {
+                ErrorPageEntry::File(PathBuf::from(path))
+            }
+            ErrorPageDef::Inline(html) => {
+                ErrorPageEntry::Inline(bytes::Bytes::from(html.clone()))
+            }
+        };
+        ep_map.insert(*code, entry);
+    }
+    let error_pages = Arc::new(ErrorPages::new(ep_map));
+
+    let router = Arc::new(router);
+
     let state = Arc::new(AppState {
-        router,
+        router: router.clone(),
         acme_challenges: challenges.clone(),
         authenticator,
         metrics: metrics.clone(),
         geoip,
         health_enabled: config.server.health.enabled,
+        error_pages,
     });
 
     // Background task: advance the request-rate ring buffer every 5 s.
@@ -188,7 +205,13 @@ async fn main() -> anyhow::Result<()> {
     // Phase 2a: plain TCP proxy listeners (no TLS, no HTTP, no ACME dependency).
     for (cfg, socket) in tcp_proxy_plain_bound {
         let proxy = cfg.tcp_proxy.clone().unwrap();
-        let access = proxy.access.as_ref().map(|p| Arc::new(p.clone()));
+        let access = proxy.access.as_ref()
+            .map(|defs| {
+                router.resolve_block(defs, true)
+                    .map(Arc::new)
+                    .context("resolving tcp-proxy access block")
+            })
+            .transpose()?;
         let geo = tcp_geoip.clone();
         let rx = shutdown_rx.clone();
         handles.spawn(async move {
@@ -304,7 +327,13 @@ async fn main() -> anyhow::Result<()> {
         let rx = shutdown_rx.clone();
         if let Some(proxy) = cfg.tcp_proxy.clone() {
             // TLS-terminating TCP proxy: accept TLS, forward plaintext.
-            let access = proxy.access.as_ref().map(|p| Arc::new(p.clone()));
+            let access = proxy.access.as_ref()
+                .map(|defs| {
+                    router.resolve_block(defs, true)
+                        .map(Arc::new)
+                        .context("resolving tcp-proxy access block")
+                })
+                .transpose()?;
             let geo = tcp_geoip.clone();
             handles.spawn(async move {
                 if let Err(e) = listener::run_tcp_proxy(

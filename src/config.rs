@@ -4,15 +4,36 @@
 // (used in tests).  All fields are resolved to concrete values before
 // validate() is called so downstream code never sees partial state.
 
-use crate::access::{AccessAction, AccessCondition, AccessPolicy, AccessRule};
+use crate::access::{AccessAction, AccessCondition};
 use anyhow::{anyhow, bail, Context};
 use hyper::header::HeaderName;
 use kdl::{KdlDocument, KdlNode};
 use miette::Diagnostic as _;
+use std::collections::HashMap;
 use std::path::Path;
 use regex::Regex;
 
 // -- Public types --------------------------------------------------
+
+/// Unresolved access statement as parsed from KDL.  Named `apply`
+/// references are resolved to `Arc<AccessBlock>` in router.rs.
+#[derive(Debug, Clone)]
+pub enum AccessStatementDef {
+    Rule {
+        conditions: Vec<AccessCondition>,
+        action: AccessAction,
+    },
+    Apply { name: String },
+}
+
+/// Source for a custom error page HTML body.
+#[derive(Debug, Clone)]
+pub enum ErrorPageDef {
+    /// File path; contents are read from disk on each error response.
+    File(String),
+    /// Inline HTML stored directly in the config.
+    Inline(String),
+}
 
 #[derive(Debug, Default)]
 pub struct Config {
@@ -43,6 +64,10 @@ pub struct ServerConfig {
     // GeoIP database configuration; None means no geo conditions can be used.
     pub geoip: Option<GeoIpConfig>,
     pub health: HealthConfig,
+    // Named access-policy blocks available to all vhosts/locations.
+    pub access_policies: HashMap<String, Vec<AccessStatementDef>>,
+    // Per-status-code custom error pages.
+    pub error_pages: Vec<(u16, ErrorPageDef)>,
 }
 
 /// Built-in health endpoint configuration.
@@ -143,9 +168,9 @@ pub struct TcpProxyConfig {
     /// client IP even though it only sees aloha's connection.
     pub proxy_protocol: Option<ProxyProtocolVersion>,
     /// Optional IP/country-based access control.  User, group, and
-    /// `authenticated` conditions are rejected at parse time because TCP
-    /// proxies have no HTTP authentication layer.
-    pub access: Option<AccessPolicy>,
+    /// `authenticated` conditions are rejected at resolve time because
+    /// TCP proxies have no HTTP authentication layer.
+    pub access: Option<Vec<AccessStatementDef>>,
 }
 
 #[derive(Debug, Clone)]
@@ -272,8 +297,8 @@ pub struct LocationConfig {
     // URL path prefix; locations are tested in config order.
     pub path: String,
     pub handler: HandlerConfig,
-    // Firewall-style access policy (IP + identity rules).
-    pub access: Option<AccessPolicy>,
+    // Firewall-style access policy (unresolved; resolved in router.rs).
+    pub access: Option<Vec<AccessStatementDef>>,
     // HTTP Basic auth realm; None means no WWW-Authenticate challenge.
     pub auth: Option<BasicAuthConfig>,
     // Header rules applied before the handler sees the request.
@@ -480,14 +505,26 @@ impl Config {
             }
         }
         // If any access policy uses country conditions, a geoip db
-        // must be configured.
-        let uses_country = self.vhosts.iter().any(|v| {
-            v.locations.iter().any(|loc| {
-                loc.access.as_ref()
-                    .map(|p| p.needs_geoip)
+        // must be configured.  Check all locations, TCP proxies, and
+        // named policies (Apply references are resolved later and do
+        // not need checking here).
+        let uses_country =
+            self.vhosts.iter().any(|v| {
+                v.locations.iter().any(|loc| {
+                    loc.access.as_ref()
+                        .map(|s| stmts_have_country(s))
+                        .unwrap_or(false)
+                })
+            })
+            || self.listeners.iter().any(|l| {
+                l.tcp_proxy.as_ref()
+                    .and_then(|p| p.access.as_ref())
+                    .map(|s| stmts_have_country(s))
                     .unwrap_or(false)
             })
-        });
+            || self.server.access_policies.values().any(|s| {
+                stmts_have_country(s)
+            });
         if uses_country && self.server.geoip.is_none() {
             bail!(
                 "access 'country' conditions require \
@@ -507,6 +544,20 @@ impl Config {
             })
             .collect()
     }
+}
+
+// Returns true iff any statement (non-recursively) contains a Country
+// condition.  Apply references are not followed; they are checked when
+// the policy is resolved in router.rs.
+fn stmts_have_country(stmts: &[AccessStatementDef]) -> bool {
+    stmts.iter().any(|s| match s {
+        AccessStatementDef::Rule { conditions, .. } => {
+            conditions.iter().any(|c| {
+                matches!(c, AccessCondition::Country(_))
+            })
+        }
+        AccessStatementDef::Apply { .. } => false,
+    })
 }
 
 // -- Node parsers --------------------------------------------------
@@ -553,6 +604,68 @@ fn parse_server(node: &KdlNode, src: &str, name: &str) -> anyhow::Result<ServerC
             enabled: child_bool(n, "enabled").unwrap_or(true),
         })
         .unwrap_or_default();
+    // Collect named access-policy blocks defined in the server node.
+    let mut access_policies = HashMap::new();
+    for child in node.children()
+        .map(|d| d.nodes())
+        .unwrap_or_default()
+    {
+        if child.name().value() == "access-policy" {
+            let child_line = node_line(src, child);
+            let policy_name = arg_str(child, 0)
+                .ok_or_else(|| anyhow!(
+                    "{name}:{child_line}: 'access-policy' requires \
+                     a name argument"
+                ))?;
+            let stmts = parse_access_statements(
+                child, src, name, false,
+            )?;
+            if access_policies
+                .insert(policy_name.clone(), stmts)
+                .is_some()
+            {
+                bail!(
+                    "{name}:{child_line}: duplicate access-policy \
+                     name '{policy_name}'"
+                );
+            }
+        }
+    }
+
+    // Collect error-page entries from the server node.
+    let mut error_pages = Vec::new();
+    for child in node.children()
+        .map(|d| d.nodes())
+        .unwrap_or_default()
+    {
+        if child.name().value() == "error-page" {
+            let child_line = node_line(src, child);
+            let code = child
+                .entries()
+                .iter()
+                .find(|e| e.name().is_none())
+                .and_then(|e| e.value().as_i64())
+                .map(|n| n as u16)
+                .ok_or_else(|| anyhow!(
+                    "{name}:{child_line}: 'error-page' requires a \
+                     numeric status code as first argument"
+                ))?;
+            let def = if let Some(html) = child.get("html")
+                .and_then(|e| e.value().as_string())
+            {
+                ErrorPageDef::Inline(html.to_owned())
+            } else if let Some(path) = arg_str(child, 1) {
+                ErrorPageDef::File(path)
+            } else {
+                bail!(
+                    "{name}:{child_line}: 'error-page' requires \
+                     either a file path argument or html=... property"
+                );
+            };
+            error_pages.push((code, def));
+        }
+    }
+
     Ok(ServerConfig {
         state_dir: child_str(node, "state-dir"),
         tls_defaults,
@@ -562,6 +675,8 @@ fn parse_server(node: &KdlNode, src: &str, name: &str) -> anyhow::Result<ServerC
         auth,
         geoip,
         health,
+        access_policies,
+        error_pages,
     })
 }
 
@@ -707,7 +822,7 @@ fn parse_tcp_proxy(
     let access = node
         .children()
         .and_then(|d| d.nodes().iter().find(|n| n.name().value() == "access"))
-        .map(|n| parse_access_policy(n, src, name, true))
+        .map(|n| parse_access_statements(n, src, name, true))
         .transpose()?;
     Ok(TcpProxyConfig { upstream, proxy_protocol, access })
 }
@@ -860,7 +975,7 @@ fn parse_location(node: &KdlNode, src: &str, name: &str) -> anyhow::Result<Locat
     let access = children
         .iter()
         .find(|n| n.name().value() == "access")
-        .map(|n| parse_access_policy(n, src, name, false))
+        .map(|n| parse_access_statements(n, src, name, false))
         .transpose()?;
     let auth = children
         .iter()
@@ -945,33 +1060,57 @@ fn parse_header_ops(
     Ok(ops)
 }
 
-// Parse an `access { }` block into an AccessPolicy.
+// Parse an `access { }` or `access-policy "name" { }` block into a
+// list of unresolved AccessStatementDef values.
 //
-//   access {
-//       allow { ip "10.0.0.0/8"; group "admin" }
-//       deny code=403 { ip "1.2.3.4" }
-//       redirect to="/login/" { user "unverified" }
-//       deny code=403      // catch-all: no children = always matches
-//   }
-// `tcp_only` rejects conditions that require HTTP authentication
-// (user, group, authenticated), since TCP proxies have no auth layer.
-fn parse_access_policy(
+// Syntax for each statement:
+//   <action> [<cond-type> <value>...] [code=N] [to=<url>]
+//   apply "<policy-name>"
+//
+// Where <action> is: allow | deny | pass | redirect
+// And <cond-type> (first positional arg) is:
+//   ip | country | user | group | authenticated
+//
+// Multiple values after the condition type are OR within that type.
+// AND across types requires a child block:
+//   allow { ip "10.0.0.0/8"; authenticated }
+//
+// When `tcp_only` is true, identity conditions (user, group,
+// authenticated) are rejected at parse time, since TCP proxies have
+// no HTTP authentication layer.  `apply` references in tcp_only blocks
+// are checked at resolve time in router.rs.
+fn parse_access_statements(
     node: &KdlNode,
     src: &str,
     name: &str,
     tcp_only: bool,
-) -> anyhow::Result<AccessPolicy> {
-    use ipnet::IpNet;
-    use std::net::IpAddr;
-
+) -> anyhow::Result<Vec<AccessStatementDef>> {
     let children =
         node.children().map(|d| d.nodes()).unwrap_or_default();
-    let mut rules = Vec::new();
+    let mut stmts = Vec::new();
 
     for child in children {
         let child_line = node_line(src, child);
-        let action = match child.name().value() {
+        let stmt_name = child.name().value();
+
+        // Handle `apply "name"` separately — no conditions, no action.
+        if stmt_name == "apply" {
+            let policy_name = arg_str(child, 0).ok_or_else(|| {
+                anyhow!(
+                    "{name}:{child_line}: 'apply' requires a \
+                     policy name argument"
+                )
+            })?;
+            stmts.push(AccessStatementDef::Apply {
+                name: policy_name,
+            });
+            continue;
+        }
+
+        // Parse the action from the node name.
+        let action = match stmt_name {
             "allow" => AccessAction::Allow,
+            "pass"  => AccessAction::Pass,
             "deny" => {
                 let code = child
                     .get("code")
@@ -999,116 +1138,137 @@ fn parse_access_policy(
                 AccessAction::Redirect { to, code }
             }
             other => bail!(
-                "{name}:{child_line}: unknown access rule '{other}'; \
-                 expected 'allow', 'deny', or 'redirect'"
+                "{name}:{child_line}: unknown access statement \
+                 '{other}'; expected 'allow', 'deny', 'pass', \
+                 'redirect', or 'apply'"
             ),
         };
 
-        // Parse conditions from child nodes.
+        // Conditions are specified as child nodes inside a block:
+        //   allow { ip "10.0.0.0/8"; country "US" "CA"; authenticated }
+        // Multiple nodes of the same type = OR within that type.
+        // Different types = AND across types.
+        // No child block = unconditional (catch-all) rule.
+
         let cond_nodes = child
             .children()
             .map(|d| d.nodes())
             .unwrap_or_default();
-        let mut conditions = Vec::new();
+        let mut conditions: Vec<AccessCondition> = Vec::new();
+
         for cond in cond_nodes {
             let cond_line = node_line(src, cond);
-            match cond.name().value() {
-                "ip" => {
-                    let s = req_arg_str(cond, 0).with_context(|| {
-                        format!("{name}:{cond_line}")
-                    })?;
-                    // Try CIDR notation first, then plain IP address.
-                    let net: IpNet = s
-                        .parse()
-                        .or_else(|_| {
-                            s.parse::<IpAddr>().map(IpNet::from)
-                        })
-                        .map_err(|_| {
-                            anyhow!(
-                                "{name}:{cond_line}: invalid IP \
-                                 address or CIDR '{s}'"
-                            )
-                        })?;
-                    conditions.push(AccessCondition::Ip(net));
-                }
-                "user" => {
-                    if tcp_only {
-                        bail!(
-                            "{name}:{cond_line}: 'user' conditions are not \
-                             supported in tcp-proxy access blocks \
-                             (no HTTP authentication available)"
-                        );
-                    }
-                    let u = req_arg_str(cond, 0).with_context(|| {
-                        format!("{name}:{cond_line}")
-                    })?;
-                    conditions.push(AccessCondition::User(u));
-                }
-                "group" => {
-                    if tcp_only {
-                        bail!(
-                            "{name}:{cond_line}: 'group' conditions are not \
-                             supported in tcp-proxy access blocks \
-                             (no HTTP authentication available)"
-                        );
-                    }
-                    let g = req_arg_str(cond, 0).with_context(|| {
-                        format!("{name}:{cond_line}")
-                    })?;
-                    conditions.push(AccessCondition::Group(g));
-                }
-                "country" => {
-                    // Each argument is one ISO country code; all are added
-                    // as separate Country conditions (OR-within-type).
-                    let entries: Vec<_> = cond
-                        .entries()
-                        .iter()
-                        .filter(|e| e.name().is_none())
-                        .collect();
-                    if entries.is_empty() {
-                        bail!(
-                            "{name}:{cond_line}: 'country' requires \
-                             at least one country code argument"
-                        );
-                    }
-                    for entry in entries {
-                        let code = entry
-                            .value()
-                            .as_string()
-                            .ok_or_else(|| {
-                                anyhow!(
-                                    "{name}:{cond_line}: country code \
-                                     must be a string"
-                                )
-                            })?
-                            .to_uppercase();
-                        conditions.push(
-                            AccessCondition::Country(code),
-                        );
-                    }
-                }
-                "authenticated" => {
-                    if tcp_only {
-                        bail!(
-                            "{name}:{cond_line}: 'authenticated' conditions \
-                             are not supported in tcp-proxy access blocks \
-                             (no HTTP authentication available)"
-                        );
-                    }
-                    conditions.push(AccessCondition::Authenticated);
-                }
-                other => bail!(
-                    "{name}:{cond_line}: unknown access condition \
-                     '{other}'; expected 'ip', 'country', 'user', \
-                     'group', or 'authenticated'"
-                ),
-            }
+            parse_condition_node(
+                cond, src, name, cond_line,
+                &mut conditions, tcp_only,
+            )?;
         }
+        // Empty cond_nodes = unconditional (catch-all) rule.
 
-        rules.push(AccessRule { conditions, action });
+        stmts.push(AccessStatementDef::Rule { conditions, action });
     }
 
-    Ok(AccessPolicy::new(rules))
+    Ok(stmts)
+}
+
+// Parse a child-block condition node, e.g. `ip "10.0.0.0/8"` inside
+// `allow { ip "10.0.0.0/8"; country "US" }`.
+fn parse_condition_node(
+    cond: &KdlNode,
+    _src: &str,
+    name: &str,
+    cond_line: usize,
+    conditions: &mut Vec<AccessCondition>,
+    tcp_only: bool,
+) -> anyhow::Result<()> {
+    use ipnet::IpNet;
+    use std::net::IpAddr;
+
+    match cond.name().value() {
+        "ip" => {
+            let s = req_arg_str(cond, 0).with_context(|| {
+                format!("{name}:{cond_line}")
+            })?;
+            let net: IpNet = s
+                .parse()
+                .or_else(|_| s.parse::<IpAddr>().map(IpNet::from))
+                .map_err(|_| {
+                    anyhow!(
+                        "{name}:{cond_line}: invalid IP address or \
+                         CIDR '{s}'"
+                    )
+                })?;
+            conditions.push(AccessCondition::Ip(net));
+        }
+        "country" => {
+            let entries: Vec<_> = cond
+                .entries()
+                .iter()
+                .filter(|e| e.name().is_none())
+                .collect();
+            if entries.is_empty() {
+                bail!(
+                    "{name}:{cond_line}: 'country' requires at least \
+                     one country code argument"
+                );
+            }
+            for entry in entries {
+                let code = entry
+                    .value()
+                    .as_string()
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "{name}:{cond_line}: country code must be \
+                             a string"
+                        )
+                    })?
+                    .to_uppercase();
+                conditions.push(AccessCondition::Country(code));
+            }
+        }
+        "user" => {
+            if tcp_only {
+                bail!(
+                    "{name}:{cond_line}: 'user' conditions are not \
+                     supported in tcp-proxy access blocks \
+                     (no HTTP authentication available)"
+                );
+            }
+            let u = req_arg_str(cond, 0).with_context(|| {
+                format!("{name}:{cond_line}")
+            })?;
+            conditions.push(AccessCondition::User(u));
+        }
+        "group" => {
+            if tcp_only {
+                bail!(
+                    "{name}:{cond_line}: 'group' conditions are not \
+                     supported in tcp-proxy access blocks \
+                     (no HTTP authentication available)"
+                );
+            }
+            let g = req_arg_str(cond, 0).with_context(|| {
+                format!("{name}:{cond_line}")
+            })?;
+            conditions.push(AccessCondition::Group(g));
+        }
+        "authenticated" => {
+            if tcp_only {
+                bail!(
+                    "{name}:{cond_line}: 'authenticated' conditions \
+                     are not supported in tcp-proxy access blocks \
+                     (no HTTP authentication available)"
+                );
+            }
+            conditions.push(AccessCondition::Authenticated);
+        }
+        other => bail!(
+            "{name}:{cond_line}: unknown access condition '{other}'; \
+             expected 'ip', 'country', 'user', 'group', or \
+             'authenticated'"
+        ),
+    }
+    Ok(())
 }
 
 fn parse_handler(
@@ -1798,15 +1958,28 @@ mod tests {
         )
         .unwrap();
         let proxy = cfg.listeners[0].tcp_proxy.as_ref().unwrap();
-        let policy = proxy.access.as_ref().unwrap();
-        assert_eq!(policy.rules.len(), 2);
-        assert!(!policy.needs_geoip);
+        let stmts = proxy.access.as_ref().unwrap();
+        assert_eq!(stmts.len(), 2);
+        // No country conditions → stmts_have_country returns false.
+        assert!(stmts.iter().all(|s| match s {
+            AccessStatementDef::Rule { conditions, .. } => {
+                !conditions.iter().any(|c| {
+                    matches!(c, AccessCondition::Country(_))
+                })
+            }
+            _ => true,
+        }));
     }
 
     #[test]
     fn tcp_proxy_access_country_parses() {
         let cfg = Config::parse(
             r#"
+            server {
+                geoip {
+                    db "/dev/null"
+                }
+            }
             listener {
                 bind "[::]:5432"
                 tcp-proxy {
@@ -1823,8 +1996,15 @@ mod tests {
         )
         .unwrap();
         let proxy = cfg.listeners[0].tcp_proxy.as_ref().unwrap();
-        let policy = proxy.access.as_ref().unwrap();
-        assert!(policy.needs_geoip);
+        let stmts = proxy.access.as_ref().unwrap();
+        assert!(stmts.iter().any(|s| match s {
+            AccessStatementDef::Rule { conditions, .. } => {
+                conditions.iter().any(|c| {
+                    matches!(c, AccessCondition::Country(_))
+                })
+            }
+            _ => false,
+        }));
     }
 
     #[test]
@@ -2511,6 +2691,20 @@ mod tests {
 
         // -- access blocks ---------------------------------------------
 
+    fn rule_action(s: &AccessStatementDef) -> &AccessAction {
+        match s {
+            AccessStatementDef::Rule { action, .. } => action,
+            _ => panic!("expected Rule"),
+        }
+    }
+
+    fn rule_conditions(s: &AccessStatementDef) -> &[AccessCondition] {
+        match s {
+            AccessStatementDef::Rule { conditions, .. } => conditions,
+            _ => panic!("expected Rule"),
+        }
+    }
+
     #[test]
     fn access_allow_ip_parses() {
         let cfg = Config::parse(
@@ -2532,11 +2726,11 @@ mod tests {
             "#,
         )
         .unwrap();
-        let policy = cfg.vhosts[0].locations[0].access.as_ref().unwrap();
-        assert_eq!(policy.rules.len(), 2);
-        assert!(matches!(&policy.rules[0].action, AccessAction::Allow));
+        let stmts = cfg.vhosts[0].locations[0].access.as_ref().unwrap();
+        assert_eq!(stmts.len(), 2);
+        assert!(matches!(rule_action(&stmts[0]), AccessAction::Allow));
         assert!(matches!(
-            &policy.rules[1].action,
+            rule_action(&stmts[1]),
             AccessAction::Deny { code: 403 }
         ));
     }
@@ -2561,14 +2755,14 @@ mod tests {
             "#,
         )
         .unwrap();
-        let policy = cfg.vhosts[0].locations[0].access.as_ref().unwrap();
+        let stmts = cfg.vhosts[0].locations[0].access.as_ref().unwrap();
         assert!(matches!(
-            &policy.rules[0].action,
+            rule_action(&stmts[0]),
             AccessAction::Deny { code: 429 }
         ));
-        assert_eq!(policy.rules[0].conditions.len(), 1);
+        assert_eq!(rule_conditions(&stmts[0]).len(), 1);
         assert!(matches!(
-            &policy.rules[0].conditions[0],
+            &rule_conditions(&stmts[0])[0],
             AccessCondition::Ip(_)
         ));
     }
@@ -2594,22 +2788,22 @@ mod tests {
             "#,
         )
         .unwrap();
-        let policy = cfg.vhosts[0].locations[0].access.as_ref().unwrap();
+        let stmts = cfg.vhosts[0].locations[0].access.as_ref().unwrap();
         assert!(matches!(
-            &policy.rules[0].action,
+            rule_action(&stmts[0]),
             AccessAction::Redirect { code: 302, .. }
         ));
-        if let AccessAction::Redirect { to, .. } = &policy.rules[0].action {
+        if let AccessAction::Redirect { to, .. } = rule_action(&stmts[0]) {
             assert_eq!(to, "/login/");
         }
         assert!(matches!(
-            &policy.rules[0].conditions[0],
+            &rule_conditions(&stmts[0])[0],
             AccessCondition::User(u) if u == "unverified"
         ));
     }
 
     #[test]
-    fn access_empty_block_has_zero_rules() {
+    fn access_empty_block_has_zero_statements() {
         let cfg = Config::parse(
             r#"
             listener {
@@ -2625,8 +2819,8 @@ mod tests {
             "#,
         )
         .unwrap();
-        let policy = cfg.vhosts[0].locations[0].access.as_ref().unwrap();
-        assert_eq!(policy.rules.len(), 0);
+        let stmts = cfg.vhosts[0].locations[0].access.as_ref().unwrap();
+        assert_eq!(stmts.len(), 0);
     }
 
     #[test]
@@ -2756,9 +2950,9 @@ mod tests {
             "#,
         )
         .unwrap();
-        let policy = cfg.vhosts[0].locations[0].access.as_ref().unwrap();
+        let stmts = cfg.vhosts[0].locations[0].access.as_ref().unwrap();
         assert!(matches!(
-            &policy.rules[0].conditions[0],
+            &rule_conditions(&stmts[0])[0],
             AccessCondition::Ip(_)
         ));
     }
@@ -2784,9 +2978,9 @@ mod tests {
             "#,
         )
         .unwrap();
-        let policy = cfg.vhosts[0].locations[0].access.as_ref().unwrap();
+        let stmts = cfg.vhosts[0].locations[0].access.as_ref().unwrap();
         assert!(matches!(
-            &policy.rules[0].conditions[0],
+            &rule_conditions(&stmts[0])[0],
             AccessCondition::Authenticated
         ));
     }
@@ -2812,9 +3006,9 @@ mod tests {
             "#,
         )
         .unwrap();
-        let policy = cfg.vhosts[0].locations[0].access.as_ref().unwrap();
+        let stmts = cfg.vhosts[0].locations[0].access.as_ref().unwrap();
         assert!(matches!(
-            &policy.rules[0].conditions[0],
+            &rule_conditions(&stmts[0])[0],
             AccessCondition::Group(g) if g == "admin"
         ));
     }
@@ -2840,9 +3034,234 @@ mod tests {
             "#,
         )
         .unwrap();
-        let policy = cfg.vhosts[0].locations[0].access.as_ref().unwrap();
+        let stmts = cfg.vhosts[0].locations[0].access.as_ref().unwrap();
         // deny rule has no conditions -> catch-all
-        assert!(policy.rules[1].conditions.is_empty());
+        assert!(rule_conditions(&stmts[1]).is_empty());
+    }
+
+    // -- New syntax: inline conditions, pass, apply, error-page ------
+
+    #[test]
+    fn access_country_condition_parses() {
+        // country "CN" "RU" as multi-value condition in child block
+        let cfg = Config::parse(
+            r#"
+            server {
+                geoip {
+                    db "/dev/null"
+                }
+            }
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    access {
+                        deny {
+                            country "CN" "RU"
+                        }
+                        allow
+                    }
+                    static { root "."; }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        let stmts = cfg.vhosts[0].locations[0].access.as_ref().unwrap();
+        assert_eq!(stmts.len(), 2);
+        assert!(matches!(
+            rule_action(&stmts[0]),
+            AccessAction::Deny { code: 403 }
+        ));
+        let conds = rule_conditions(&stmts[0]);
+        assert_eq!(conds.len(), 2);
+        assert!(matches!(&conds[0], AccessCondition::Country(c) if c == "CN"));
+        assert!(matches!(&conds[1], AccessCondition::Country(c) if c == "RU"));
+    }
+
+    #[test]
+    fn access_pass_action_parses() {
+        let cfg = Config::parse(
+            r#"
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    access {
+                        pass {
+                            ip "10.0.0.0/8"
+                        }
+                        deny
+                    }
+                    static { root "."; }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        let stmts = cfg.vhosts[0].locations[0].access.as_ref().unwrap();
+        assert!(matches!(rule_action(&stmts[0]), AccessAction::Pass));
+        assert!(matches!(
+            rule_action(&stmts[1]),
+            AccessAction::Deny { code: 403 }
+        ));
+    }
+
+    #[test]
+    fn access_apply_statement_parses() {
+        let cfg = Config::parse(
+            r#"
+            server {
+                access-policy "allow-all" {
+                    allow
+                }
+            }
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    access {
+                        apply "allow-all"
+                        deny
+                    }
+                    static { root "."; }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        // Named policy stored in server config.
+        assert!(cfg.server.access_policies.contains_key("allow-all"));
+        // Inline access block has Apply statement.
+        let stmts = cfg.vhosts[0].locations[0].access.as_ref().unwrap();
+        assert!(matches!(&stmts[0], AccessStatementDef::Apply { name } if name == "allow-all"));
+    }
+
+    #[test]
+    fn access_named_policy_parsed() {
+        let cfg = Config::parse(
+            r#"
+            server {
+                access-policy "geo-filter" {
+                    pass {
+                        ip "10.0.0.0/8"
+                    }
+                    deny code=403
+                }
+            }
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    static { root "."; }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        let stmts = cfg.server.access_policies.get("geo-filter").unwrap();
+        assert_eq!(stmts.len(), 2);
+        assert!(matches!(rule_action(&stmts[0]), AccessAction::Pass));
+    }
+
+    #[test]
+    fn access_duplicate_policy_name_is_error() {
+        let result = Config::parse(
+            r#"
+            server {
+                access-policy "dup" {
+                    allow
+                }
+                access-policy "dup" {
+                    deny
+                }
+            }
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    static { root "."; }
+                }
+            }
+            "#,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn error_page_file_path_parses() {
+        let cfg = Config::parse(
+            r#"
+            server {
+                error-page 403 "/var/www/errors/403.html"
+            }
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    static { root "."; }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.server.error_pages.len(), 1);
+        assert_eq!(cfg.server.error_pages[0].0, 403);
+        assert!(matches!(
+            &cfg.server.error_pages[0].1,
+            ErrorPageDef::File(p) if p == "/var/www/errors/403.html"
+        ));
+    }
+
+    #[test]
+    fn error_page_inline_html_parses() {
+        let cfg = Config::parse(
+            r#"
+            server {
+                error-page 401 html="<h1>Please log in</h1>"
+            }
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    static { root "."; }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.server.error_pages.len(), 1);
+        assert!(matches!(
+            &cfg.server.error_pages[0].1,
+            ErrorPageDef::Inline(html) if html == "<h1>Please log in</h1>"
+        ));
+    }
+
+    #[test]
+    fn error_page_missing_source_is_error() {
+        let result = Config::parse(
+            r#"
+            server {
+                error-page 404
+            }
+            listener {
+                bind "0.0.0.0:80"
+            }
+            vhost "h" {
+                location "/" {
+                    static { root "."; }
+                }
+            }
+            "#,
+        );
+        assert!(result.is_err());
     }
 
     #[test]
