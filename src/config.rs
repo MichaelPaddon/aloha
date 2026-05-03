@@ -112,8 +112,9 @@ pub enum AuthBackend {
 /// that is substituted with the escaped username at authentication time.
 #[derive(Debug, Clone)]
 pub struct LdapAuthConfig {
-    /// LDAP server URL, e.g. `ldap://localhost:389` or
-    /// `ldapi:///var/run/slapd/ldapi`.
+    /// LDAP server URL.  TCP: `ldap://host:389` or `ldaps://host:636`.
+    /// Unix socket: `ldapi:///var/run/slapd/ldapi` (plain path, preferred)
+    /// or `ldapi://%2Fvar%2Frun%2Fslapd%2Fldapi` (pre-encoded, also accepted).
     pub url: String,
     /// DN template used for the simple bind, e.g.
     /// `uid={user},ou=people,dc=example,dc=com`.

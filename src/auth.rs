@@ -130,6 +130,22 @@ impl Authenticator for LdapAuthenticator {
     }
 }
 
+/// Convert a plain `ldapi://` URL to the percent-encoded form expected by
+/// ldap3.  ldap3 requires the socket path in the authority component with
+/// `/` encoded as `%2F`.  An already-encoded URL (authority starts with
+/// `%2F` or `%2f`) is returned unchanged, as is any non-`ldapi://` URL.
+///
+/// `ldapi:///var/run/slapd/ldapi`  →  `ldapi://%2Fvar%2Frun%2Fslapd%2Fldapi`
+fn normalize_ldapi_url(url: &str) -> String {
+    let Some(rest) = url.strip_prefix("ldapi://") else {
+        return url.to_owned();
+    };
+    if rest.starts_with("%2F") || rest.starts_with("%2f") {
+        return url.to_owned(); // already encoded
+    }
+    format!("ldapi://{}", rest.replace('/', "%2F"))
+}
+
 async fn ldap_authenticate(
     config: &crate::config::LdapAuthConfig,
     username: &str,
@@ -143,8 +159,9 @@ async fn ldap_authenticate(
             std::time::Duration::from_secs(config.timeout_secs),
         );
 
+    let url = normalize_ldapi_url(&config.url);
     let (conn, mut ldap) =
-        LdapConnAsync::with_settings(settings, &config.url).await?;
+        LdapConnAsync::with_settings(settings, &url).await?;
     ldap3::drive!(conn);
 
     // Substitute and escape the username into the bind DN.
@@ -703,5 +720,47 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         auth.authenticate(&h).await;
         assert_eq!(auth.inner.calls(), 2);
+    }
+
+    // -- normalize_ldapi_url ---------------------------------------
+
+    #[test]
+    fn normalize_ldapi_plain_path() {
+        assert_eq!(
+            normalize_ldapi_url("ldapi:///var/run/slapd/ldapi"),
+            "ldapi://%2Fvar%2Frun%2Fslapd%2Fldapi",
+        );
+    }
+
+    #[test]
+    fn normalize_ldapi_already_encoded_uppercase() {
+        let url = "ldapi://%2Fvar%2Frun%2Fslapd%2Fldapi";
+        assert_eq!(normalize_ldapi_url(url), url);
+    }
+
+    #[test]
+    fn normalize_ldapi_already_encoded_lowercase() {
+        let url = "ldapi://%2fvar%2frun%2fslapd%2fldapi";
+        assert_eq!(normalize_ldapi_url(url), url);
+    }
+
+    #[test]
+    fn normalize_ldapi_leaves_ldap_unchanged() {
+        let url = "ldap://localhost:389";
+        assert_eq!(normalize_ldapi_url(url), url);
+    }
+
+    #[test]
+    fn normalize_ldapi_leaves_ldaps_unchanged() {
+        let url = "ldaps://ldap.example.com:636";
+        assert_eq!(normalize_ldapi_url(url), url);
+    }
+
+    #[test]
+    fn normalize_ldapi_tmp_socket() {
+        assert_eq!(
+            normalize_ldapi_url("ldapi:///tmp/ldapi.sock"),
+            "ldapi://%2Ftmp%2Fldapi.sock",
+        );
     }
 }
