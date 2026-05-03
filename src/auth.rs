@@ -6,16 +6,16 @@
 //   LdapAuthenticator      -- validates via an LDAP simple bind
 
 use async_trait::async_trait;
-use hyper::Request;
-use hyper::body::Incoming;
 use std::sync::Arc;
+use zeroize::Zeroizing;
 
+#[derive(Clone)]
 pub struct Identity {
     pub username: String,
     pub groups: Vec<String>,
 }
 
-#[allow(dead_code)] // Authenticated constructed only by real authenticators
+#[derive(Clone)]
 pub enum Principal {
     Anonymous,
     Authenticated(Identity),
@@ -23,9 +23,16 @@ pub enum Principal {
 
 /// Pluggable authentication mechanism.  `AnonymousAuthenticator` is
 /// the default until a real mechanism is configured.
+///
+/// Takes only the request headers — authenticators (Basic auth, etc.)
+/// never need the body, and restricting the input makes unit testing
+/// straightforward without requiring a real `Incoming` connection.
 #[async_trait]
 pub trait Authenticator: Send + Sync {
-    async fn authenticate(&self, req: &Request<Incoming>) -> Principal;
+    async fn authenticate(
+        &self,
+        headers: &hyper::HeaderMap,
+    ) -> Principal;
 }
 
 /// Always anonymous -- replaced once a real auth mechanism is wired up.
@@ -33,7 +40,10 @@ pub struct AnonymousAuthenticator;
 
 #[async_trait]
 impl Authenticator for AnonymousAuthenticator {
-    async fn authenticate(&self, _req: &Request<Incoming>) -> Principal {
+    async fn authenticate(
+        &self,
+        _headers: &hyper::HeaderMap,
+    ) -> Principal {
         Principal::Anonymous
     }
 }
@@ -42,9 +52,10 @@ impl Authenticator for AnonymousAuthenticator {
 
 /// Decode an `Authorization: Basic <base64>` header.
 /// Returns `(username, password)` or `None` if absent or malformed.
+/// The password is wrapped in `Zeroizing` so it is zeroed on drop.
 pub fn parse_basic_auth(
     headers: &hyper::HeaderMap,
-) -> Option<(String, String)> {
+) -> Option<(String, Zeroizing<String>)> {
     use base64::Engine as _;
     let val = headers
         .get(hyper::header::AUTHORIZATION)?
@@ -56,7 +67,7 @@ pub fn parse_basic_auth(
         .ok()?;
     let decoded = String::from_utf8(bytes).ok()?;
     let (user, pass) = decoded.split_once(':')?;
-    Some((user.to_owned(), pass.to_owned()))
+    Some((user.to_owned(), Zeroizing::new(pass.to_owned())))
 }
 
 // -- LDAP ----------------------------------------------------------
@@ -78,8 +89,11 @@ impl LdapAuthenticator {
 
 #[async_trait]
 impl Authenticator for LdapAuthenticator {
-    async fn authenticate(&self, req: &Request<Incoming>) -> Principal {
-        let Some((username, password)) = parse_basic_auth(req.headers())
+    async fn authenticate(
+        &self,
+        headers: &hyper::HeaderMap,
+    ) -> Principal {
+        let Some((username, password)) = parse_basic_auth(headers)
         else {
             return Principal::Anonymous;
         };
@@ -233,8 +247,11 @@ impl PamAuthenticator {
 #[cfg(unix)]
 #[async_trait]
 impl Authenticator for PamAuthenticator {
-    async fn authenticate(&self, req: &Request<Incoming>) -> Principal {
-        let Some((username, password)) = parse_basic_auth(req.headers())
+    async fn authenticate(
+        &self,
+        headers: &hyper::HeaderMap,
+    ) -> Principal {
+        let Some((username, password)) = parse_basic_auth(headers)
         else {
             return Principal::Anonymous;
         };
@@ -293,6 +310,84 @@ fn lookup_groups(username: &str) -> anyhow::Result<Vec<String>> {
         .collect())
 }
 
+// -- Credential cache ----------------------------------------------
+
+/// Short-lived cache for HTTP Basic credentials.
+///
+/// Wraps any `Authenticator` and re-uses the last successful result
+/// for `ttl` without calling the inner back-end (PAM/LDAP).  Failed
+/// authentications are never cached so a corrected password takes
+/// effect on the next request.  Passwords are stored as
+/// `Zeroizing<String>` and are zeroed in memory on eviction or drop.
+pub struct CachingAuthenticator<A> {
+    inner: A,
+    ttl:   std::time::Duration,
+    cache: tokio::sync::RwLock<
+        std::collections::HashMap<String, CacheEntry>,
+    >,
+}
+
+struct CacheEntry {
+    password:  Zeroizing<String>,
+    principal: Principal,
+    expires:   std::time::Instant,
+}
+
+impl<A: Authenticator> CachingAuthenticator<A> {
+    pub fn new(inner: A, ttl: std::time::Duration) -> Self {
+        Self {
+            inner,
+            ttl,
+            cache: tokio::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            ),
+        }
+    }
+}
+
+#[async_trait]
+impl<A: Authenticator> Authenticator for CachingAuthenticator<A> {
+    async fn authenticate(
+        &self,
+        headers: &hyper::HeaderMap,
+    ) -> Principal {
+        let Some((username, password)) = parse_basic_auth(headers)
+        else {
+            return Principal::Anonymous;
+        };
+
+        // Cache hit: verify password matches and entry is fresh.
+        {
+            let cache = self.cache.read().await;
+            if let Some(entry) = cache.get(&username) {
+                if entry.expires > std::time::Instant::now()
+                    && *entry.password == *password
+                {
+                    return entry.principal.clone();
+                }
+            }
+        }
+
+        // Miss: delegate to inner authenticator.
+        let principal = self.inner.authenticate(headers).await;
+
+        if let Principal::Authenticated(_) = &principal {
+            let mut cache = self.cache.write().await;
+            // Lazy eviction of stale entries before inserting.
+            cache.retain(
+                |_, e| e.expires > std::time::Instant::now(),
+            );
+            cache.insert(username, CacheEntry {
+                password,
+                principal: principal.clone(),
+                expires: std::time::Instant::now() + self.ttl,
+            });
+        }
+
+        principal
+    }
+}
+
 // -- Tests ---------------------------------------------------------
 
 #[cfg(test)]
@@ -314,7 +409,7 @@ mod tests {
         let h = headers_with_auth("Basic dXNlcjpwYXNz");
         let (u, p) = parse_basic_auth(&h).unwrap();
         assert_eq!(u, "user");
-        assert_eq!(p, "pass");
+        assert_eq!(*p, "pass");
     }
 
     #[test]
@@ -326,7 +421,7 @@ mod tests {
         let h = headers_with_auth(&format!("Basic {enc}"));
         let (u, p) = parse_basic_auth(&h).unwrap();
         assert_eq!(u, "alice");
-        assert_eq!(p, "pass:word");
+        assert_eq!(*p, "pass:word");
     }
 
     #[test]
@@ -365,7 +460,7 @@ mod tests {
         let h = headers_with_auth(&format!("Basic {enc}"));
         let (u, p) = parse_basic_auth(&h).unwrap();
         assert_eq!(u, "");
-        assert_eq!(p, "password");
+        assert_eq!(*p, "password");
     }
 
     #[test]
@@ -376,7 +471,7 @@ mod tests {
         let h = headers_with_auth(&format!("Basic {enc}"));
         let (u, p) = parse_basic_auth(&h).unwrap();
         assert_eq!(u, "alice");
-        assert_eq!(p, "");
+        assert_eq!(*p, "");
     }
 
     #[test]
@@ -393,7 +488,7 @@ mod tests {
         let h = headers_with_auth(&format!("Basic {enc}"));
         let (u, p) = parse_basic_auth(&h).unwrap();
         assert_eq!(u, user);
-        assert_eq!(p, pass);
+        assert_eq!(*p, pass);
     }
 
     #[test]
@@ -413,7 +508,7 @@ mod tests {
         let h = headers_with_auth(&format!("Basic {enc}"));
         let (u, p) = parse_basic_auth(&h).unwrap();
         assert_eq!(u, "");
-        assert_eq!(p, "");
+        assert_eq!(*p, "");
     }
 
     // -- LDAP escaping ---------------------------------------------
@@ -495,5 +590,118 @@ mod tests {
     #[test]
     fn escape_filter_unicode_passthrough() {
         assert_eq!(escape_filter("h\u{e9}llo"), "h\u{e9}llo");
+    }
+
+    // -- CachingAuthenticator --------------------------------------
+
+    // Minimal authenticator: accepts "correct" as password, counts calls.
+    struct CountingAuthenticator {
+        call_count: std::sync::atomic::AtomicUsize,
+    }
+
+    impl CountingAuthenticator {
+        fn new() -> Self {
+            Self {
+                call_count: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.call_count
+                .load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl Authenticator for CountingAuthenticator {
+        async fn authenticate(
+            &self,
+            headers: &hyper::HeaderMap,
+        ) -> Principal {
+            self.call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            match parse_basic_auth(headers) {
+                Some((u, p)) if *p == "correct" => {
+                    Principal::Authenticated(Identity {
+                        username: u,
+                        groups: vec![],
+                    })
+                }
+                _ => Principal::Anonymous,
+            }
+        }
+    }
+
+    fn basic_headers(user: &str, pass: &str) -> hyper::HeaderMap {
+        use base64::Engine as _;
+        let cred = base64::engine::general_purpose::STANDARD
+            .encode(format!("{user}:{pass}"));
+        let mut map = hyper::HeaderMap::new();
+        map.insert(
+            hyper::header::AUTHORIZATION,
+            format!("Basic {cred}").parse().unwrap(),
+        );
+        map
+    }
+
+    #[tokio::test]
+    async fn cache_hit_avoids_inner_call() {
+        let auth = CachingAuthenticator::new(
+            CountingAuthenticator::new(),
+            std::time::Duration::from_secs(60),
+        );
+        let h = basic_headers("alice", "correct");
+        // First call: miss, goes to inner.
+        let p1 = auth.authenticate(&h).await;
+        assert!(matches!(p1, Principal::Authenticated(_)));
+        assert_eq!(auth.inner.calls(), 1);
+        // Second call: hit, inner not called again.
+        let p2 = auth.authenticate(&h).await;
+        assert!(matches!(p2, Principal::Authenticated(_)));
+        assert_eq!(auth.inner.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn cache_wrong_password_falls_through() {
+        let auth = CachingAuthenticator::new(
+            CountingAuthenticator::new(),
+            std::time::Duration::from_secs(60),
+        );
+        // Populate cache with correct credentials.
+        auth.authenticate(&basic_headers("alice", "correct")).await;
+        assert_eq!(auth.inner.calls(), 1);
+        // Different password: cache key mismatch → inner called again.
+        let p = auth
+            .authenticate(&basic_headers("alice", "wrong"))
+            .await;
+        assert!(matches!(p, Principal::Anonymous));
+        assert_eq!(auth.inner.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn cache_anonymous_not_stored() {
+        let auth = CachingAuthenticator::new(
+            CountingAuthenticator::new(),
+            std::time::Duration::from_secs(60),
+        );
+        let h = basic_headers("alice", "wrong");
+        auth.authenticate(&h).await;
+        auth.authenticate(&h).await;
+        // Inner called both times — anonymous results are never cached.
+        assert_eq!(auth.inner.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn cache_expired_entry_calls_inner() {
+        let auth = CachingAuthenticator::new(
+            CountingAuthenticator::new(),
+            std::time::Duration::from_millis(1),
+        );
+        let h = basic_headers("alice", "correct");
+        auth.authenticate(&h).await;
+        assert_eq!(auth.inner.calls(), 1);
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        auth.authenticate(&h).await;
+        assert_eq!(auth.inner.calls(), 2);
     }
 }

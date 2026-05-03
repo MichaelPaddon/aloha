@@ -64,13 +64,13 @@ pub struct AppState {
 // for the access evaluator (which doesn't know about hyper::Request).
 struct RequestAuthProvider<'a> {
     authenticator: &'a dyn Authenticator,
-    request: &'a Request<Incoming>,
+    headers: &'a hyper::HeaderMap,
 }
 
 #[async_trait]
 impl AuthProvider for RequestAuthProvider<'_> {
     async fn authenticate(&self) -> Principal {
-        self.authenticator.authenticate(self.request).await
+        self.authenticator.authenticate(self.headers).await
     }
 }
 
@@ -215,7 +215,7 @@ impl hyper::service::Service<Request<Incoming>> for AlohaService {
                         let principal = if let Some(policy) = &route.access_policy {
                             let auth_provider = RequestAuthProvider {
                                 authenticator: &*state.authenticator,
-                                request: &req,
+                                headers: req.headers(),
                             };
                             let mut ctx = EvalContext::new(
                                 peer.ip(),
@@ -284,7 +284,7 @@ impl hyper::service::Service<Request<Incoming>> for AlohaService {
                             .unwrap_or(false)
                             && matches!(principal, Principal::Anonymous)
                         {
-                            state.authenticator.authenticate(&req).await
+                            state.authenticator.authenticate(req.headers()).await
                         } else {
                             principal
                         };

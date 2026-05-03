@@ -100,7 +100,7 @@ pub struct GeoIpConfig {
 pub enum AuthBackend {
     /// Validate HTTP Basic credentials against the PAM stack.
     /// `service` is the PAM service name, e.g. `"login"`.
-    Pam { service: String },
+    Pam { service: String, cache_ttl_secs: u64 },
     /// Validate HTTP Basic credentials via an LDAP simple bind.
     Ldap(LdapAuthConfig),
 }
@@ -130,6 +130,9 @@ pub struct LdapAuthConfig {
     pub starttls: bool,
     /// Seconds before an LDAP operation is abandoned.
     pub timeout_secs: u64,
+    /// Seconds to cache a successful credential before re-validating.
+    /// `0` disables caching.  Defaults to 60.
+    pub cache_ttl_secs: u64,
 }
 
 /// Per-location HTTP Basic auth settings (realm for WWW-Authenticate).
@@ -706,7 +709,10 @@ fn parse_auth_backend(
         "pam" => {
             let service = child_str(node, "service")
                 .unwrap_or_else(|| "login".to_owned());
-            Ok(AuthBackend::Pam { service })
+            let cache_ttl_secs = child_i64(node, "cache-ttl")
+                .map(|n| n as u64)
+                .unwrap_or(60);
+            Ok(AuthBackend::Pam { service, cache_ttl_secs })
         }
         "ldap" => {
             let url = req_child_str(node, "url")
@@ -741,6 +747,9 @@ fn parse_auth_backend(
             let timeout_secs = child_i64(node, "timeout")
                 .map(|n| n as u64)
                 .unwrap_or(5);
+            let cache_ttl_secs = child_i64(node, "cache-ttl")
+                .map(|n| n as u64)
+                .unwrap_or(60);
 
             Ok(AuthBackend::Ldap(LdapAuthConfig {
                 url,
@@ -750,6 +759,7 @@ fn parse_auth_backend(
                 group_attr,
                 starttls,
                 timeout_secs,
+                cache_ttl_secs,
             }))
         }
         other => bail!(
@@ -3415,7 +3425,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             cfg.server.auth,
-            Some(AuthBackend::Pam { service })
+            Some(AuthBackend::Pam { service, .. })
                 if service == "login"
         ));
     }
@@ -3442,7 +3452,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             cfg.server.auth,
-            Some(AuthBackend::Pam { service })
+            Some(AuthBackend::Pam { service, .. })
                 if service == "aloha"
         ));
     }

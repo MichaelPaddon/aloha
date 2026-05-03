@@ -404,13 +404,19 @@ fn build_authenticator(
 ) -> Arc<dyn auth::Authenticator> {
     match backend {
         #[cfg(unix)]
-        Some(config::AuthBackend::Pam { service }) => {
+        Some(config::AuthBackend::Pam { service, cache_ttl_secs }) => {
             tracing::info!(service, "auth: PAM");
-            Arc::new(auth::PamAuthenticator::new(service.clone()))
+            with_cache(
+                auth::PamAuthenticator::new(service.clone()),
+                *cache_ttl_secs,
+            )
         }
         Some(config::AuthBackend::Ldap(cfg)) => {
             tracing::info!(url = %cfg.url, "auth: LDAP");
-            Arc::new(auth::LdapAuthenticator::new(cfg.clone()))
+            with_cache(
+                auth::LdapAuthenticator::new(cfg.clone()),
+                cfg.cache_ttl_secs,
+            )
         }
         None => Arc::new(auth::AnonymousAuthenticator),
         // On non-Unix builds, PAM is unavailable; fall through to anonymous.
@@ -422,5 +428,20 @@ fn build_authenticator(
             );
             Arc::new(auth::AnonymousAuthenticator)
         }
+    }
+}
+
+fn with_cache<A: auth::Authenticator + 'static>(
+    inner: A,
+    ttl_secs: u64,
+) -> Arc<dyn auth::Authenticator> {
+    if ttl_secs > 0 {
+        tracing::info!(ttl_secs, "auth: credential cache enabled");
+        Arc::new(auth::CachingAuthenticator::new(
+            inner,
+            std::time::Duration::from_secs(ttl_secs),
+        ))
+    } else {
+        Arc::new(inner)
     }
 }

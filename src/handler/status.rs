@@ -86,7 +86,7 @@ impl ServerSummary {
             .collect();
 
         let auth = config.server.auth.as_ref().map(|b| match b {
-            AuthBackend::Pam { service } => {
+            AuthBackend::Pam { service, .. } => {
                 format!("pam:{service}")
             }
             AuthBackend::Ldap(c) => format!("ldap:{}", c.url),
