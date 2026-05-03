@@ -711,7 +711,7 @@ where
             AccessOutcome::Allow => {}
             // Redirect is meaningless over raw TCP; treat as deny.
             _ => {
-                debug!(%peer_addr, "tcp proxy: access denied");
+                tracing::warn!(%peer_addr, "tcp proxy: access denied");
                 return Ok(());
             }
         }
