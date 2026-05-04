@@ -737,7 +737,17 @@ where
         }
     }
 
-    let mut backend = tokio::net::TcpStream::connect(upstream).await?;
+    let mut backend = match tokio::net::TcpStream::connect(upstream).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(
+                %peer_addr,
+                upstream,
+                "tcp proxy: upstream connect failed: {e}",
+            );
+            return Ok(());
+        }
+    };
 
     if let Some(version) = proxy_protocol {
         // Use the listener's local address as the "destination" in the
