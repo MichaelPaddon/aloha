@@ -460,7 +460,7 @@
         <li><strong>Children</strong> live inside <code>{ }</code>, one per line:
             <code>bind "[::]:8080"</code></li>
         <li>Line comments start with <code>//</code></li>
-        <li>The null literal is written <code>null</code></li>
+        <li>The null literal is written <code>#null</code>; booleans are <code>#true</code> / <code>#false</code></li>
       </ul>
     </section>
 
@@ -556,13 +556,13 @@
       <p>
         In container deployments using
         <code>podman run --group-add keep-groups</code>, set
-        <code>keep-groups true</code> to preserve the supplementary groups
+        <code>keep-groups #true</code> to preserve the supplementary groups
         passed in by podman instead of replacing them with
         <code>setgroups()</code>.
       </p>
 <pre><code><span class="kw">server</span> { <span class="kw">user</span> <span class="str">"www-data"</span> }                 <span class="cm">// group from /etc/passwd</span>
 <span class="kw">server</span> { <span class="kw">user</span> <span class="str">"aloha"</span>; <span class="kw">group</span> <span class="str">"aloha"</span> }  <span class="cm">// explicit group</span>
-<span class="kw">server</span> { <span class="kw">user</span> <span class="str">"aloha"</span>; <span class="kw">keep-groups</span> <span class="kw">true</span> }  <span class="cm">// container: preserve inherited groups</span></code></pre>
+<span class="kw">server</span> { <span class="kw">user</span> <span class="str">"aloha"</span>; <span class="kw">keep-groups</span> <span class="num">#true</span> }  <span class="cm">// container: preserve inherited groups</span></code></pre>
     </section>
 
     <!-- listener -->
@@ -590,7 +590,7 @@
 <span class="cm">// null disables the fallback -- unrecognised hosts get a 404</span>
 <span class="kw">listener</span> {
     <span class="kw">bind</span>          <span class="str">"[::]:80"</span>
-    <span class="kw">default-vhost</span> <span class="num">null</span>
+    <span class="kw">default-vhost</span> <span class="num">#null</span>
 }
 
 <span class="cm">// systemd socket activation (fd 3 = first socket passed by systemd)</span>
@@ -613,11 +613,11 @@
                   <code>bind</code>.</td>
             </tr>
             <tr>
-              <td>default-vhost</td><td>string | <code>null</code></td>
+              <td>default-vhost</td><td>string | <code>#null</code></td>
               <td><em>first vhost</em></td>
               <td>Vhost used when no <code>Host</code> header matches.
                   Omit to fall back to the first vhost defined in the config.
-                  Set to <code>null</code> to return 404 for unrecognised hosts.</td>
+                  Set to <code>#null</code> to return 404 for unrecognised hosts.</td>
             </tr>
           </tbody>
         </table>
@@ -1014,7 +1014,7 @@
         <span class="cm">// Optional:</span>
         <span class="kw">group-filter</span> <span class="str">"(memberUid={user})"</span>
         <span class="kw">group-attr</span>   <span class="str">"cn"</span>
-        <span class="kw">starttls</span>     <span class="num">false</span>
+        <span class="kw">starttls</span>     <span class="num">#false</span>
         <span class="kw">timeout</span>      <span class="num">5</span>
     }
 }</code></pre>
@@ -1349,7 +1349,7 @@
 <pre><code><span class="kw">location</span> <span class="str">"/assets/"</span> {
     <span class="kw">static</span> {
         <span class="kw">root</span>         <span class="str">"/var/www/assets"</span>
-        <span class="kw">strip-prefix</span> <span class="num">true</span>
+        <span class="kw">strip-prefix</span> <span class="num">#true</span>
         <span class="kw">index-file</span>   <span class="str">"index.html"</span>
         <span class="kw">index-file</span>   <span class="str">"index.htm"</span>
     }
@@ -1394,7 +1394,7 @@
 <pre><code><span class="kw">location</span> <span class="str">"/api/"</span> {
     <span class="kw">proxy</span> {
         <span class="kw">upstream</span>     <span class="str">"http://127.0.0.1:3000"</span>
-        <span class="kw">strip-prefix</span> <span class="num">true</span>
+        <span class="kw">strip-prefix</span> <span class="num">#true</span>
     }
 }</code></pre>
       <div class="table-wrap">
@@ -2016,7 +2016,7 @@ Vary: Accept-Encoding</code></pre>
         }
         <span class="kw">proxy</span> {
             <span class="kw">upstream</span>     <span class="str">"http://127.0.0.1:4000"</span>
-            <span class="kw">strip-prefix</span> <span class="num">true</span>
+            <span class="kw">strip-prefix</span> <span class="num">#true</span>
         }
     }
 

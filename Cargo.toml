@@ -25,8 +25,8 @@ arc-swap           = "1"
 x509-parser        = "0.18"
 serde_json         = "1"
 tokio              = { version = "1",    features = ["full"] }
-kdl                = "4"
-miette             = { version = "5", default-features = false }
+kdl                = "6"
+miette             = { version = "7", default-features = false }
 regex              = "1"
 anyhow             = "1"
 mime_guess         = "2"

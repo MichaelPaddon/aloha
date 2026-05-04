@@ -542,7 +542,7 @@ mod tests {
             listener {
                 bind "0.0.0.0:80"
             }
-            vhost r"~.+\.example\.com" {
+            vhost "~.+\\.example\\.com" {
                 location "/" {
                     static { root "/var/www/example"; }
                 }
@@ -566,9 +566,9 @@ mod tests {
             r#"
             listener {
                 bind "0.0.0.0:80"
-                default-vhost null
+                default-vhost #null
             }
-            vhost r"~.+\.example\.com" {
+            vhost "~.+\\.example\\.com" {
                 location "/" {
                     static { root "/var/www/example"; }
                 }
@@ -601,7 +601,7 @@ mod tests {
                     static { root "/exact"; }
                 }
             }
-            vhost r"~.+\.example\.com" {
+            vhost "~.+\\.example\\.com" {
                 location "/wild/" {
                     static { root "/wild"; }
                 }
@@ -638,14 +638,14 @@ mod tests {
             r#"
             listener {
                 bind "0.0.0.0:80"
-                default-vhost null
+                default-vhost #null
             }
-            vhost r"~.*\.com" {
+            vhost "~.*\\.com" {
                 location "/first/" {
                     static { root "/first"; }
                 }
             }
-            vhost r"~.+\.example\.com" {
+            vhost "~.+\\.example\\.com" {
                 location "/second/" {
                     static { root "/second"; }
                 }
@@ -670,10 +670,10 @@ mod tests {
             r#"
             listener {
                 bind "0.0.0.0:80"
-                default-vhost null
+                default-vhost #null
             }
             vhost "example.com" {
-                alias r"~.+\.example\.com"
+                alias "~.+\\.example\\.com"
                 location "/" {
                     static { root "."; }
                 }
@@ -702,7 +702,7 @@ mod tests {
             listener {
                 bind "0.0.0.0:80"
             }
-            vhost r"~.+\.example\.com" {
+            vhost "~.+\\.example\\.com" {
                 location "/" {
                     static { root "."; }
                 }
@@ -731,14 +731,14 @@ mod tests {
             r#"
             listener {
                 bind "0.0.0.0:80"
-                default-vhost r"~.+\.example\.com"
+                default-vhost "~.+\\.example\\.com"
             }
             vhost "exact.com" {
                 location "/exact/" {
                     static { root "/exact"; }
                 }
             }
-            vhost r"~.+\.example\.com" {
+            vhost "~.+\\.example\\.com" {
                 location "/wild/" {
                     static { root "/wild"; }
                 }

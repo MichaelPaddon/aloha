@@ -648,14 +648,14 @@ fn parse_server(node: &KdlNode, src: &str, name: &str) -> anyhow::Result<ServerC
                 .entries()
                 .iter()
                 .find(|e| e.name().is_none())
-                .and_then(|e| e.value().as_i64())
+                .and_then(|e| e.value().as_integer())
                 .map(|n| n as u16)
                 .ok_or_else(|| anyhow!(
                     "{name}:{child_line}: 'error-page' requires a \
                      numeric status code as first argument"
                 ))?;
             let def = if let Some(html) = child.get("html")
-                .and_then(|e| e.value().as_string())
+                .and_then(|e| e.as_string())
             {
                 ErrorPageDef::Inline(html.to_owned())
             } else if let Some(path) = arg_str(child, 1) {
@@ -786,7 +786,7 @@ fn parse_listener(
     let fd = children
         .iter()
         .find(|n| n.name().value() == "fd")
-        .and_then(|n| n.get(0)?.value().as_i64())
+        .and_then(|n| n.get(0)?.as_integer())
         .map(|n| n as i32);
     let raw_default_vhost = child_null_or_str(node, "default-vhost");
     let tls = children
@@ -1125,7 +1125,7 @@ fn parse_access_statements(
             "deny" => {
                 let code = child
                     .get("code")
-                    .and_then(|e| e.value().as_i64())
+                    .and_then(|e| e.as_integer())
                     .map(|n| n as u16)
                     .unwrap_or(403);
                 AccessAction::Deny { code }
@@ -1133,7 +1133,7 @@ fn parse_access_statements(
             "redirect" => {
                 let to = child
                     .get("to")
-                    .and_then(|e| e.value().as_string())
+                    .and_then(|e| e.as_string())
                     .map(String::from)
                     .ok_or_else(|| {
                         anyhow!(
@@ -1143,7 +1143,7 @@ fn parse_access_statements(
                     })?;
                 let code = child
                     .get("code")
-                    .and_then(|e| e.value().as_i64())
+                    .and_then(|e| e.as_integer())
                     .map(|n| n as u16)
                     .unwrap_or(302);
                 AccessAction::Redirect { to, code }
@@ -1362,12 +1362,9 @@ fn parse_handler(
 }
 
 // -- KDL access helpers --------------------------------------------
-//
-// kdl 4.x: node.get(key) returns &KdlEntry; call .value() to reach
-// the underlying &KdlValue.
 
 fn arg_str(node: &KdlNode, pos: usize) -> Option<String> {
-    node.get(pos)?.value().as_string().map(String::from)
+    node.get(pos)?.as_string().map(String::from)
 }
 
 fn req_arg_str(node: &KdlNode, pos: usize) -> anyhow::Result<String> {
@@ -1404,7 +1401,7 @@ fn child_i64(node: &KdlNode, key: &str) -> Option<i64> {
         .nodes()
         .iter()
         .find(|n| n.name().value() == key)?;
-    child.get(0)?.value().as_i64()
+    child.get(0)?.as_integer().map(|n| n as i64)
 }
 
 fn child_bool(node: &KdlNode, key: &str) -> Option<bool> {
@@ -1413,7 +1410,6 @@ fn child_bool(node: &KdlNode, key: &str) -> Option<bool> {
         .iter()
         .find(|n| n.name().value() == key)?
         .get(0)?
-        .value()
         .as_bool()
 }
 
@@ -1429,7 +1425,7 @@ fn child_null_or_str(
         .nodes()
         .iter()
         .find(|n| n.name().value() == key)?;
-    Some(match child.get(0)?.value() {
+    Some(match child.get(0)? {
         KdlValue::Null => None,
         other          => other.as_string().map(String::from),
     })
@@ -2466,7 +2462,7 @@ mod tests {
             r#"
             listener {
                 bind "0.0.0.0:80"
-                default-vhost null
+                default-vhost #null
             }
             vhost "h" {
                 location "/" {
@@ -2478,7 +2474,7 @@ mod tests {
         .unwrap();
         assert!(
             cfg.listeners[0].default_vhost.is_none(),
-            "default-vhost null should leave no fallback vhost"
+            "default-vhost #null should leave no fallback vhost"
         );
     }
 
@@ -2520,7 +2516,7 @@ mod tests {
             }
             listener {
                 bind "0.0.0.0:443"
-                default-vhost null
+                default-vhost #null
             }
             vhost "h" {
                 location "/" {
@@ -2663,7 +2659,7 @@ mod tests {
             r#"
             server {
                 user "aloha"
-                keep-groups true
+                keep-groups #true
             }
             listener {
                 bind "0.0.0.0:80"
@@ -3364,7 +3360,7 @@ mod tests {
             r#"
             server {
                 health {
-                    enabled true
+                    enabled #true
                 }
             }
             listener {
@@ -3387,7 +3383,7 @@ mod tests {
             r#"
             server {
                 health {
-                    enabled false
+                    enabled #false
                 }
             }
             listener {
@@ -3595,7 +3591,7 @@ mod tests {
                     base-dn "ou=groups,dc=example,dc=com"
                     group-filter "(member=uid={user},ou=people,dc=example,dc=com)"
                     group-attr "cn"
-                    starttls false
+                    starttls #false
                     timeout 10
                 }
             }
@@ -3777,7 +3773,7 @@ mod tests {
                     url "ldap://localhost:389"
                     bind-dn "uid={user},ou=people,dc=example,dc=com"
                     base-dn "ou=groups,dc=example,dc=com"
-                    starttls true
+                    starttls #true
                 }
             }
             listener {

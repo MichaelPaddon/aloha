@@ -35,7 +35,7 @@ server {
 //
 // default-vhost chooses the virtual host used when no Host header
 // matches.  Omit it to fall back to the first vhost defined below;
-// set it to null to return 404 for unrecognised hosts instead.
+// set it to #null to return 404 for unrecognised hosts instead.
 
 // Plain HTTP on port 80.
 // Required for ACME / Let's Encrypt HTTP-01 challenges -- Let's Encrypt
@@ -84,7 +84,7 @@ listener {
 //     bind "[::]:443"
 //     tls "acme" {
 //         domain "example.com"
-//         staging true
+//         staging #true
 //     }
 // }
 
