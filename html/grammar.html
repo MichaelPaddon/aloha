@@ -1,0 +1,702 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>aloha &mdash; Config Grammar (EBNF)</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+
+    :root {
+      --sidebar-w: 220px;
+      --top-h:     54px;
+
+      --bg:        #f5f7fa;
+      --surface:   #ffffff;
+      --border:    #dde3eb;
+      --text:      #1a2332;
+      --muted:     #5e6e82;
+      --accent:    #1e3a5f;
+      --accent-bg: #edf2f8;
+      --green:     #16a34a;
+      --green-bg:  #dcfce7;
+      --amber:     #b45309;
+      --amber-bg:  #fef3c7;
+      --red:       #b91c1c;
+      --red-bg:    #fee2e2;
+
+      /* Code -- deep navy */
+      --code-bg:   #1a2332;
+      --code-fg:   #e8e4d8;
+      --kw:        #7fc8ff;
+      --str:       #a8d4ff;
+      --num:       #f0c848;
+      --prop:      #d4a8ff;
+      --cm:        #8898b0;
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
+                   system-ui, sans-serif;
+      font-size: 15px;
+      line-height: 1.65;
+      color: var(--text);
+      background: var(--bg);
+    }
+
+    /* -- Top bar ---------------------------------------------- */
+
+    .topbar {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      height: var(--top-h);
+      background: #1e3a5f;
+      border-bottom: 1px solid #162e4e;
+      display: flex;
+      align-items: center;
+      padding: 0 1.5rem;
+      gap: 0.75rem;
+      z-index: 100;
+    }
+    .topbar-logo-img {
+      height: 28px;
+      width: auto;
+      filter: brightness(0) invert(1);
+      flex-shrink: 0;
+      text-decoration: none;
+      display: block;
+    }
+    .topbar-sep {
+      width: 1px;
+      height: 1.2rem;
+      background: rgba(255,255,255,0.18);
+    }
+    .topbar-title {
+      font-size: 0.82rem;
+      color: rgba(255,255,255,0.55);
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+      font-weight: 600;
+    }
+    .topbar-home {
+      margin-left: auto;
+      font-size: 0.82rem;
+      color: rgba(255,255,255,0.55);
+      text-decoration: none;
+      padding: 0.3rem 0.7rem;
+      border: 1px solid rgba(255,255,255,0.20);
+      border-radius: 6px;
+      transition: border-color 0.15s, color 0.15s;
+    }
+    .topbar-home:hover { color: #ffffff; border-color: rgba(255,255,255,0.55); }
+
+    /* -- Layout ----------------------------------------------- */
+
+    .shell {
+      display: flex;
+      min-height: 100vh;
+      padding-top: var(--top-h);
+    }
+
+    /* -- Sidebar ---------------------------------------------- */
+
+    .sidebar {
+      width: var(--sidebar-w);
+      flex-shrink: 0;
+      position: sticky;
+      top: var(--top-h);
+      height: calc(100vh - var(--top-h));
+      overflow-y: auto;
+      padding: 1.5rem 0 2rem;
+      border-right: 1px solid var(--border);
+      background: var(--surface);
+      scrollbar-width: thin;
+    }
+
+    .nav-section {
+      margin-bottom: 1.25rem;
+    }
+    .nav-heading {
+      font-size: 0.7rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+      padding: 0 1.25rem 0.35rem;
+    }
+    .nav-list {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+    }
+    .nav-list a {
+      display: block;
+      padding: 0.28rem 1.25rem;
+      font-size: 0.875rem;
+      color: var(--text);
+      text-decoration: none;
+      border-left: 3px solid transparent;
+      transition: color 0.12s, border-color 0.12s, background 0.12s;
+    }
+    .nav-list a:hover {
+      color: var(--accent);
+      background: var(--accent-bg);
+    }
+    .nav-list a.active {
+      color: var(--accent);
+      border-left-color: var(--accent);
+      background: var(--accent-bg);
+      font-weight: 600;
+    }
+    .nav-list.sub a {
+      padding-left: 2.1rem;
+      font-size: 0.83rem;
+      color: var(--muted);
+    }
+    .nav-list.sub a:hover,
+    .nav-list.sub a.active {
+      color: var(--accent);
+    }
+
+    /* -- Content ---------------------------------------------- */
+
+    .content {
+      flex: 1;
+      min-width: 0;
+      padding: 2.5rem 3rem 4rem;
+      max-width: 800px;
+    }
+
+    .page-header { margin-bottom: 2.5rem; }
+    .page-header h1 {
+      font-size: 1.9rem;
+      font-weight: 800;
+      margin: 0 0 0.25rem;
+      color: var(--text);
+      letter-spacing: -0.02em;
+    }
+    .page-header p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.95rem;
+    }
+
+    section { margin-bottom: 3rem; }
+
+    h2 {
+      font-size: 1.2rem;
+      font-weight: 700;
+      color: var(--text);
+      margin: 0 0 1rem;
+      padding-bottom: 0.4rem;
+      border-bottom: 2px solid var(--border);
+      scroll-margin-top: calc(var(--top-h) + 1.5rem);
+    }
+
+    h3 {
+      font-size: 0.95rem;
+      font-weight: 700;
+      color: var(--text);
+      margin: 1.75rem 0 0.6rem;
+      scroll-margin-top: calc(var(--top-h) + 1.5rem);
+    }
+
+    p { margin: 0 0 0.9rem; }
+    ul, ol { margin: 0 0 0.9rem; padding-left: 1.5rem; }
+    li { margin-bottom: 0.2rem; }
+
+    /* -- Tables ----------------------------------------------- */
+
+    .table-wrap {
+      overflow-x: auto;
+      margin-bottom: 1.25rem;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.875rem;
+    }
+    thead th {
+      background: var(--bg);
+      text-align: left;
+      padding: 0.55rem 0.9rem;
+      font-weight: 600;
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--muted);
+      border-bottom: 1px solid var(--border);
+    }
+    tbody tr { border-bottom: 1px solid var(--border); }
+    tbody tr:last-child { border-bottom: none; }
+    tbody tr:hover { background: var(--accent-bg); }
+    td {
+      padding: 0.55rem 0.9rem;
+      vertical-align: top;
+    }
+    td:first-child {
+      font-family: ui-monospace, "SF Mono", Consolas, monospace;
+      font-size: 0.82rem;
+      color: var(--accent);
+      white-space: nowrap;
+      width: 12em;
+    }
+    td:nth-child(2) {
+      font-size: 0.83rem;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+
+    /* -- Badges ----------------------------------------------- */
+
+    .badge {
+      display: inline-block;
+      font-size: 0.65rem;
+      font-weight: 700;
+      padding: 0.15em 0.5em;
+      border-radius: 20px;
+      vertical-align: middle;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+    }
+    .badge-req  { background: var(--red-bg);   color: var(--red);   }
+    .badge-opt  { background: var(--accent-bg); color: var(--accent); }
+    .badge-stub { background: var(--amber-bg);  color: var(--amber);  }
+
+    /* -- Code blocks ------------------------------------------ */
+
+    pre {
+      background: var(--code-bg);
+      color: var(--code-fg);
+      padding: 1.1rem 1.4rem;
+      border-radius: 8px;
+      overflow-x: auto;
+      font-size: 0.82rem;
+      line-height: 1.6;
+      margin: 0 0 1.1rem;
+      font-family: ui-monospace, "SF Mono", Consolas, monospace;
+    }
+    code {
+      font-family: ui-monospace, "SF Mono", Consolas, monospace;
+      font-size: 0.875em;
+      background: var(--accent-bg);
+      color: var(--accent);
+      padding: 0.1em 0.35em;
+      border-radius: 4px;
+    }
+    pre code { background: none; padding: 0; color: inherit; font-size: inherit; }
+
+    /* EBNF syntax colours */
+    .nt   { color: var(--kw); }        /* non-terminal */
+    .lit  { color: var(--str); }       /* literal string */
+    .op   { color: var(--num); }       /* operator: | * + ? = */
+    .cm   { color: var(--cm); font-style: italic; }  /* comment */
+
+    /* -- Callouts --------------------------------------------- */
+
+    .callout {
+      display: flex;
+      gap: 0.75rem;
+      padding: 0.85rem 1rem;
+      border-radius: 8px;
+      font-size: 0.875rem;
+      margin: 0 0 1.1rem;
+      border: 1px solid;
+    }
+    .callout-icon { flex-shrink: 0; font-size: 1rem; line-height: 1.65; }
+    .callout.info  { background: var(--accent-bg); border-color: #b0c4d8; color: #1a3352; }
+    .callout.warn  { background: var(--amber-bg);  border-color: #f0c040; color: #7d4e00; }
+
+    /* -- Divider ---------------------------------------------- */
+
+    .divider {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 2.5rem 0;
+    }
+
+    /* -- Footer ----------------------------------------------- */
+
+    footer {
+      font-size: 0.78rem;
+      color: var(--muted);
+      padding-top: 1.5rem;
+      border-top: 1px solid var(--border);
+    }
+
+    /* -- Responsive ------------------------------------------- */
+
+    @media (max-width: 768px) {
+      .sidebar { display: none; }
+      .content { padding: 1.5rem 1.25rem 3rem; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- Top bar -->
+<header class="topbar">
+  <a href="/"><img class="topbar-logo-img" src="/aloha-logo.svg" alt="aloha"></a>
+  <div class="topbar-sep"></div>
+  <span class="topbar-title">Config Grammar (EBNF)</span>
+  <a class="topbar-home" href="/">&#8592; Home</a>
+</header>
+
+<div class="shell">
+
+  <!-- Sidebar navigation -->
+  <nav class="sidebar" aria-label="Page navigation">
+    <div class="nav-section">
+      <div class="nav-heading">Getting started</div>
+      <ul class="nav-list">
+        <li><a href="#legend">Notation legend</a></li>
+      </ul>
+    </div>
+    <div class="nav-section">
+      <div class="nav-heading">Grammar</div>
+      <ul class="nav-list">
+        <li><a href="#top-level">Top-level</a></li>
+        <li><a href="#server">server</a></li>
+        <li><a href="#listener">listener</a></li>
+        <li><a href="#vhost">vhost</a></li>
+        <li><a href="#location">location</a></li>
+        <li><a href="#handlers">Handlers</a></li>
+        <li><a href="#access">Access control</a></li>
+        <li><a href="#header-ops">Header operations</a></li>
+      </ul>
+    </div>
+  </nav>
+
+  <!-- Main content -->
+  <main class="content">
+
+    <div class="page-header">
+      <h1>Config Grammar (EBNF)</h1>
+      <p>Formal grammar for <code>aloha.kdl</code></p>
+    </div>
+
+    <!-- Notation legend -->
+    <section id="legend">
+      <h2>Notation legend</h2>
+      <p>
+        aloha uses <a href="https://kdl.dev">KDL v2</a> as its configuration language.
+        The grammar below uses a pseudo-EBNF adapted to KDL&rsquo;s structure.
+        KDL distinguishes three kinds of values on a node: positional arguments
+        (bare values), named properties (<code>key=value</code>), and child blocks
+        (<code>{ &hellip; }</code>).  Each is shown explicitly in the rules below.
+      </p>
+<pre><code><span class="cm">(* Notation used throughout this document *)</span>
+
+<span class="nt">&lt;name&gt;</span>            <span class="cm">(* non-terminal — defined elsewhere in the grammar *)</span>
+<span class="lit">"literal"</span>         <span class="cm">(* literal KDL string value *)</span>
+<span class="nt">&lt;string&gt;</span>          <span class="cm">(* any KDL string *)</span>
+<span class="nt">&lt;integer&gt;</span>         <span class="cm">(* KDL integer value *)</span>
+<span class="nt">&lt;boolean&gt;</span>         <span class="cm">(* #true or #false *)</span>
+<span class="op">[</span> x <span class="op">]</span>            <span class="cm">(* x is optional *)</span>
+x <span class="op">|</span> y             <span class="cm">(* either x or y *)</span>
+x<span class="op">*</span>               <span class="cm">(* zero or more repetitions of x *)</span>
+x<span class="op">+</span>               <span class="cm">(* one or more repetitions of x *)</span>
+<span class="op">{</span> &hellip; <span class="op">}</span>          <span class="cm">(* KDL child block *)</span>
+<span class="lit">prop</span><span class="op">=</span><span class="nt">&lt;value&gt;</span>      <span class="cm">(* named KDL property (not a positional argument) *)</span>
+<span class="cm">(* comment *)</span>     <span class="cm">(* explanatory note, not part of the syntax *)</span></code></pre>
+      <div class="callout info">
+        <span class="callout-icon">i</span>
+        <span>
+          See the <a href="/config.html">Configuration Reference</a> for prose
+          explanations, defaults, and annotated examples for every node.
+        </span>
+      </div>
+    </section>
+
+    <!-- Top-level -->
+    <section id="top-level">
+      <h2>Top-level</h2>
+      <p>
+        A config file contains at most one <code>server</code> block, one or more
+        <code>listener</code> blocks, and zero or more <code>vhost</code> blocks.
+        Any other top-level node is a hard error.
+      </p>
+<pre><code><span class="nt">config</span>   <span class="op">=</span> <span class="nt">server</span><span class="op">?</span> <span class="nt">listener</span><span class="op">+</span> <span class="nt">vhost</span><span class="op">*</span>
+
+<span class="nt">server</span>   <span class="op">=</span> <span class="lit">"server"</span>              <span class="op">{</span> <span class="nt">server-child</span><span class="op">*</span> <span class="op">}</span>
+<span class="nt">listener</span> <span class="op">=</span> <span class="lit">"listener"</span>            <span class="op">{</span> <span class="nt">listener-child</span><span class="op">*</span> <span class="op">}</span>
+<span class="nt">vhost</span>    <span class="op">=</span> <span class="lit">"vhost"</span> <span class="nt">&lt;hostname&gt;</span>    <span class="op">{</span> <span class="nt">vhost-child</span><span class="op">*</span> <span class="op">}</span></code></pre>
+      <div class="callout info">
+        <span class="callout-icon">i</span>
+        <span>
+          <code>vhost</code> blocks are required unless every listener uses
+          <code>tcp-proxy</code> mode, which bypasses HTTP routing entirely.
+        </span>
+      </div>
+    </section>
+
+    <!-- server -->
+    <section id="server">
+      <h2>server</h2>
+      <p>Global server settings.  All children are optional.</p>
+<pre><code><span class="nt">server-child</span> <span class="op">=</span>
+    <span class="lit">"state-dir"</span>      <span class="nt">&lt;string&gt;</span>
+  <span class="op">|</span> <span class="lit">"user"</span>           <span class="nt">&lt;string&gt;</span>
+  <span class="op">|</span> <span class="lit">"group"</span>          <span class="nt">&lt;string&gt;</span>
+  <span class="op">|</span> <span class="lit">"keep-groups"</span>    <span class="nt">&lt;boolean&gt;</span>
+  <span class="op">|</span> <span class="nt">tls-options-block</span>
+  <span class="op">|</span> <span class="nt">auth-backend</span>
+  <span class="op">|</span> <span class="nt">geoip-block</span>
+  <span class="op">|</span> <span class="nt">health-block</span>
+  <span class="op">|</span> <span class="nt">access-policy-def</span>
+  <span class="op">|</span> <span class="nt">error-page-def</span></code></pre>
+
+      <h3>TLS defaults</h3>
+<pre><code><span class="nt">tls-options-block</span> <span class="op">=</span> <span class="lit">"tls"</span> <span class="op">{</span> <span class="nt">tls-option</span><span class="op">*</span> <span class="op">}</span>
+<span class="nt">tls-option</span>        <span class="op">=</span>   <span class="lit">"min-version"</span> <span class="op">(</span><span class="lit">"1.2"</span> <span class="op">|</span> <span class="lit">"1.3"</span><span class="op">)</span>
+                    <span class="op">|</span> <span class="lit">"cipher"</span>      <span class="nt">&lt;string&gt;</span></code></pre>
+
+      <h3>Authentication backend</h3>
+<pre><code><span class="nt">auth-backend</span> <span class="op">=</span>
+    <span class="lit">"auth"</span> <span class="lit">"pam"</span>  <span class="op">[</span> <span class="op">{</span> <span class="nt">pam-child</span><span class="op">*</span> <span class="op">}</span> <span class="op">]</span>
+  <span class="op">|</span> <span class="lit">"auth"</span> <span class="lit">"ldap"</span> <span class="op">{</span> <span class="nt">ldap-child</span><span class="op">*</span> <span class="op">}</span>
+
+<span class="nt">pam-child</span> <span class="op">=</span>
+    <span class="lit">"service"</span>   <span class="nt">&lt;string&gt;</span>   <span class="cm">(* default: "login" *)</span>
+  <span class="op">|</span> <span class="lit">"cache-ttl"</span> <span class="nt">&lt;integer&gt;</span>  <span class="cm">(* seconds; default: 60 *)</span>
+
+<span class="nt">ldap-child</span> <span class="op">=</span>
+    <span class="lit">"url"</span>          <span class="nt">&lt;string&gt;</span>   <span class="cm">(* required; ldap:// ldaps:// ldapi:// *)</span>
+  <span class="op">|</span> <span class="lit">"bind-dn"</span>      <span class="nt">&lt;string&gt;</span>   <span class="cm">(* required; must contain {user} *)</span>
+  <span class="op">|</span> <span class="lit">"base-dn"</span>      <span class="nt">&lt;string&gt;</span>   <span class="cm">(* required *)</span>
+  <span class="op">|</span> <span class="lit">"group-filter"</span> <span class="nt">&lt;string&gt;</span>   <span class="cm">(* default: "(memberUid={user})" *)</span>
+  <span class="op">|</span> <span class="lit">"group-attr"</span>   <span class="nt">&lt;string&gt;</span>   <span class="cm">(* default: "cn" *)</span>
+  <span class="op">|</span> <span class="lit">"starttls"</span>     <span class="nt">&lt;boolean&gt;</span>  <span class="cm">(* default: #false *)</span>
+  <span class="op">|</span> <span class="lit">"timeout"</span>      <span class="nt">&lt;integer&gt;</span>  <span class="cm">(* seconds; default: 5 *)</span>
+  <span class="op">|</span> <span class="lit">"cache-ttl"</span>    <span class="nt">&lt;integer&gt;</span>  <span class="cm">(* seconds; default: 60 *)</span></code></pre>
+
+      <h3>GeoIP, health, named access policies, error pages</h3>
+<pre><code><span class="nt">geoip-block</span>       <span class="op">=</span> <span class="lit">"geoip"</span>         <span class="op">{</span> <span class="lit">"db"</span> <span class="nt">&lt;string&gt;</span> <span class="op">}</span>
+<span class="nt">health-block</span>      <span class="op">=</span> <span class="lit">"health"</span>        <span class="op">{</span> <span class="lit">"enabled"</span> <span class="nt">&lt;boolean&gt;</span> <span class="op">}</span>
+<span class="nt">access-policy-def</span> <span class="op">=</span> <span class="lit">"access-policy"</span> <span class="nt">&lt;string&gt;</span> <span class="op">{</span> <span class="nt">access-statement</span><span class="op">*</span> <span class="op">}</span>
+
+<span class="nt">error-page-def</span> <span class="op">=</span>
+    <span class="lit">"error-page"</span> <span class="nt">&lt;integer&gt;</span> <span class="nt">&lt;string&gt;</span>           <span class="cm">(* path to an HTML file *)</span>
+  <span class="op">|</span> <span class="lit">"error-page"</span> <span class="nt">&lt;integer&gt;</span> <span class="lit">html</span><span class="op">=</span><span class="nt">&lt;string&gt;</span>       <span class="cm">(* inline HTML string *)</span></code></pre>
+    </section>
+
+    <!-- listener -->
+    <section id="listener">
+      <h2>listener</h2>
+<pre><code><span class="nt">listener-child</span> <span class="op">=</span>
+    <span class="lit">"bind"</span>          <span class="nt">&lt;string&gt;</span>           <span class="cm">(* mutually exclusive with fd *)</span>
+  <span class="op">|</span> <span class="lit">"fd"</span>            <span class="nt">&lt;integer&gt;</span>          <span class="cm">(* mutually exclusive with bind *)</span>
+  <span class="op">|</span> <span class="lit">"default-vhost"</span> <span class="op">(</span><span class="nt">&lt;string&gt;</span> <span class="op">|</span> <span class="lit">#null</span><span class="op">)</span>  <span class="cm">(* #null disables fallback *)</span>
+  <span class="op">|</span> <span class="nt">tls-block</span>
+  <span class="op">|</span> <span class="nt">timeouts-block</span>
+  <span class="op">|</span> <span class="nt">tcp-proxy-block</span></code></pre>
+
+      <h3>TLS</h3>
+<pre><code><span class="nt">tls-block</span> <span class="op">=</span>
+    <span class="lit">"tls"</span>                      <span class="op">{</span> <span class="nt">tls-file-child</span><span class="op">*</span> <span class="nt">tls-option</span><span class="op">*</span> <span class="op">}</span>  <span class="cm">(* mode inferred from children *)</span>
+  <span class="op">|</span> <span class="lit">"tls"</span> <span class="lit">"self-signed"</span>
+  <span class="op">|</span> <span class="lit">"tls"</span> <span class="lit">"file"</span>              <span class="op">{</span> <span class="nt">tls-file-child</span><span class="op">+</span> <span class="nt">tls-option</span><span class="op">*</span> <span class="op">}</span>
+  <span class="op">|</span> <span class="lit">"tls"</span> <span class="lit">"acme"</span>              <span class="op">{</span> <span class="nt">tls-acme-child</span><span class="op">+</span> <span class="nt">tls-option</span><span class="op">*</span> <span class="op">}</span>
+
+<span class="nt">tls-file-child</span> <span class="op">=</span> <span class="lit">"cert"</span> <span class="nt">&lt;string&gt;</span> <span class="op">|</span> <span class="lit">"key"</span> <span class="nt">&lt;string&gt;</span>
+
+<span class="nt">tls-acme-child</span> <span class="op">=</span>
+    <span class="lit">"domain"</span>         <span class="nt">&lt;string&gt;</span><span class="op">+</span>  <span class="cm">(* at least one required *)</span>
+  <span class="op">|</span> <span class="lit">"name"</span>           <span class="nt">&lt;string&gt;</span>   <span class="cm">(* storage name; default: first domain *)</span>
+  <span class="op">|</span> <span class="lit">"email"</span>          <span class="nt">&lt;string&gt;</span>
+  <span class="op">|</span> <span class="lit">"staging"</span>        <span class="nt">&lt;boolean&gt;</span>  <span class="cm">(* default: #false *)</span>
+  <span class="op">|</span> <span class="lit">"server"</span>         <span class="nt">&lt;string&gt;</span>   <span class="cm">(* ACME directory URL override *)</span>
+  <span class="op">|</span> <span class="lit">"retry-interval"</span> <span class="nt">&lt;integer&gt;</span>  <span class="cm">(* seconds; default: 3600 *)</span></code></pre>
+      <div class="callout warn">
+        <span class="callout-icon">!</span>
+        <span>
+          A bare <code>tls</code> node without a mode argument uses
+          <em>file</em> mode when <code>cert</code> and <code>key</code>
+          children are present, and <em>self-signed</em> mode otherwise.
+          ACME mode requires <code>state-dir</code> to be set in the
+          <code>server</code> block.
+        </span>
+      </div>
+
+      <h3>Timeouts</h3>
+<pre><code><span class="nt">timeouts-block</span> <span class="op">=</span> <span class="lit">"timeouts"</span> <span class="op">{</span> <span class="nt">timeout-child</span><span class="op">*</span> <span class="op">}</span>
+<span class="nt">timeout-child</span>  <span class="op">=</span>
+    <span class="lit">"request-header"</span> <span class="nt">&lt;integer&gt;</span>  <span class="cm">(* seconds *)</span>
+  <span class="op">|</span> <span class="lit">"handler"</span>        <span class="nt">&lt;integer&gt;</span>  <span class="cm">(* seconds; 408 on expiry *)</span>
+  <span class="op">|</span> <span class="lit">"keepalive"</span>      <span class="nt">&lt;integer&gt;</span>  <span class="cm">(* seconds; 0 disables keep-alive *)</span></code></pre>
+
+      <h3>TCP proxy</h3>
+<pre><code><span class="nt">tcp-proxy-block</span> <span class="op">=</span> <span class="lit">"tcp-proxy"</span> <span class="op">{</span> <span class="nt">tcp-proxy-child</span><span class="op">*</span> <span class="op">}</span>
+<span class="nt">tcp-proxy-child</span> <span class="op">=</span>
+    <span class="lit">"upstream"</span>       <span class="nt">&lt;string&gt;</span>                         <span class="cm">(* required; "host:port" *)</span>
+  <span class="op">|</span> <span class="lit">"proxy-protocol"</span> <span class="op">(</span><span class="lit">"v1"</span> <span class="op">|</span> <span class="lit">"v2"</span> <span class="op">|</span> <span class="lit">"1"</span> <span class="op">|</span> <span class="lit">"2"</span><span class="op">)</span>
+  <span class="op">|</span> <span class="nt">access-block</span></code></pre>
+      <div class="callout info">
+        <span class="callout-icon">i</span>
+        <span>
+          The <code>access</code> block inside <code>tcp-proxy</code> may only
+          use <code>ip</code> and <code>country</code> conditions.
+          <code>user</code>, <code>group</code>, and <code>authenticated</code>
+          are forbidden because TCP proxy mode has no HTTP authentication.
+        </span>
+      </div>
+    </section>
+
+    <!-- vhost -->
+    <section id="vhost">
+      <h2>vhost</h2>
+<pre><code><span class="nt">hostname</span>    <span class="op">=</span> <span class="nt">&lt;string&gt;</span>  <span class="cm">(* plain name, or "~regex" prefix for regex match *)</span>
+<span class="nt">vhost-child</span> <span class="op">=</span> <span class="lit">"alias"</span> <span class="nt">&lt;hostname&gt;</span> <span class="op">|</span> <span class="nt">location</span></code></pre>
+      <p>
+        Vhost names are matched in order: exact literal lookup (O(1)), then
+        <code>~</code>-prefixed regex patterns in config declaration order, then
+        the listener&rsquo;s <code>default-vhost</code> fallback.
+      </p>
+    </section>
+
+    <!-- location -->
+    <section id="location">
+      <h2>location</h2>
+<pre><code><span class="nt">location</span>       <span class="op">=</span> <span class="lit">"location"</span> <span class="nt">&lt;string&gt;</span> <span class="op">{</span> <span class="nt">location-child</span><span class="op">*</span> <span class="op">}</span>
+<span class="nt">location-child</span> <span class="op">=</span>
+    <span class="nt">handler</span>                   <span class="cm">(* exactly one required *)</span>
+  <span class="op">|</span> <span class="nt">access-block</span>
+  <span class="op">|</span> <span class="nt">auth-realm-block</span>
+  <span class="op">|</span> <span class="nt">request-headers-block</span>
+  <span class="op">|</span> <span class="nt">response-headers-block</span></code></pre>
+      <p>
+        Locations within a vhost are matched by longest-prefix.  The path
+        argument is a literal prefix, not a regex.
+      </p>
+    </section>
+
+    <!-- handlers -->
+    <section id="handlers">
+      <h2>Handlers</h2>
+      <p>
+        Exactly one handler node must appear inside each <code>location</code>
+        block.
+      </p>
+<pre><code><span class="nt">handler</span> <span class="op">=</span>
+    <span class="lit">"static"</span>   <span class="op">{</span> <span class="nt">static-child</span><span class="op">*</span>   <span class="op">}</span>
+  <span class="op">|</span> <span class="lit">"proxy"</span>    <span class="op">{</span> <span class="nt">proxy-child</span><span class="op">*</span>    <span class="op">}</span>
+  <span class="op">|</span> <span class="lit">"redirect"</span> <span class="op">{</span> <span class="nt">redirect-child</span><span class="op">*</span> <span class="op">}</span>
+  <span class="op">|</span> <span class="lit">"fastcgi"</span>  <span class="op">{</span> <span class="nt">fastcgi-child</span><span class="op">*</span>  <span class="op">}</span>
+  <span class="op">|</span> <span class="lit">"scgi"</span>     <span class="op">{</span> <span class="nt">scgi-child</span><span class="op">*</span>     <span class="op">}</span>
+  <span class="op">|</span> <span class="lit">"cgi"</span>      <span class="op">{</span> <span class="lit">"root"</span> <span class="nt">&lt;string&gt;</span> <span class="op">}</span>
+  <span class="op">|</span> <span class="lit">"status"</span>
+
+<span class="nt">static-child</span>   <span class="op">=</span>   <span class="lit">"root"</span>         <span class="nt">&lt;string&gt;</span>   <span class="cm">(* required *)</span>
+               <span class="op">|</span>   <span class="lit">"strip-prefix"</span> <span class="nt">&lt;boolean&gt;</span>  <span class="cm">(* default: #false *)</span>
+               <span class="op">|</span>   <span class="lit">"index-file"</span>   <span class="nt">&lt;string&gt;</span>   <span class="cm">(* repeatable; default: "index.html" "index.htm" *)</span>
+
+<span class="nt">proxy-child</span>    <span class="op">=</span>   <span class="lit">"upstream"</span>     <span class="nt">&lt;string&gt;</span>   <span class="cm">(* required; "http://host:port" *)</span>
+               <span class="op">|</span>   <span class="lit">"strip-prefix"</span> <span class="nt">&lt;boolean&gt;</span>  <span class="cm">(* default: #false *)</span>
+
+<span class="nt">redirect-child</span> <span class="op">=</span>   <span class="lit">"to"</span>           <span class="nt">&lt;string&gt;</span>   <span class="cm">(* required *)</span>
+               <span class="op">|</span>   <span class="lit">"code"</span>         <span class="nt">&lt;integer&gt;</span>  <span class="cm">(* default: 301 *)</span>
+
+<span class="nt">fastcgi-child</span>  <span class="op">=</span>   <span class="lit">"socket"</span>       <span class="nt">&lt;string&gt;</span>   <span class="cm">(* required; "unix:/path" or "host:port" *)</span>
+               <span class="op">|</span>   <span class="lit">"root"</span>         <span class="nt">&lt;string&gt;</span>   <span class="cm">(* required *)</span>
+               <span class="op">|</span>   <span class="lit">"index"</span>        <span class="nt">&lt;string&gt;</span>
+
+<span class="nt">scgi-child</span>     <span class="op">=</span>   <span class="lit">"socket"</span>       <span class="nt">&lt;string&gt;</span>   <span class="cm">(* required *)</span>
+               <span class="op">|</span>   <span class="lit">"root"</span>         <span class="nt">&lt;string&gt;</span>   <span class="cm">(* required *)</span>
+               <span class="op">|</span>   <span class="lit">"index"</span>        <span class="nt">&lt;string&gt;</span></code></pre>
+    </section>
+
+    <!-- access control -->
+    <section id="access">
+      <h2>Access control</h2>
+<pre><code><span class="nt">access-block</span>     <span class="op">=</span> <span class="lit">"access"</span> <span class="op">{</span> <span class="nt">access-statement</span><span class="op">*</span> <span class="op">}</span>
+
+<span class="nt">access-statement</span> <span class="op">=</span>
+    <span class="lit">"allow"</span>    <span class="op">[</span> <span class="op">{</span> <span class="nt">condition</span><span class="op">+</span> <span class="op">}</span> <span class="op">]</span>
+  <span class="op">|</span> <span class="lit">"pass"</span>     <span class="op">[</span> <span class="op">{</span> <span class="nt">condition</span><span class="op">+</span> <span class="op">}</span> <span class="op">]</span>
+  <span class="op">|</span> <span class="lit">"deny"</span>     <span class="op">[</span> <span class="lit">code</span><span class="op">=</span><span class="nt">&lt;integer&gt;</span> <span class="op">]</span> <span class="op">[</span> <span class="op">{</span> <span class="nt">condition</span><span class="op">+</span> <span class="op">}</span> <span class="op">]</span>   <span class="cm">(* default code: 403 *)</span>
+  <span class="op">|</span> <span class="lit">"redirect"</span> <span class="lit">to</span><span class="op">=</span><span class="nt">&lt;string&gt;</span> <span class="op">[</span> <span class="lit">code</span><span class="op">=</span><span class="nt">&lt;integer&gt;</span> <span class="op">]</span> <span class="op">[</span> <span class="op">{</span> <span class="nt">condition</span><span class="op">+</span> <span class="op">}</span> <span class="op">]</span>  <span class="cm">(* default code: 302 *)</span>
+  <span class="op">|</span> <span class="lit">"apply"</span>    <span class="nt">&lt;string&gt;</span>       <span class="cm">(* reference a named access-policy from server block *)</span>
+
+<span class="nt">condition</span> <span class="op">=</span>
+    <span class="lit">"ip"</span>            <span class="nt">&lt;cidr-or-ip&gt;</span><span class="op">+</span>
+  <span class="op">|</span> <span class="lit">"country"</span>       <span class="nt">&lt;iso2&gt;</span><span class="op">+</span>         <span class="cm">(* 2-letter ISO 3166-1 alpha-2, uppercased *)</span>
+  <span class="op">|</span> <span class="lit">"user"</span>          <span class="nt">&lt;string&gt;</span>
+  <span class="op">|</span> <span class="lit">"group"</span>         <span class="nt">&lt;string&gt;</span>
+  <span class="op">|</span> <span class="lit">"authenticated"</span>
+
+<span class="nt">&lt;cidr-or-ip&gt;</span> <span class="op">=</span> <span class="nt">&lt;string&gt;</span>  <span class="cm">(* e.g. "10.0.0.0/8" or "192.168.1.1" *)</span>
+<span class="nt">&lt;iso2&gt;</span>       <span class="op">=</span> <span class="nt">&lt;string&gt;</span>  <span class="cm">(* e.g. "US" "DE" *)</span></code></pre>
+      <div class="callout info">
+        <span class="callout-icon">i</span>
+        <span>
+          <strong>Condition semantics:</strong> multiple condition nodes inside
+          the same block are AND-combined across types.  Multiple values on a
+          single <code>country</code> node are OR-combined.
+          Statements are first-match; an <code>access</code> block with no
+          matching rule returns 403.
+        </span>
+      </div>
+      <div class="callout info">
+        <span class="callout-icon">i</span>
+        <span>
+          <code>deny</code> and <code>redirect</code> use KDL named properties
+          (<code>code=403</code>, <code>to="/login/"</code>), not positional
+          arguments and not child nodes.
+        </span>
+      </div>
+    </section>
+
+    <!-- header operations -->
+    <section id="header-ops">
+      <h2>Header operations</h2>
+<pre><code><span class="nt">auth-realm-block</span>       <span class="op">=</span> <span class="lit">"auth"</span>             <span class="op">{</span> <span class="op">[</span> <span class="lit">"realm"</span> <span class="nt">&lt;string&gt;</span> <span class="op">]</span> <span class="op">}</span>
+                         <span class="cm">(* realm default: "Restricted" *)</span>
+
+<span class="nt">request-headers-block</span>  <span class="op">=</span> <span class="lit">"request-headers"</span>  <span class="op">{</span> <span class="nt">header-op</span><span class="op">*</span> <span class="op">}</span>
+<span class="nt">response-headers-block</span> <span class="op">=</span> <span class="lit">"response-headers"</span> <span class="op">{</span> <span class="nt">header-op</span><span class="op">*</span> <span class="op">}</span>
+
+<span class="nt">header-op</span> <span class="op">=</span>
+    <span class="lit">"set"</span>    <span class="nt">&lt;string&gt;</span> <span class="nt">&lt;string&gt;</span>  <span class="cm">(* header-name value *)</span>
+  <span class="op">|</span> <span class="lit">"add"</span>    <span class="nt">&lt;string&gt;</span> <span class="nt">&lt;string&gt;</span>  <span class="cm">(* header-name value *)</span>
+  <span class="op">|</span> <span class="lit">"remove"</span> <span class="nt">&lt;string&gt;</span>           <span class="cm">(* header-name *)</span></code></pre>
+    </section>
+
+    <footer>aloha &mdash; config grammar (EBNF)</footer>
+  </main>
+</div>
+
+<script>
+  // Highlight the sidebar link for whichever section is currently in view.
+  (function () {
+    const links = document.querySelectorAll('.nav-list a');
+    const targets = Array.from(links)
+      .map(a => document.querySelector(a.getAttribute('href')))
+      .filter(Boolean);
+
+    const activate = (el) => {
+      links.forEach(a => a.classList.remove('active'));
+      const link = document.querySelector(
+        `.nav-list a[href="#${el.id}"]`
+      );
+      if (link) link.classList.add('active');
+    };
+
+    const observer = new IntersectionObserver(
+      entries => {
+        for (const e of entries) {
+          if (e.isIntersecting) { activate(e.target); break; }
+        }
+      },
+      { rootMargin: '-54px 0px -60% 0px', threshold: 0 }
+    );
+    targets.forEach(t => observer.observe(t));
+  })();
+</script>
+
+</body>
+</html>
