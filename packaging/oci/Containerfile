@@ -18,7 +18,7 @@ WORKDIR /build
 # Build a stub binary from the manifests alone so that Docker/podman can cache
 # the compiled dependency graph.  Re-used on subsequent builds when only src/
 # changes.
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml ./
 RUN mkdir src \
     && echo 'fn main() {}' > src/main.rs \
     && cargo build --release \
