@@ -75,7 +75,7 @@ jobs:
         run: cargo deb --no-build --deb-version "$DEB_VERSION"
 
       - name: Build RPM package
-        run: cargo generate-rpm --set-metadata "version=$RPM_VERSION"
+        run: cargo generate-rpm --set-metadata "version=\"$RPM_VERSION\""
 
       - name: Push arch-tagged OCI image
         run: |
