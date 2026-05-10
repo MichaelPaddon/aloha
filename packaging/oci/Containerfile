@@ -62,6 +62,10 @@ COPY packaging/oci/aloha-container.kdl /etc/aloha.kdl
 # Start as root so aloha can bind ports 80/443, then drop to aloha:aloha
 # via server.user in the config.  In rootless podman "root" inside the
 # container maps to the host user in the user namespace, not host root.
+LABEL org.opencontainers.image.description="HTTP/reverse-proxy server with TLS, virtual hosts, and static file serving"
+LABEL org.opencontainers.image.source="https://github.com/michaelpaddon/aloha"
+LABEL org.opencontainers.image.licenses="BSD-2-Clause"
+
 EXPOSE 80 443
 
 ENTRYPOINT ["/usr/bin/aloha"]
