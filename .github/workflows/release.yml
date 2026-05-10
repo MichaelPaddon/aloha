@@ -62,11 +62,20 @@ jobs:
           command -v cargo-deb         || cargo install cargo-deb
           command -v cargo-generate-rpm || cargo install cargo-generate-rpm
 
+      # Sanitize semver pre-release separators for each package format.
+      # Debian: '-' is reserved as epoch/upstream/revision separator;
+      #   '~' sorts before the release version (standard pre-release form).
+      # RPM: '-' is not allowed in the version field.
+      - name: Sanitize package versions
+        run: |
+          echo "DEB_VERSION=${VERSION//-/\~}" >> $GITHUB_ENV
+          echo "RPM_VERSION=${VERSION//-/_}"  >> $GITHUB_ENV
+
       - name: Build Debian package
-        run: cargo deb --no-build
+        run: cargo deb --no-build --deb-version "$DEB_VERSION"
 
       - name: Build RPM package
-        run: cargo generate-rpm
+        run: cargo generate-rpm --set-metadata "version=$RPM_VERSION"
 
       - name: Push arch-tagged OCI image
         run: |
