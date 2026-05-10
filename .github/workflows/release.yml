@@ -118,27 +118,21 @@ jobs:
           merge-multiple: true
           path: dist/
 
+      # podman 4.x does not support index-level --annotation on manifest
+      # create; per-image labels are set via LABEL in the Containerfile.
       - name: Push multi-arch OCI manifest
         run: |
           OWNER=${GITHUB_REPOSITORY_OWNER,,}
           echo "${{ secrets.GITHUB_TOKEN }}" | \
             podman login ghcr.io -u ${{ github.actor }} --password-stdin
 
-          ANNOTATIONS=(
-            --annotation "org.opencontainers.image.description=HTTP/reverse-proxy server with TLS, virtual hosts, and static file serving"
-            --annotation "org.opencontainers.image.source=https://github.com/${{ github.repository }}"
-            --annotation "org.opencontainers.image.licenses=BSD-2-Clause"
-          )
-
-          # Version-tagged manifest
-          podman manifest create "${ANNOTATIONS[@]}" \
+          podman manifest create \
             ghcr.io/$OWNER/aloha:$VERSION \
             ghcr.io/$OWNER/aloha:$VERSION-amd64 \
             ghcr.io/$OWNER/aloha:$VERSION-arm64
           podman manifest push ghcr.io/$OWNER/aloha:$VERSION
 
-          # Latest alias
-          podman manifest create "${ANNOTATIONS[@]}" \
+          podman manifest create \
             ghcr.io/$OWNER/aloha:latest \
             ghcr.io/$OWNER/aloha:$VERSION-amd64 \
             ghcr.io/$OWNER/aloha:$VERSION-arm64
