@@ -1,0 +1,30 @@
+[Unit]
+Description=aloha HTTP server
+Documentation=man:aloha(1)
+After=network.target
+
+[Service]
+Type=simple
+# Start as root so aloha can bind privileged ports, then drop to the
+# aloha user/group via "server user=aloha" in aloha.kdl.
+ExecStart=/usr/bin/aloha --config /etc/aloha.kdl
+Restart=on-failure
+RestartSec=5
+
+# /var/lib/aloha is created automatically and owned by root on startup,
+# then accessible to the aloha user after the privilege drop.
+# Use server state-dir="/var/lib/aloha" in aloha.kdl for ACME storage.
+StateDirectory=aloha
+
+# Security hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

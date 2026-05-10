@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="230 70 220 220" role="img" aria-label="Aloha">
+  <circle cx="340" cy="180" r="110" fill="#1e3a5f"/>
+  <text x="340" y="172" text-anchor="middle"
+        font-family="Futura, 'Century Gothic', 'Avenir Next', sans-serif"
+        font-size="120" font-weight="700" fill="#FAECE7" dominant-baseline="central">a</text>
+</svg>

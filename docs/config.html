@@ -1,0 +1,3157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <title>aloha &mdash; Configuration Reference</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+
+    :root {
+      --sidebar-w: 240px;
+
+      --bg:          #f5f7fa;
+      --surface:     #ffffff;
+      --border:      #dde3eb;
+      --text:        #1a2332;
+      --muted:       #5e6e82;
+      --accent:      #1e3a5f;
+      --accent-bg:   #edf2f8;
+      --amber:       #b45309;
+      --amber-bg:    #fef3c7;
+      --red:         #b91c1c;
+      --red-bg:      #fee2e2;
+
+      /* Code -- professional light style */
+      --code-bg:     #f6f8fa;
+      --code-fg:     #24292e;
+      --code-border: #d0d7de;
+      --kw:          #0550ae;   /* blue  -- node names    */
+      --str:         #116329;   /* green -- string values */
+      --num:         #6639ba;   /* purple -- numbers / booleans */
+      --prop:        #953800;   /* orange-brown -- property keys */
+      --cm:          #57606a;   /* gray -- comments */
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
+                   system-ui, sans-serif;
+      font-size: 15px;
+      line-height: 1.65;
+      color: var(--text);
+      background: var(--bg);
+    }
+
+    /* -- Layout -------------------------------------------------- */
+
+    .shell {
+      display: flex;
+      min-height: 100vh;
+    }
+
+    /* -- Sidebar ------------------------------------------------- */
+
+    .sidebar {
+      width: var(--sidebar-w);
+      flex-shrink: 0;
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      overflow-y: auto;
+      border-right: 1px solid var(--border);
+      background: var(--surface);
+      scrollbar-width: thin;
+    }
+
+    /* Logo at top of sidebar links back to the index page. */
+    .sidebar-brand {
+      display: block;
+      padding: 1rem 1rem 0.75rem;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 0.75rem;
+      text-decoration: none;
+    }
+    .sidebar-brand img {
+      width: 100%;
+      height: auto;
+      display: block;
+    }
+
+    .sidebar-nav {
+      padding: 0 0 2rem;
+    }
+
+    .nav-section { margin-bottom: 1.25rem; }
+
+    .nav-heading {
+      font-size: 0.68rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.09em;
+      color: var(--muted);
+      padding: 0 1.25rem 0.35rem;
+    }
+
+    .nav-list {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+    }
+    .nav-list a {
+      display: block;
+      padding: 0.28rem 1.25rem;
+      font-size: 0.875rem;
+      color: var(--text);
+      text-decoration: none;
+      border-left: 3px solid transparent;
+      transition: color 0.12s, border-color 0.12s, background 0.12s;
+    }
+    .nav-list a:hover {
+      color: var(--accent);
+      background: var(--accent-bg);
+    }
+    .nav-list a.active {
+      color: var(--accent);
+      border-left-color: var(--accent);
+      background: var(--accent-bg);
+      font-weight: 600;
+    }
+
+    /* sub: one indent level */
+    .nav-list.sub { margin: 0; }
+    .nav-list.sub a {
+      padding-left: 2.0rem;
+      font-size: 0.84rem;
+      color: var(--muted);
+    }
+    .nav-list.sub a:hover,
+    .nav-list.sub a.active { color: var(--accent); }
+
+    /* sub2: two indent levels */
+    .nav-list.sub2 { margin: 0; }
+    .nav-list.sub2 a {
+      padding-left: 2.9rem;
+      font-size: 0.8rem;
+      color: var(--muted);
+    }
+    .nav-list.sub2 a:hover,
+    .nav-list.sub2 a.active { color: var(--accent); }
+
+    /* sub3: three indent levels */
+    .nav-list.sub3 { margin: 0; }
+    .nav-list.sub3 a {
+      padding-left: 3.6rem;
+      font-size: 0.77rem;
+      color: var(--muted);
+    }
+    .nav-list.sub3 a:hover,
+    .nav-list.sub3 a.active { color: var(--accent); }
+
+    /* Collapsible nav groups */
+    .nav-children { display: none; }
+    .nav-children.nav-open {
+      display: block;
+      position: relative;
+    }
+    /* Vertical line showing the extent of an open group */
+    .nav-children.nav-open::before {
+      content: "";
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      width: 2px;
+      border-radius: 1px;
+      background: var(--accent-bg);
+    }
+    .nav-list.sub.nav-children.nav-open::before  { left: 1.0rem; }
+    .nav-list.sub2.nav-children.nav-open::before { left: 1.75rem; }
+    .nav-list.sub3.nav-children.nav-open::before { left: 2.55rem; }
+    /* Expand arrow: inline after the label, rotates + recolours when open */
+    .nav-tog {
+      display: inline-block;
+      font-size: 0.85em;
+      color: var(--muted);
+      margin-left: 0.25rem;
+      transition: transform 0.15s, color 0.12s;
+      pointer-events: none;
+    }
+    .nav-parent.nav-open > a > .nav-tog {
+      transform: rotate(90deg);
+      color: var(--accent);
+    }
+
+    /* -- Content ------------------------------------------------- */
+
+    .content {
+      flex: 1;
+      min-width: 0;
+      padding: 2.5rem 3rem 4rem;
+      max-width: 800px;
+    }
+
+    .page-header { margin-bottom: 2.5rem; }
+    .page-header h1 {
+      font-size: 1.9rem;
+      font-weight: 800;
+      margin: 0 0 0.25rem;
+      color: var(--text);
+      letter-spacing: -0.02em;
+    }
+    .page-header p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.95rem;
+    }
+
+    section { margin-bottom: 3rem; }
+
+    h2 {
+      font-size: 1.2rem;
+      font-weight: 700;
+      color: var(--text);
+      margin: 0 0 0.9rem;
+      padding-bottom: 0.4rem;
+      border-bottom: 2px solid var(--border);
+      scroll-margin-top: 1.5rem;
+    }
+    h3 {
+      font-size: 0.97rem;
+      font-weight: 700;
+      color: var(--text);
+      margin: 1.75rem 0 0.55rem;
+      scroll-margin-top: 1.5rem;
+    }
+    h4 {
+      font-size: 0.9rem;
+      font-weight: 600;
+      color: var(--text);
+      margin: 1.4rem 0 0.45rem;
+      scroll-margin-top: 1.5rem;
+    }
+
+    p { margin: 0 0 0.9rem; }
+    ul, ol { margin: 0 0 0.9rem; padding-left: 1.5rem; }
+    li { margin-bottom: 0.25rem; }
+
+    /* -- Tables -------------------------------------------------- */
+
+    .table-wrap {
+      overflow-x: auto;
+      margin-bottom: 1.25rem;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.875rem;
+    }
+    thead th {
+      background: var(--bg);
+      text-align: left;
+      padding: 0.5rem 0.9rem;
+      font-weight: 600;
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--muted);
+      border-bottom: 1px solid var(--border);
+    }
+    tbody tr { border-bottom: 1px solid var(--border); }
+    tbody tr:last-child { border-bottom: none; }
+    tbody tr:hover { background: var(--accent-bg); }
+    td {
+      padding: 0.55rem 0.9rem;
+      vertical-align: top;
+    }
+    td:first-child {
+      font-family: ui-monospace, "SF Mono", Consolas, monospace;
+      font-size: 0.82rem;
+      color: var(--accent);
+      white-space: nowrap;
+      width: 12em;
+    }
+    td:nth-child(2) {
+      font-size: 0.83rem;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+
+    /* -- Badges -------------------------------------------------- */
+
+    .badge {
+      display: inline-block;
+      font-size: 0.65rem;
+      font-weight: 700;
+      padding: 0.15em 0.5em;
+      border-radius: 20px;
+      vertical-align: middle;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+    }
+    .badge-req  { background: var(--red-bg);   color: var(--red);   }
+    .badge-opt  { background: var(--accent-bg); color: var(--accent); }
+    .badge-rep  { background: var(--amber-bg);  color: var(--amber);  }
+
+    /* -- Code blocks --------------------------------------------- */
+
+    pre {
+      background: var(--code-bg);
+      color: var(--code-fg);
+      border: 1px solid var(--code-border);
+      padding: 1.0rem 1.25rem;
+      border-radius: 6px;
+      overflow-x: auto;
+      font-size: 0.83rem;
+      line-height: 1.65;
+      margin: 0 0 1.25rem;
+      font-family: ui-monospace, "SF Mono", Consolas,
+                   "Liberation Mono", monospace;
+    }
+    code {
+      font-family: ui-monospace, "SF Mono", Consolas, monospace;
+      font-size: 0.875em;
+      background: var(--accent-bg);
+      color: var(--accent);
+      padding: 0.1em 0.35em;
+      border-radius: 4px;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      color: inherit;
+      font-size: inherit;
+    }
+
+    /* KDL syntax colours (light-background palette) */
+    .kw   { color: var(--kw); font-weight: 600; }
+    .str  { color: var(--str); }
+    .num  { color: var(--num); }
+    .prop { color: var(--prop); }
+    .cm   { color: var(--cm); font-style: italic; }
+
+    /* -- Callouts ------------------------------------------------ */
+
+    .callout {
+      display: flex;
+      gap: 0.75rem;
+      padding: 0.85rem 1rem;
+      border-radius: 6px;
+      font-size: 0.875rem;
+      margin: 0 0 1.1rem;
+      border: 1px solid;
+    }
+    .callout-label {
+      flex-shrink: 0;
+      font-size: 0.72rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      line-height: 1.65;
+    }
+    .callout.info {
+      background: var(--accent-bg);
+      border-color: #b0c4d8;
+      color: #1a3352;
+    }
+    .callout.warn {
+      background: var(--amber-bg);
+      border-color: #f0c040;
+      color: #7d4e00;
+    }
+
+    /* -- Divider ------------------------------------------------- */
+
+    .divider {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 2.5rem 0;
+    }
+
+    /* -- Chapter headings ---------------------------------------- */
+
+    .chapter-head {
+      font-size: 1.5rem;
+      font-weight: 800;
+      color: var(--text);
+      letter-spacing: -0.02em;
+      border-top: 2px solid var(--border);
+      padding-top: 1.5rem;
+      margin: 3rem 0 1.5rem;
+      scroll-margin-top: 1rem;
+    }
+
+    .nav-heading a {
+      color: inherit;
+      text-decoration: none;
+    }
+    .nav-heading a:hover { color: var(--accent); }
+
+    /* -- Footer -------------------------------------------------- */
+
+    footer {
+      font-size: 0.78rem;
+      color: var(--muted);
+      padding-top: 1.5rem;
+      border-top: 1px solid var(--border);
+    }
+
+    /* -- Responsive ---------------------------------------------- */
+
+    @media (max-width: 768px) {
+      /* Sidebar stacks above content, full-width, collapsible. */
+      .shell   { flex-direction: column; }
+      .sidebar {
+        width: 100%; height: auto; position: static;
+        border-right: none;
+        border-bottom: 1px solid var(--border);
+      }
+      .sidebar-nav { display: none; }
+      details.sidebar[open] .sidebar-nav { display: block; }
+      details.sidebar summary {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0.6rem 1rem;
+        cursor: pointer;
+        list-style: none;
+        font-size: 0.82rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--muted);
+        border-bottom: 1px solid var(--border);
+      }
+      details.sidebar summary::-webkit-details-marker { display: none; }
+      details.sidebar summary::after {
+        content: "▾";
+        font-size: 1rem;
+        transition: transform 0.15s;
+      }
+      details.sidebar[open] summary::after { transform: rotate(-180deg); }
+      .content { padding: 1.5rem 1.25rem 3rem; }
+      .nav-list a { min-height: 44px; display: flex; align-items: center; }
+    }
+
+    /* Desktop: summary toggle is hidden; sidebar is always open. */
+    @media (min-width: 769px) {
+      details.sidebar summary { display: none; }
+    }
+  </style>
+</head>
+<body>
+
+<div class="shell">
+
+  <!-- Sidebar navigation (collapses to a disclosure widget on mobile) -->
+  <details class="sidebar" open>
+    <a class="sidebar-brand" href="index.html">
+      <img src="aloha-logo.svg" alt="aloha">
+    </a>
+    <summary>Navigation</summary>
+    <nav aria-label="Page navigation">
+    <div class="sidebar-nav">
+
+    <div class="nav-section">
+      <div class="nav-heading"><a href="#ch-getting-started">Getting started</a></div>
+      <ul class="nav-list">
+        <li><a href="#getting-started">Quick start</a></li>
+        <li><a href="#kdl-primer">KDL v2 primer</a></li>
+      </ul>
+    </div>
+
+    <div class="nav-section">
+      <div class="nav-heading"><a href="#ch-top-level-nodes">Configuration</a></div>
+      <ul class="nav-list">
+
+        <li class="nav-parent"><a href="#server">server<span class="nav-tog">›</span></a></li>
+        <ul class="nav-list sub nav-children">
+          <li class="nav-parent"><a href="#authentication">auth<span class="nav-tog">›</span></a></li>
+          <ul class="nav-list sub2 nav-children">
+            <li class="nav-parent"><a href="#auth-jwt">jwt<span class="nav-tog">›</span></a></li>
+            <ul class="nav-list sub3 nav-children">
+              <li><a href="#auth-jwt-cookie-name">cookie-name</a></li>
+              <li><a href="#auth-jwt-validity">validity</a></li>
+              <li><a href="#auth-jwt-wrap">wrap</a></li>
+            </ul>
+            <li class="nav-parent"><a href="#auth-ldap">ldap<span class="nav-tog">›</span></a></li>
+            <ul class="nav-list sub3 nav-children">
+              <li><a href="#auth-ldap-base-dn">base-dn</a></li>
+              <li><a href="#auth-ldap-bind-dn">bind-dn</a></li>
+              <li><a href="#auth-ldap-group-attr">group-attr</a></li>
+              <li><a href="#auth-ldap-group-filter">group-filter</a></li>
+              <li><a href="#auth-ldap-starttls">starttls</a></li>
+              <li><a href="#auth-ldap-timeout">timeout</a></li>
+              <li><a href="#auth-ldap-url">url</a></li>
+            </ul>
+            <li class="nav-parent"><a href="#auth-pam">pam<span class="nav-tog">›</span></a></li>
+            <ul class="nav-list sub3 nav-children">
+              <li><a href="#auth-pam-service">service</a></li>
+            </ul>
+            <li class="nav-parent"><a href="#auth-subrequest">subrequest<span class="nav-tog">›</span></a></li>
+            <ul class="nav-list sub3 nav-children">
+              <li><a href="#auth-subrequest-forward-header">forward-header</a></li>
+              <li><a href="#auth-subrequest-groups-header">groups-header</a></li>
+              <li><a href="#auth-subrequest-timeout">timeout</a></li>
+              <li><a href="#auth-subrequest-url">url</a></li>
+              <li><a href="#auth-subrequest-user-header">user-header</a></li>
+            </ul>
+          </ul>
+          <li><a href="#error-pages">error-page</a></li>
+          <li class="nav-parent"><a href="#geoip">geoip<span class="nav-tog">›</span></a></li>
+          <ul class="nav-list sub2 nav-children">
+            <li><a href="#geoip-db">db</a></li>
+          </ul>
+          <li><a href="#privdrop">group</a></li>
+          <li class="nav-parent"><a href="#health-endpoints">health<span class="nav-tog">›</span></a></li>
+          <ul class="nav-list sub2 nav-children">
+            <li><a href="#health-enabled">enabled</a></li>
+          </ul>
+          <li><a href="#server-inherit-supplementary-groups">inherit-supplementary-groups</a></li>
+          <li><a href="#named-policies">policy</a></li>
+          <li><a href="#server-state-dir">state-dir</a></li>
+          <li class="nav-parent"><a href="#tls-options">tls<span class="nav-tog">›</span></a></li>
+          <ul class="nav-list sub2 nav-children">
+            <li><a href="#tls-options-cipher">cipher</a></li>
+            <li><a href="#tls-options-min-version">min-version</a></li>
+          </ul>
+          <li><a href="#privdrop">user</a></li>
+        </ul>
+
+        <li class="nav-parent"><a href="#listener">listener<span class="nav-tog">›</span></a></li>
+        <ul class="nav-list sub nav-children">
+          <li><a href="#listener-accept-proxy-protocol">accept-proxy-protocol</a></li>
+          <li><a href="#listener-bind">bind</a></li>
+          <li><a href="#listener-default-vhost">default-vhost</a></li>
+          <li><a href="#listener-max-connections">max-connections</a></li>
+          <li><a href="#listener-max-request-body">max-request-body</a></li>
+          <li><a href="#policy">policy</a></li>
+          <li class="nav-parent"><a href="#stream-proxy">proxy<span class="nav-tog">›</span></a></li>
+          <ul class="nav-list sub2 nav-children">
+            <li><a href="#stream-proxy-proxy-protocol">proxy-protocol</a></li>
+            <li class="nav-parent"><a href="#stream-proxy-tls">tls<span class="nav-tog">›</span></a></li>
+            <ul class="nav-list sub3 nav-children">
+              <li><a href="#stream-proxy-skip-verify">skip-verify</a></li>
+            </ul>
+            <li><a href="#stream-proxy-upstream">upstream</a></li>
+          </ul>
+          <li class="nav-parent"><a href="#timeouts">timeouts<span class="nav-tog">›</span></a></li>
+          <ul class="nav-list sub2 nav-children">
+            <li><a href="#timeouts-handler">handler</a></li>
+            <li><a href="#timeouts-keepalive">keepalive</a></li>
+            <li><a href="#timeouts-request-header">request-header</a></li>
+          </ul>
+          <li class="nav-parent"><a href="#tls-acme">tls-acme<span class="nav-tog">›</span></a></li>
+          <ul class="nav-list sub2 nav-children">
+            <li><a href="#tls-acme-domain">domain</a></li>
+            <li><a href="#tls-acme-email">email</a></li>
+            <li><a href="#tls-acme-name">name</a></li>
+            <li><a href="#tls-acme-retry-interval">retry-interval</a></li>
+            <li><a href="#tls-acme-server">server</a></li>
+            <li><a href="#tls-acme-staging">staging</a></li>
+          </ul>
+          <li class="nav-parent"><a href="#tls-file">tls-file<span class="nav-tog">›</span></a></li>
+          <ul class="nav-list sub2 nav-children">
+            <li><a href="#tls-file">cert</a></li>
+            <li><a href="#tls-file">key</a></li>
+          </ul>
+          <li><a href="#tls-self-signed">tls-self-signed</a></li>
+        </ul>
+
+        <li class="nav-parent"><a href="#vhost">vhost<span class="nav-tog">›</span></a></li>
+        <ul class="nav-list sub nav-children">
+          <li><a href="#vhost-matching">alias</a></li>
+          <li class="nav-parent"><a href="#location">location<span class="nav-tog">›</span></a></li>
+          <ul class="nav-list sub2 nav-children">
+            <li><a href="#handler-auth-request">auth-request</a></li>
+            <li class="nav-parent"><a href="#auth-realm">basic-auth<span class="nav-tog">›</span></a></li>
+            <ul class="nav-list sub3 nav-children">
+              <li><a href="#auth-realm">realm</a></li>
+            </ul>
+            <li class="nav-parent"><a href="#handler-cgi">cgi<span class="nav-tog">›</span></a></li>
+            <ul class="nav-list sub3 nav-children">
+              <li><a href="#handler-cgi-root">root</a></li>
+            </ul>
+            <li class="nav-parent"><a href="#handler-fastcgi">fastcgi<span class="nav-tog">›</span></a></li>
+            <ul class="nav-list sub3 nav-children">
+              <li><a href="#handler-fastcgi-index">index</a></li>
+              <li><a href="#handler-fastcgi-root">root</a></li>
+              <li><a href="#handler-fastcgi-socket">socket</a></li>
+            </ul>
+            <li><a href="#policy">policy</a></li>
+            <li class="nav-parent"><a href="#handler-proxy">proxy<span class="nav-tog">›</span></a></li>
+            <ul class="nav-list sub3 nav-children">
+              <li><a href="#handler-proxy-proxy-protocol">proxy-protocol</a></li>
+              <li><a href="#handler-proxy-strip-prefix">strip-prefix</a></li>
+              <li><a href="#handler-proxy-upstream">upstream</a></li>
+            </ul>
+            <li class="nav-parent"><a href="#handler-redirect">redirect<span class="nav-tog">›</span></a></li>
+            <ul class="nav-list sub3 nav-children">
+              <li><a href="#handler-redirect-code">code</a></li>
+              <li><a href="#handler-redirect-to">to</a></li>
+            </ul>
+            <li class="nav-parent"><a href="#header-injection">request-headers<span class="nav-tog">›</span></a></li>
+            <ul class="nav-list sub3 nav-children">
+              <li><a href="#header-injection-add">add</a></li>
+              <li><a href="#header-injection-remove">remove</a></li>
+              <li><a href="#header-injection-set">set</a></li>
+            </ul>
+            <li class="nav-parent"><a href="#header-injection">response-headers<span class="nav-tog">›</span></a></li>
+            <ul class="nav-list sub3 nav-children">
+              <li><a href="#header-injection-add">add</a></li>
+              <li><a href="#header-injection-remove">remove</a></li>
+              <li><a href="#header-injection-set">set</a></li>
+            </ul>
+            <li class="nav-parent"><a href="#handler-scgi">scgi<span class="nav-tog">›</span></a></li>
+            <ul class="nav-list sub3 nav-children">
+              <li><a href="#handler-scgi-index">index</a></li>
+              <li><a href="#handler-scgi-root">root</a></li>
+              <li><a href="#handler-scgi-socket">socket</a></li>
+            </ul>
+            <li class="nav-parent"><a href="#handler-static">static<span class="nav-tog">›</span></a></li>
+            <ul class="nav-list sub3 nav-children">
+              <li><a href="#handler-static-index-file">index-file</a></li>
+              <li><a href="#handler-static-root">root</a></li>
+              <li><a href="#handler-static-strip-prefix">strip-prefix</a></li>
+            </ul>
+            <li><a href="#handler-status">status</a></li>
+          </ul>
+        </ul>
+
+      </ul>
+    </div>
+
+    <div class="nav-section">
+      <div class="nav-heading"><a href="#ch-policy-blocks">Policy blocks</a></div>
+      <ul class="nav-list">
+        <li><a href="#policy">Overview</a></li>
+        <li><a href="#policy-statements">Statements</a></li>
+        <li><a href="#policy-predicates">Predicates</a></li>
+        <li><a href="#named-policies">Named policies</a></li>
+      </ul>
+    </div>
+
+    <div class="nav-section">
+      <div class="nav-heading"><a href="#ch-reference">Reference</a></div>
+      <ul class="nav-list">
+        <li><a href="#compression">Compression</a></li>
+        <li><a href="#example">Full example</a></li>
+        <li><a href="grammar.html">EBNF grammar</a></li>
+      </ul>
+    </div>
+
+    </div><!-- .sidebar-nav -->
+    </nav>
+  </details>
+
+  <!-- Main content -->
+  <main class="content">
+
+    <div class="page-header">
+      <h1>Configuration Reference</h1>
+      <p>Complete reference for <code>aloha.kdl</code></p>
+    </div>
+
+    <div class="chapter-head" id="ch-getting-started">Getting started</div>
+
+    <!-- ========================================================= -->
+    <!-- Quick start                                                 -->
+    <!-- ========================================================= -->
+    <section id="getting-started">
+      <h2>Quick start</h2>
+      <p>
+        aloha is configured via a single
+        <a href="https://kdl.dev">KDL</a> file, read from
+        <code>aloha.kdl</code> in the current working directory by
+        default. Pass <code>-c&nbsp;/path/to/file.kdl</code> to
+        use a different path.
+      </p>
+      <p>
+        A production web server serving static files over HTTPS needs
+        three things: a plain HTTP listener on port&nbsp;80 to answer
+        ACME challenges, a TLS listener on port&nbsp;443 that obtains
+        its certificate automatically, and a vhost that maps your
+        domain to a directory on disk.
+      </p>
+<pre><code><span class="cm">// /etc/aloha.kdl</span>
+
+<span class="kw">server</span> {
+    <span class="cm">// Directory for ACME account keys, certificates, and JWT keys.</span>
+    <span class="cm">// Must exist and be writable by the aloha user.</span>
+    <span class="kw">state-dir</span> <span class="str">"/var/lib/aloha"</span>
+
+    <span class="cm">// Drop privileges after binding ports 80 and 443.</span>
+    <span class="kw">user</span> <span class="kw">aloha</span>
+}
+
+<span class="cm">// Port 80: required so Let's Encrypt can reach the HTTP-01 challenge</span>
+<span class="cm">// endpoint at /.well-known/acme-challenge/.  aloha intercepts those</span>
+<span class="cm">// requests automatically -- no special location rule needed.</span>
+<span class="kw">listener</span> {
+    <span class="kw">bind</span> <span class="str">"[::]:80"</span>
+}
+
+<span class="cm">// Port 443: aloha fetches and renews the certificate automatically.</span>
+<span class="cm">// The domain must resolve to this server before the first startup.</span>
+<span class="kw">listener</span> {
+    <span class="kw">bind</span>     <span class="str">"[::]:443"</span>
+    <span class="kw">tls-acme</span> {
+        <span class="kw">domain</span> <span class="kw">example.com</span> <span class="kw">www.example.com</span>
+        <span class="kw">email</span>  <span class="kw">admin@example.com</span>   <span class="cm">// for expiry notices from Let's Encrypt</span>
+    }
+}
+
+<span class="kw">vhost</span> <span class="kw">example.com</span> {
+    <span class="kw">alias</span> <span class="kw">www.example.com</span>
+    <span class="kw">location</span> <span class="str">"/"</span> {
+        <span class="kw">static</span> { <span class="kw">root</span> <span class="str">"/var/www/example.com"</span> }
+    }
+}</code></pre>
+      <p>
+        On first startup aloha binds both ports (as root if needed),
+        drops to the <code>aloha</code> user, then completes the
+        ACME order before accepting HTTPS connections. Renewal happens
+        automatically in the background before the certificate expires.
+      </p>
+      <div class="callout info">
+        <span class="callout-label">Note</span>
+        <span>
+          Port&nbsp;80 must be reachable from the internet while
+          aloha is running. If a firewall blocks it, the ACME
+          challenge will fail and no certificate will be issued.
+          Both the <code>domain</code> names must point at this
+          server in DNS before the first run.
+        </span>
+      </div>
+      <p>
+        To redirect plain HTTP traffic to HTTPS rather than serving
+        it directly, replace the port&nbsp;80 vhost content with a
+        redirect:
+      </p>
+<pre><code><span class="kw">vhost</span> <span class="kw">example.com</span> {
+    <span class="kw">alias</span> <span class="kw">www.example.com</span>
+
+    <span class="cm">// Redirect HTTP to HTTPS.  ACME challenges on port 80 are</span>
+    <span class="cm">// handled before routing and are never caught by this redirect.</span>
+    <span class="kw">location</span> <span class="str">"/"</span> {
+        <span class="kw">redirect</span> { <span class="kw">to</span> <span class="str">"https://{host}{path_and_query}"</span>; <span class="kw">code</span> <span class="num">301</span> }
+    }
+}
+
+<span class="cm">// Serve static files only on the TLS listener (443).</span>
+<span class="cm">// You can use the same vhost name on multiple listeners.</span></code></pre>
+      <div class="callout info">
+        <span class="callout-label">Note</span>
+        <span>
+          In the reference tables below, fields marked
+          <span class="badge badge-req">required</span> must be
+          present; <span class="badge badge-opt">optional</span>
+          fields have defaults or may be omitted;
+          <span class="badge badge-rep">repeatable</span> fields
+          may appear more than once.
+        </span>
+      </div>
+    </section>
+
+    <!-- ========================================================= -->
+    <!-- KDL v2 primer                                               -->
+    <!-- ========================================================= -->
+    <section id="kdl-primer">
+      <h2>KDL v2 primer</h2>
+      <p>
+        aloha uses <strong>KDL version&nbsp;2</strong>.
+        KDL nodes have the form:
+      </p>
+<pre><code><span class="kw">node-name</span> arg1 arg2 <span class="prop">key=</span>value {
+    <span class="kw">child-node</span> <span class="str">"value"</span>
+}</code></pre>
+      <p>
+        <strong>Arguments</strong> are positional values placed after
+        the node name.
+        <strong>Properties</strong> are named <code>key=value</code>
+        pairs.
+        <strong>Children</strong> live inside <code>{&nbsp;}</code>,
+        one per line (or separated by <code>;</code>).
+      </p>
+
+      <h3>Strings</h3>
+      <p>KDL v2 has three string forms:</p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Form</th><th>Syntax</th><th>When to use</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Quoted</td>
+              <td><code>"hello world"</code></td>
+              <td>
+                Strings containing spaces, special characters, or
+                anything that could be mistaken for a keyword.
+                Supports standard escape sequences:
+                <code>\\</code> <code>\"</code>
+                <code>\n</code> <code>\t</code>
+                <code>\r</code> <code>\u{HHHH}</code>.
+              </td>
+            </tr>
+            <tr>
+              <td>Bare identifier</td>
+              <td><code>example.com</code></td>
+              <td>
+                Simple values with no spaces &mdash; hostnames,
+                service names, short paths.
+                Legal characters include letters, digits,
+                <code>-</code> <code>_</code> <code>.</code>
+                <code>:</code> and several others, but
+                <strong>not</strong> spaces, <code>=</code>,
+                <code>{</code> <code>}</code>, <code>"</code>,
+                or <code>\</code>.
+                When in doubt, use a quoted string.
+              </td>
+            </tr>
+            <tr>
+              <td>Raw string</td>
+              <td><code>#"C:\Users\foo"#</code></td>
+              <td>
+                No escape processing. Add more
+                <code>#</code> marks on both sides if the content
+                contains <code>"#</code>:
+                <code>##"contains&nbsp;"#&nbsp;here"##</code>.
+                Use for regex patterns, Windows paths, or any
+                string that would need many escape sequences.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Keyword literals</h3>
+      <p>
+        KDL v2 uses a <code>#</code> prefix for built-in literals,
+        distinguishing them from bare-identifier strings:
+      </p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Literal</th><th>Meaning</th><th>Example</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>#true</td><td>Boolean true</td>
+              <td><code>strip-prefix #true</code></td>
+            </tr>
+            <tr>
+              <td>#false</td><td>Boolean false</td>
+              <td><code>starttls #false</code></td>
+            </tr>
+            <tr>
+              <td>#null</td><td>Null / no value</td>
+              <td><code>default-vhost #null</code></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout warn">
+        <span class="callout-label">Caution</span>
+        <span>
+          Writing <code>true</code> (without <code>#</code>) is a
+          bare-identifier string, not a boolean.
+          Always use <code>#true</code> / <code>#false</code>.
+        </span>
+      </div>
+
+      <h3>Numbers</h3>
+      <p>
+        Integers and floats are written without quotes.
+        Underscores may be used as digit separators:
+        <code>1_000_000</code>.
+        Hexadecimal (<code>0xff</code>), octal
+        (<code>0o77</code>), and binary (<code>0b1010</code>)
+        are supported for integers.
+      </p>
+
+      <h3>Comments</h3>
+      <ul>
+        <li><code>//</code> &mdash; line comment to end of line.</li>
+        <li><code>/* &hellip; */</code> &mdash; block comment,
+            may span lines.</li>
+        <li><code>/-</code> &mdash; <em>slashdash</em>; comments
+            out the next argument, property, or entire node
+            (including its children).</li>
+      </ul>
+
+      <h3>Multiple nodes per line</h3>
+      <p>
+        A semicolon terminates a node, allowing siblings on one line:
+      </p>
+<pre><code><span class="kw">server</span> { <span class="kw">user</span> <span class="kw">aloha</span>; <span class="kw">group</span> <span class="kw">aloha</span> }
+<span class="kw">allow</span> { <span class="kw">authenticated</span> } <span class="kw">deny</span> <span class="prop">code=</span><span class="num">401</span></code></pre>
+    </section>
+
+    <div class="chapter-head" id="ch-top-level-nodes">Configuration</div>
+
+    <!-- ========================================================= -->
+    <!-- server                                                      -->
+    <!-- ========================================================= -->
+    <section id="server">
+      <h2><code>server</code></h2>
+      <p>
+        Global settings that apply to the entire process.
+        The <code>server</code> block is optional; omit it to accept
+        all defaults.
+      </p>
+<pre><code><span class="kw">server</span> {
+    <span class="kw">state-dir</span> <span class="str">"/var/lib/aloha"</span>
+    <span class="kw">user</span>      <span class="kw">aloha</span>
+    <span class="kw">tls</span> {
+        <span class="kw">min-version</span> <span class="str">"1.2"</span>
+    }
+}</code></pre>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Children</th><th>Type</th>
+              <th>Default</th><th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><a href="#authentication">auth</a></td>
+              <td>block</td><td>&mdash;</td>
+              <td><span class="badge badge-opt">optional</span>
+                  Authentication back-end.</td>
+            </tr>
+            <tr>
+              <td><a href="#error-pages">error-page</a></td>
+              <td>&mdash;</td><td>&mdash;</td>
+              <td><span class="badge badge-opt">optional</span>
+                  Custom HTML body for an error status code.
+                  Repeatable. Takes the status code as first argument,
+                  then <code>path="..."</code> or
+                  <code>html="..."</code>.</td>
+            </tr>
+            <tr>
+              <td><a href="#geoip">geoip</a></td>
+              <td>block</td><td>&mdash;</td>
+              <td><span class="badge badge-opt">optional</span>
+                  GeoIP database for country-based access control.</td>
+            </tr>
+            <tr>
+              <td><a href="#privdrop">group</a></td>
+              <td>string</td>
+              <td><em>user&rsquo;s primary group</em></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Unix group to switch to after binding. Defaults to
+                  the primary GID of <code>user</code> from
+                  <code>/etc/passwd</code>.</td>
+            </tr>
+            <tr>
+              <td><a href="#health-endpoints">health</a></td>
+              <td>bool | block</td><td>#true</td>
+              <td><span class="badge badge-opt">optional</span>
+                  Enable or disable the built-in health endpoints
+                  (<code>/healthz</code>, <code>/livez</code>,
+                  <code>/readyz</code>).</td>
+            </tr>
+            <tr id="server-inherit-supplementary-groups">
+              <td><a href="#privdrop">inherit-supplementary-groups</a></td>
+              <td>bool</td><td>#false</td>
+              <td><span class="badge badge-opt">optional</span>
+                  Skip <code>setgroups()</code> during privilege drop,
+                  preserving supplementary groups inherited at startup.</td>
+            </tr>
+            <tr>
+              <td><a href="#named-policies">policy</a></td>
+              <td>block</td><td>&mdash;</td>
+              <td><span class="badge badge-opt">optional</span>
+                  Named, reusable policy block. Repeatable; each takes
+                  a name as its first argument.</td>
+            </tr>
+            <tr id="server-state-dir">
+              <td>state-dir</td><td>path</td><td>&mdash;</td>
+              <td>Directory for persistent runtime state: ACME account
+                  keys, issued certificates, and JWT signing keys.
+                  Required when any listener uses <code>tls-acme</code>
+                  or when <code>auth jwt</code> is configured.</td>
+            </tr>
+            <tr>
+              <td><a href="#tls-options">tls</a></td>
+              <td>block</td><td>&mdash;</td>
+              <td><span class="badge badge-opt">optional</span>
+                  Global TLS defaults inherited by every TLS
+                  listener.</td>
+            </tr>
+            <tr>
+              <td><a href="#privdrop">user</a></td>
+              <td>string</td><td>&mdash;</td>
+              <td><span class="badge badge-opt">optional</span>
+                  Unix username to switch to after all sockets are
+                  bound. Only effective when started as root; silently
+                  ignored otherwise.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Authentication -->
+      <h3 id="authentication"><code>auth</code> &mdash; Authentication
+          back-ends</h3>
+      <p>
+        aloha supports several authentication back-ends: HTTP Basic
+        credentials validated against PAM or LDAP, an external HTTP
+        endpoint (subrequest), and ES256 JWT session cookies. Configure
+        one back-end in the <code>server</code> block; it applies to
+        every location that challenges users.
+      </p>
+      <p>
+        Once a back-end is configured, add a
+        <code>basic-auth</code> block inside a <code>location</code>
+        to issue a <code>WWW-Authenticate:&nbsp;Basic</code> challenge,
+        and a <code>policy</code> block to enforce who is allowed
+        (see <a href="#policy">Policy blocks</a>).
+      </p>
+
+      <h4 id="auth-jwt">JWT</h4>
+      <p>
+        Issues and validates ES256 (ECDSA P-256) JWT session cookies
+        so that browsers need to send credentials only once per
+        session. After a successful login, aloha sets a
+        <code>Set-Cookie</code> header; subsequent requests carry the
+        cookie instead of re-sending credentials.
+        Externally-issued JWTs (e.g. from an OAuth provider) can also
+        be validated without aloha issuing tokens (standalone mode).
+      </p>
+      <p>
+        A P-256 private key is generated on first startup and stored
+        at <code>{state-dir}/jwt/ec-key.pem</code>
+        (mode&nbsp;0600). The corresponding public key is
+        automatically served at
+        <code>/.well-known/jwks.json</code> on every virtual host.
+      </p>
+      <p><strong>Session mode</strong> &mdash; wraps an existing
+         credential back-end:</p>
+<pre><code><span class="kw">server</span> {
+    <span class="kw">state-dir</span> <span class="str">"/var/lib/aloha"</span>
+    <span class="kw">auth</span> <span class="kw">jwt</span> {
+        <span class="kw">wrap</span> <span class="kw">pam</span> <span class="prop">service=</span><span class="kw">login</span>   <span class="cm">// or ldap, subrequest</span>
+        <span class="kw">cookie-name</span> <span class="kw">aloha_session</span>  <span class="cm">// optional</span>
+        <span class="kw">validity</span>    <span class="num">300</span>              <span class="cm">// seconds; optional</span>
+    }
+}</code></pre>
+      <p><strong>Standalone mode</strong> &mdash; validates incoming
+         JWTs only, never issues:</p>
+<pre><code><span class="kw">server</span> {
+    <span class="kw">state-dir</span> <span class="str">"/var/lib/aloha"</span>
+    <span class="kw">auth</span> <span class="kw">jwt</span> {
+        <span class="kw">cookie-name</span> <span class="kw">aloha_session</span>
+    }
+}</code></pre>
+      <p>
+        In both modes, a JWT is accepted from either the named cookie
+        or an <code>Authorization:&nbsp;Bearer&nbsp;&lt;token&gt;</code>
+        header. Tokens are checked for a valid ES256 signature, the
+        correct <code>kid</code> field, and a non-expired
+        <code>exp</code> claim. The payload carries <code>sub</code>
+        (username) and <code>groups</code> (array of group names).
+        Cookies are issued with
+        <code>HttpOnly; SameSite=Strict; Path=/; Max-Age=N</code>;
+        the <code>Secure</code> flag is added automatically on TLS
+        listeners.
+      </p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Children</th><th>Type</th>
+              <th>Default</th><th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr id="auth-jwt-cookie-name">
+              <td>cookie-name</td><td>string</td>
+              <td><code>"aloha_session"</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Name of the session cookie.</td>
+            </tr>
+            <tr id="auth-jwt-validity">
+              <td>validity</td><td>integer (s)</td>
+              <td><code>300</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Lifetime of issued tokens in seconds.</td>
+            </tr>
+            <tr id="auth-jwt-wrap">
+              <td>wrap</td><td>string</td><td>&mdash;</td>
+              <td><span class="badge badge-opt">optional</span>
+                  Credential back-end for first-time logins.
+                  Accepts the same argument as a top-level
+                  <code>auth</code> block: <code>pam</code>,
+                  <code>ldap</code>, or <code>subrequest</code>
+                  with their usual children.
+                  Omit for standalone validation.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h4 id="auth-ldap">LDAP</h4>
+<pre><code><span class="kw">server</span> {
+    <span class="kw">auth</span> <span class="kw">ldap</span> {
+        <span class="kw">url</span>      <span class="str">"ldap://localhost:389"</span>
+        <span class="kw">bind-dn</span>  <span class="str">"uid={user},ou=people,dc=example,dc=com"</span>
+        <span class="kw">base-dn</span>  <span class="str">"ou=groups,dc=example,dc=com"</span>
+
+        <span class="cm">// Optional:</span>
+        <span class="kw">group-filter</span> <span class="str">"(memberUid={user})"</span>
+        <span class="kw">group-attr</span>   <span class="str">"cn"</span>
+        <span class="kw">starttls</span>     <span class="num">#false</span>
+        <span class="kw">timeout</span>      <span class="num">5</span>
+    }
+}</code></pre>
+      <p>
+        Authentication is performed as an LDAP simple bind.
+        The <code>{user}</code> placeholder in <code>bind-dn</code>
+        (and in <code>group-filter</code>) is replaced with the
+        RFC&nbsp;4514-escaped username at request time.
+        After a successful bind, a subtree search under
+        <code>base-dn</code> finds the user&rsquo;s group memberships.
+      </p>
+      <p>Unix socket connections are supported via the
+         <code>ldapi://</code> scheme:</p>
+<pre><code><span class="kw">auth</span> <span class="kw">ldap</span> {
+    <span class="kw">url</span>     <span class="str">"ldapi:///var/run/slapd/ldapi"</span>
+    <span class="kw">bind-dn</span> <span class="str">"uid={user},ou=people,dc=example,dc=com"</span>
+    <span class="kw">base-dn</span> <span class="str">"ou=groups,dc=example,dc=com"</span>
+}</code></pre>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Children</th><th>Type</th>
+              <th>Default</th><th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr id="auth-ldap-base-dn">
+              <td>base-dn</td><td>string</td><td>&mdash;</td>
+              <td><span class="badge badge-req">required</span>
+                  Base DN for the group membership search.</td>
+            </tr>
+            <tr id="auth-ldap-bind-dn">
+              <td>bind-dn</td><td>string</td><td>&mdash;</td>
+              <td><span class="badge badge-req">required</span>
+                  DN template for the simple bind. Must contain
+                  <code>{user}</code>, replaced with the
+                  RFC&nbsp;4514-escaped username.</td>
+            </tr>
+            <tr id="auth-ldap-group-attr">
+              <td>group-attr</td><td>string</td><td><code>cn</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Entry attribute used as the group name.</td>
+            </tr>
+            <tr id="auth-ldap-group-filter">
+              <td>group-filter</td><td>string</td>
+              <td><code>(memberUid={user})</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  LDAP filter template for finding a user&rsquo;s
+                  groups. <code>{user}</code> is replaced with the
+                  RFC&nbsp;4515-escaped username. Default is
+                  RFC&nbsp;2307 <code>posixGroup</code> style.</td>
+            </tr>
+            <tr id="auth-ldap-starttls">
+              <td>starttls</td><td>boolean</td><td><code>#false</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Upgrade a plain <code>ldap://</code> connection to
+                  TLS using STARTTLS.</td>
+            </tr>
+            <tr id="auth-ldap-timeout">
+              <td>timeout</td><td>integer (s)</td><td><code>5</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Seconds before an LDAP operation is abandoned.</td>
+            </tr>
+            <tr id="auth-ldap-url">
+              <td>url</td><td>string</td><td>&mdash;</td>
+              <td><span class="badge badge-req">required</span>
+                  Server URL. Supported schemes: <code>ldap://</code>
+                  (plain), <code>ldaps://</code> (TLS),
+                  <code>ldapi://</code> (Unix socket).</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout warn">
+        <span class="callout-label">Caution</span>
+        <span>
+          Empty passwords are rejected before any bind attempt.
+          Many LDAP servers accept an empty password as an anonymous
+          bind, which would otherwise grant access to any username.
+        </span>
+      </div>
+
+      <h4 id="auth-pam">PAM</h4>
+<pre><code><span class="kw">server</span> {
+    <span class="kw">auth</span> <span class="kw">pam</span> {
+        <span class="kw">service</span> <span class="kw">login</span>   <span class="cm">// PAM service name; defaults to login</span>
+    }
+}</code></pre>
+      <p>
+        Credentials are validated by calling into libpam using the
+        named service (<code>/etc/pam.d/&lt;service&gt;</code>).
+        After a successful authentication, the user&rsquo;s Unix group
+        memberships are resolved via <code>getgrouplist(3)</code> and
+        become available for <code>group</code> conditions in
+        <code>policy</code> blocks.
+        PAM is dispatched on a dedicated blocking thread so the async
+        runtime is not stalled.
+      </p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Children</th><th>Type</th>
+              <th>Default</th><th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr id="auth-pam-service">
+              <td>service</td><td>string</td>
+              <td><code>"login"</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  PAM service name. Must correspond to a file in
+                  <code>/etc/pam.d/</code>.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h4 id="auth-subrequest">Subrequest</h4>
+      <p>
+        Delegates authentication to an external HTTP endpoint &mdash;
+        the same pattern as nginx&rsquo;s <code>auth_request</code>
+        module. For every request that needs authentication, aloha
+        makes an outgoing HTTP GET to the configured URL, forwarding
+        selected request headers.
+        An HTTP&nbsp;200 response means authenticated; any other status
+        or a network error means anonymous.
+      </p>
+<pre><code><span class="kw">server</span> {
+    <span class="kw">auth</span> <span class="kw">subrequest</span> {
+        <span class="kw">url</span>            <span class="str">"http://auth.internal:8080/validate"</span>
+        <span class="kw">forward-header</span> <span class="kw">Authorization</span>   <span class="cm">// repeatable</span>
+        <span class="kw">forward-header</span> <span class="kw">Cookie</span>
+        <span class="kw">user-header</span>    <span class="kw">X-Auth-User</span>     <span class="cm">// identity from response</span>
+        <span class="kw">groups-header</span>  <span class="kw">X-Auth-Groups</span>
+        <span class="kw">timeout</span>        <span class="num">5</span>
+    }
+}</code></pre>
+      <p>
+        When the auth endpoint returns 200, aloha reads identity from
+        the response headers named by <code>user-header</code> and
+        <code>groups-header</code>.
+        If neither header is configured, a 200 still counts as
+        authenticated (suitable for pure allow/deny decisions).
+      </p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Children</th><th>Type</th>
+              <th>Default</th><th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr id="auth-subrequest-forward-header">
+              <td>forward-header</td><td>string</td><td>&mdash;</td>
+              <td><span class="badge badge-rep">repeatable</span>
+                  Request header forwarded verbatim to the auth
+                  endpoint. Typically <code>Authorization</code> or
+                  <code>Cookie</code>.</td>
+            </tr>
+            <tr id="auth-subrequest-groups-header">
+              <td>groups-header</td><td>string</td><td>&mdash;</td>
+              <td><span class="badge badge-opt">optional</span>
+                  Response header holding a comma-separated list of
+                  group names.</td>
+            </tr>
+            <tr id="auth-subrequest-timeout">
+              <td>timeout</td><td>integer (s)</td><td><code>5</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Seconds to wait for the auth endpoint before
+                  treating the request as anonymous.</td>
+            </tr>
+            <tr id="auth-subrequest-url">
+              <td>url</td><td>string</td><td>&mdash;</td>
+              <td><span class="badge badge-req">required</span>
+                  HTTP endpoint to call. Must use
+                  <code>http://</code> scheme.</td>
+            </tr>
+            <tr id="auth-subrequest-user-header">
+              <td>user-header</td><td>string</td><td>&mdash;</td>
+              <td><span class="badge badge-opt">optional</span>
+                  Response header whose value becomes the
+                  authenticated username.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        The typical deployment pairs the subrequest back-end on the
+        protected server with an
+        <a href="#handler-auth-request"><code>auth-request</code>
+        handler</a> on the auth server. See that section for the
+        complete two-server example.
+      </p>
+
+      <!-- Custom error pages -->
+      <h3 id="error-pages"><code>error-page</code></h3>
+      <p>
+        Override the default minimal response body for any HTTP error
+        status code. Define error pages in the <code>server</code>
+        block; they apply to all error responses generated by access
+        policy denials.
+      </p>
+<pre><code><span class="kw">server</span> {
+    <span class="kw">error-page</span> <span class="num">403</span> <span class="prop">path=</span><span class="str">"/var/www/errors/403.html"</span>
+    <span class="kw">error-page</span> <span class="num">401</span> <span class="prop">html=</span><span class="str">"&lt;h1&gt;Authentication Required&lt;/h1&gt;"</span>
+    <span class="kw">error-page</span> <span class="num">404</span> <span class="prop">path=</span><span class="str">"/var/www/errors/404.html"</span>
+}</code></pre>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Syntax</th><th>Description</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>error-page N path="..."</code></td>
+              <td>Read HTML from this file on each error response.
+                  The file is re-read on every request, so updates
+                  take effect without restarting aloha.</td>
+            </tr>
+            <tr>
+              <td><code>error-page N html="..."</code></td>
+              <td>Use this literal HTML string as the response
+                  body.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        The <code>Content-Type</code> is always
+        <code>text/html; charset=utf-8</code>. The error page
+        replaces only the body; the status code and headers
+        (e.g. <code>WWW-Authenticate</code> for 401 responses) are
+        set normally. If the file is missing or unreadable, aloha
+        falls back to the default minimal body.
+      </p>
+
+      <!-- GeoIP -->
+      <h3 id="geoip"><code>geoip</code></h3>
+      <p>
+        Restricts access by the client&rsquo;s country of origin using
+        a MaxMind MMDB database. Configure the path once in the
+        <code>server</code> block; then use <code>country</code>
+        predicates in any <code>policy</code> block.
+      </p>
+<pre><code><span class="kw">server</span> {
+    <span class="kw">geoip</span> {
+        <span class="kw">db</span> <span class="str">"/etc/aloha/GeoLite2-Country.mmdb"</span>
+    }
+}</code></pre>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Children</th><th>Type</th>
+              <th>Default</th><th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr id="geoip-db">
+              <td>db</td><td>path</td><td>&mdash;</td>
+              <td><span class="badge badge-req">required</span>
+                  Filesystem path to the MaxMind MMDB file.
+                  Compatible databases: <strong>GeoLite2-Country</strong>
+                  (country codes only),
+                  <strong>GeoLite2-City</strong>, or any MMDB file
+                  that contains a <code>country.iso_code</code>
+                  field.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        The database is loaded into memory at startup; the file must
+        be readable by the aloha process after privilege drop.
+        Country codes are ISO&nbsp;3166-1 alpha-2 (two uppercase
+        letters). Private and reserved IP ranges
+        (127.0.0.0/8, 10.0.0.0/8, etc.) are not in the database and
+        will <strong>not</strong> match a <code>country</code>
+        predicate. Combine with <code>address</code> to allow private
+        ranges explicitly.
+      </p>
+<pre><code><span class="cm">// Allow only US, Canada, and UK; plus the internal network</span>
+<span class="kw">policy</span> {
+    <span class="kw">allow</span> <span class="kw">address</span> <span class="str">"10.0.0.0/8"</span>
+    <span class="kw">allow</span> <span class="kw">country</span> <span class="kw">US</span> <span class="kw">CA</span> <span class="kw">GB</span>
+    <span class="kw">deny</span>  <span class="prop">code=</span><span class="num">403</span>
+}</code></pre>
+      <div class="callout warn">
+        <span class="callout-label">Caution</span>
+        <span>A startup error is returned if
+          <code>country</code> predicates appear anywhere but no
+          <code>server { geoip { db&nbsp;&hellip; } }</code> is
+          configured.
+        </span>
+      </div>
+
+      <!-- user / group -->
+      <h3 id="privdrop"><code>user</code> and <code>group</code></h3>
+      <p>
+        When aloha is started as root (necessary to bind ports 80 and
+        443), set <code>user</code> to drop privileges immediately
+        after all sockets are bound and before any connections are
+        accepted.
+        The syscall sequence is
+        <code>setgroups</code> &rarr; <code>setgid</code> &rarr;
+        <code>setuid</code>.
+      </p>
+      <p>
+        In container deployments that use
+        <code>podman&nbsp;run&nbsp;--group-add&nbsp;keep-groups</code>,
+        set <code>inherit-supplementary-groups&nbsp;#true</code> to
+        preserve the supplementary groups passed by podman rather than
+        replacing them with a <code>setgroups()</code> call.
+      </p>
+<pre><code><span class="kw">server</span> { <span class="kw">user</span> <span class="kw">www-data</span> }
+<span class="kw">server</span> { <span class="kw">user</span> <span class="kw">aloha</span>; <span class="kw">group</span> <span class="kw">aloha</span> }
+<span class="cm">// container: preserve groups from --group-add keep-groups</span>
+<span class="kw">server</span> { <span class="kw">user</span> <span class="kw">aloha</span>; <span class="kw">inherit-supplementary-groups</span> <span class="num">#true</span> }</code></pre>
+
+      <!-- health -->
+      <h3 id="health-endpoints"><code>health</code></h3>
+      <p>
+        aloha responds to <code>GET</code> and <code>HEAD</code>
+        requests on <code>/healthz</code>, <code>/livez</code>, and
+        <code>/readyz</code> with a <code>200 OK</code> JSON body
+        <code>{"status":"ok","check":"healthz"}</code> (and so on).
+        These endpoints are intercepted before vhost routing, so they
+        work without a <code>Host</code> header and cannot be
+        shadowed by user-defined locations. They are enabled by
+        default; set <code>health&nbsp;#false</code> to disable them.
+      </p>
+<pre><code><span class="kw">server</span> {
+    <span class="kw">health</span> <span class="num">#false</span>             <span class="cm">// disable all health endpoints</span>
+}
+
+<span class="cm">// Block form (equivalent):</span>
+<span class="kw">server</span> {
+    <span class="kw">health</span> { <span class="kw">enabled</span> <span class="num">#false</span> }
+}</code></pre>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Children</th><th>Type</th>
+              <th>Default</th><th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr id="health-enabled">
+              <td>enabled</td><td>boolean</td><td><code>#true</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Enable or disable the built-in health endpoints.
+                  Equivalent to passing <code>#false</code> directly
+                  as a positional argument to <code>health</code>.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout info">
+        <span class="callout-label">Note</span>
+        <span>
+          Kubernetes liveness (<code>/livez</code>), readiness
+          (<code>/readyz</code>), and startup (<code>/healthz</code>)
+          probes can all point at these paths without any additional
+          configuration. Only <code>GET</code> and <code>HEAD</code>
+          are handled; other methods fall through to normal routing.
+        </span>
+      </div>
+
+      <!-- TLS defaults -->
+      <h3 id="tls-options"><code>tls</code> &mdash; Global TLS
+          defaults</h3>
+      <p>
+        These settings can appear in a <code>tls</code> block
+        inside <code>server</code> (global defaults) or inside a
+        <code>listener</code> (per-listener override). Per-listener
+        values take precedence.
+      </p>
+<pre><code><span class="kw">server</span> {
+    <span class="kw">tls</span> {
+        <span class="kw">min-version</span> <span class="str">"1.2"</span>
+        <span class="kw">cipher</span> <span class="kw">TLS13_AES_256_GCM_SHA384</span>
+        <span class="kw">cipher</span> <span class="kw">TLS13_CHACHA20_POLY1305_SHA256</span>
+    }
+}</code></pre>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Children</th><th>Type</th>
+              <th>Default</th><th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr id="tls-options-cipher">
+              <td>cipher</td><td>string</td>
+              <td><em>provider defaults</em></td>
+              <td><span class="badge badge-rep">repeatable</span>
+                  Restrict the allowed cipher suites by name.</td>
+            </tr>
+            <tr id="tls-options-min-version">
+              <td>min-version</td>
+              <td><code>"1.2"</code> | <code>"1.3"</code></td>
+              <td><code>"1.2"</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Minimum TLS protocol version to accept.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+    </section>
+
+    <hr class="divider">
+
+    <!-- ========================================================= -->
+    <!-- listener                                                    -->
+    <!-- ========================================================= -->
+    <section id="listener">
+      <h2><code>listener</code></h2>
+      <p>
+        Opens a socket and begins accepting connections. At least one
+        is required. Use separate listeners for plain HTTP and HTTPS.
+      </p>
+<pre><code><span class="cm">// Plain HTTP</span>
+<span class="kw">listener</span> {
+    <span class="kw">bind</span> <span class="str">"[::]:80"</span>
+}
+
+<span class="cm">// HTTPS with an explicit default vhost</span>
+<span class="kw">listener</span> {
+    <span class="kw">bind</span>          <span class="str">"[::]:443"</span>
+    <span class="kw">default-vhost</span> <span class="kw">example.com</span>
+    <span class="kw">tls-file</span> <span class="prop">cert=</span><span class="str">"/etc/aloha/cert.pem"</span> <span class="prop">key=</span><span class="str">"/etc/aloha/key.pem"</span>
+}
+
+<span class="cm">// null disables the fallback -- unrecognised hosts get a 404</span>
+<span class="kw">listener</span> {
+    <span class="kw">bind</span>          <span class="str">"[::]:80"</span>
+    <span class="kw">default-vhost</span> <span class="num">#null</span>
+}
+
+<span class="cm">// Unix domain socket (useful behind a front-end proxy)</span>
+<span class="kw">listener</span> {
+    <span class="kw">bind</span> <span class="str">"unix:/run/aloha.sock"</span>
+}</code></pre>
+      <p>
+        Unix socket connections have no IP address; they are treated as
+        coming from <code>127.0.0.1</code> for access-control and
+        GeoIP purposes. Access logs show <code>[unix]</code> as the
+        peer.
+      </p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Children</th><th>Type</th>
+              <th>Default</th><th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr id="listener-accept-proxy-protocol">
+              <td>accept-proxy-protocol</td>
+              <td><code>v1</code> | <code>v2</code></td>
+              <td>&mdash;</td>
+              <td><span class="badge badge-opt">optional</span>
+                  Read a HAProxy PROXY protocol header from each
+                  incoming connection before TLS or HTTP parsing.
+                  The real client address from the header replaces the
+                  TCP peer address for access rules, logging, and
+                  forwarding headers. Use when aloha sits behind
+                  HAProxy or an AWS NLB that speaks PROXY protocol.
+                  <code>v2</code> (binary) is preferred.</td>
+            </tr>
+            <tr id="listener-bind">
+              <td>bind</td><td>string</td><td>&mdash;</td>
+              <td><span class="badge badge-req">required</span>
+                  Address to listen on. Use <code>"host:port"</code>
+                  for TCP (e.g. <code>"[::]:8080"</code>) or
+                  <code>"unix:/path"</code> for a Unix domain socket.
+                  If a matching socket was inherited from a parent
+                  process (seamless upgrade), aloha adopts it instead
+                  of calling <code>bind(2)</code>.</td>
+            </tr>
+            <tr id="listener-default-vhost">
+              <td>default-vhost</td>
+              <td>string | <code>#null</code></td>
+              <td><em>first vhost</em></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Vhost used when no <code>Host</code> header matches.
+                  Set to <code>#null</code> to return 404 for
+                  unrecognised hosts.</td>
+            </tr>
+            <tr id="listener-max-connections">
+              <td>max-connections</td><td>integer</td>
+              <td>unlimited</td>
+              <td><span class="badge badge-opt">optional</span>
+                  Maximum simultaneous open connections on this
+                  listener. New connections are deferred (not dropped)
+                  when the limit is reached, so the kernel accept queue
+                  is never backed up.</td>
+            </tr>
+            <tr id="listener-max-request-body">
+              <td>max-request-body</td><td>integer (bytes)</td>
+              <td>unlimited</td>
+              <td><span class="badge badge-opt">optional</span>
+                  Reject requests whose
+                  <code>Content-Length</code> header exceeds this
+                  value with
+                  <code>413 Content Too Large</code>. Applies before
+                  any handler runs. HTTP mode only.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Stream proxy -->
+      <h3 id="stream-proxy"><code>proxy</code> &mdash; Stream
+          (TCP) proxy</h3>
+      <p>
+        Adding a <code>proxy</code> block to a <code>listener</code>
+        activates stream mode: raw TCP bytes are forwarded to the
+        upstream. HTTP routing does not apply.
+      </p>
+      <p>
+        Combine with a <code>tls-*</code> block on the listener to
+        terminate TLS from clients before forwarding &mdash; aloha
+        decrypts the incoming connection and forwards the plaintext
+        stream. Add a <code>tls</code> block inside the
+        <code>proxy</code> block to re-encrypt the upstream connection
+        (re-TLS).
+      </p>
+<pre><code><span class="cm">// Plain TCP tunnel to a PostgreSQL backend</span>
+<span class="kw">listener</span> <span class="str">"[::]:5432"</span> {
+    <span class="kw">proxy</span> <span class="str">"db.internal:5432"</span> {
+        <span class="kw">proxy-protocol</span> <span class="kw">v2</span>
+    }
+}
+
+<span class="cm">// Unix domain socket upstream</span>
+<span class="kw">listener</span> <span class="str">"[::]:5432"</span> {
+    <span class="kw">proxy</span> <span class="str">"unix:/run/postgresql/.s.PGSQL.5432"</span>
+}
+
+<span class="cm">// TLS termination: clients connect over TLS, backend gets plaintext</span>
+<span class="kw">listener</span> <span class="str">"[::]:5433"</span> {
+    <span class="kw">tls-self-signed</span>
+    <span class="kw">proxy</span> <span class="str">"db.internal:5432"</span> {
+        <span class="kw">proxy-protocol</span> <span class="kw">v2</span>
+    }
+}
+
+<span class="cm">// Full re-TLS: terminate client TLS, re-encrypt to upstream</span>
+<span class="kw">listener</span> <span class="str">"[::]:5433"</span> {
+    <span class="kw">tls-file</span> <span class="prop">cert=</span><span class="str">"cert.pem"</span> <span class="prop">key=</span><span class="str">"key.pem"</span>
+    <span class="kw">proxy</span> <span class="str">"db.internal:5432"</span> {
+        <span class="kw">tls</span>             <span class="cm">// verify with bundled WebPKI roots</span>
+    }
+}
+
+<span class="cm">// Restrict a database port to an internal CIDR block</span>
+<span class="kw">listener</span> <span class="str">"[::]:5432"</span> {
+    <span class="kw">proxy</span> <span class="str">"db.internal:5432"</span>
+    <span class="kw">policy</span> {
+        <span class="kw">allow</span> <span class="kw">address</span> <span class="str">"10.0.0.0/8"</span>
+        <span class="kw">deny</span>  <span class="prop">code=</span><span class="num">403</span>
+    }
+}</code></pre>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Children</th><th>Type</th>
+              <th>Default</th><th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr id="stream-proxy-upstream">
+              <td>upstream</td><td>string</td><td>&mdash;</td>
+              <td><span class="badge badge-req">required positional</span>
+                  Upstream address: <code>"host:port"</code> for TCP
+                  or <code>"unix:/path"</code> for a Unix domain
+                  socket.</td>
+            </tr>
+            <tr id="stream-proxy-proxy-protocol">
+              <td>proxy-protocol</td>
+              <td><code>v1</code> | <code>v2</code></td>
+              <td>&mdash;</td>
+              <td><span class="badge badge-opt">optional</span>
+                  Prepend a HAProxy PROXY protocol header so the
+                  upstream sees the real client IP. <code>v2</code>
+                  is preferred.</td>
+            </tr>
+            <tr id="stream-proxy-tls">
+              <td>tls</td><td>block</td><td>&mdash;</td>
+              <td><span class="badge badge-opt">optional</span>
+                  Connect to the upstream using TLS. Verifies the
+                  upstream certificate against system CA roots.</td>
+            </tr>
+            <tr id="stream-proxy-skip-verify">
+              <td>tls &rsaquo; skip-verify</td><td>flag</td><td>&mdash;</td>
+              <td><span class="badge badge-opt">optional</span>
+                  Disable upstream certificate verification. Presence
+                  of the node is sufficient; no value required:
+                  <code>tls { skip-verify }</code>.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        A <code>policy</code> block placed at the
+        <code>listener</code> level (sibling to <code>proxy</code>)
+        may only use <code>address</code> and <code>country</code>
+        predicates. Identity predicates are rejected at startup.
+        Denied connections are closed silently; redirect rules are
+        treated as deny.
+      </p>
+      <p>
+        A config consisting entirely of stream listeners is valid with
+        no <code>vhost</code> defined at all.
+      </p>
+
+      <!-- Timeouts -->
+      <h3 id="timeouts"><code>timeouts</code></h3>
+      <p>
+        Optional connection and request timeout settings. All values
+        are in whole seconds.
+        <code>request-header</code> defaults to <strong>30&nbsp;s</strong>
+        even when the <code>timeouts</code> block is absent; set it to
+        <code>0</code> to disable. All other values default to unlimited.
+      </p>
+<pre><code><span class="kw">listener</span> {
+    <span class="kw">bind</span> <span class="str">"[::]:8080"</span>
+    <span class="kw">timeouts</span> {
+        <span class="kw">request-header</span> <span class="num">30</span>
+        <span class="kw">handler</span>        <span class="num">60</span>
+        <span class="kw">keepalive</span>      <span class="num">75</span>
+    }
+}</code></pre>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Children</th><th>Type</th>
+              <th>Default</th><th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr id="timeouts-handler">
+              <td>handler</td><td>integer (s)</td><td>unlimited</td>
+              <td><span class="badge badge-opt">optional</span>
+                  Maximum seconds a request handler may run before it
+                  is cancelled and
+                  <code>408 Request Timeout</code> is returned.</td>
+            </tr>
+            <tr id="timeouts-keepalive">
+              <td>keepalive</td><td>integer (s)</td>
+              <td>unlimited</td>
+              <td><span class="badge badge-opt">optional</span>
+                  HTTP/1.1 keep-alive idle timeout. Set to
+                  <code>0</code> to disable keep-alive entirely.</td>
+            </tr>
+            <tr id="timeouts-request-header">
+              <td>request-header</td><td>integer (s)</td>
+              <td>30</td>
+              <td><span class="badge badge-opt">optional</span>
+                  Maximum seconds to wait for a complete request line
+                  and headers. Protects against Slowloris-style
+                  attacks. Set to <code>0</code> to disable.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- TLS certificate mode -->
+      <h3 id="tls"><code>tls-*</code> &mdash; Certificate mode</h3>
+      <p>
+        Add one of three sibling blocks to a listener to enable TLS.
+        Each accepts its settings either inline (one-line form) or
+        as children in a block.
+      </p>
+<pre><code><span class="cm">// Self-signed -- ephemeral, generated at startup (development only)</span>
+<span class="kw">tls-self-signed</span>
+
+<span class="cm">// PEM files from disk</span>
+<span class="kw">tls-file</span> <span class="prop">cert=</span><span class="str">"/etc/aloha/cert.pem"</span> <span class="prop">key=</span><span class="str">"/etc/aloha/key.pem"</span>
+
+<span class="cm">// ACME / Let's Encrypt</span>
+<span class="kw">tls-acme</span> {
+    <span class="kw">domain</span> <span class="kw">example.com</span> <span class="kw">www.example.com</span>
+    <span class="kw">email</span>  <span class="kw">admin@example.com</span>
+}</code></pre>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Node</th><th>Required values</th>
+                <th>Description</th></tr>
+          </thead>
+          <tbody>
+            <tr id="tls-file">
+              <td><code>tls-file</code></td>
+              <td><code>cert</code>, <code>key</code></td>
+              <td>PEM certificate chain and private key from disk.</td>
+            </tr>
+            <tr id="tls-self-signed">
+              <td><code>tls-self-signed</code></td>
+              <td>&mdash;</td>
+              <td>Generates an ephemeral cert at startup. Development
+                  use only &mdash; not trusted by browsers.</td>
+            </tr>
+            <tr>
+              <td><code>tls-acme</code></td>
+              <td><code>domain</code>+ and <code>state-dir</code> in
+                  <code>server</code></td>
+              <td>Obtain and renew certificates automatically via
+                  ACME HTTP-01.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout info">
+        <span class="callout-label">Note</span>
+        <span>HTTP/1.1 and HTTP/2 are both supported on TLS listeners;
+          protocol selection is automatic via ALPN.</span>
+      </div>
+
+      <h4 id="tls-acme"><code>tls-acme</code> &mdash; ACME /
+          Let&rsquo;s Encrypt</h4>
+      <p>
+        With <code>tls-acme</code>, aloha obtains and automatically
+        renews a certificate via the ACME HTTP-01 challenge.
+        A plain HTTP listener must be running to answer challenge
+        requests. Requires <code>state-dir</code> in the
+        <a href="#server"><code>server</code></a> block.
+      </p>
+<pre><code><span class="kw">listener</span> {
+    <span class="kw">bind</span> <span class="str">"[::]:443"</span>
+    <span class="kw">tls-acme</span> {
+        <span class="kw">domain</span> <span class="kw">example.com</span> <span class="kw">www.example.com</span>
+        <span class="kw">email</span>  <span class="kw">admin@example.com</span>
+    }
+}</code></pre>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Children</th><th>Type</th>
+              <th>Default</th><th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr id="tls-acme-domain">
+              <td>domain</td><td>string</td><td>&mdash;</td>
+              <td><span class="badge badge-req">required</span>
+                  Domain name for the Subject Alternative Name.
+                  <span class="badge badge-rep">repeatable</span>
+                  &mdash; at least one required.</td>
+            </tr>
+            <tr id="tls-acme-email">
+              <td>email</td><td>string</td><td>&mdash;</td>
+              <td><span class="badge badge-opt">optional</span>
+                  Contact address registered with the ACME
+                  provider.</td>
+            </tr>
+            <tr id="tls-acme-name">
+              <td>name</td><td>string</td>
+              <td><em>first domain</em></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Storage subdirectory name under
+                  <code>state-dir</code>.</td>
+            </tr>
+            <tr id="tls-acme-retry-interval">
+              <td>retry-interval</td><td>integer (s)</td>
+              <td><code>3600</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Seconds between retry attempts after a certificate
+                  failure.</td>
+            </tr>
+            <tr id="tls-acme-server">
+              <td>server</td><td>URL</td>
+              <td><em>Let&rsquo;s Encrypt</em></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Override the ACME directory URL.</td>
+            </tr>
+            <tr id="tls-acme-staging">
+              <td>staging</td><td>boolean</td>
+              <td><code>#false</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Use the Let&rsquo;s Encrypt staging server
+                  (untrusted, no rate limits &mdash; useful for
+                  testing).</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+    </section>
+
+    <hr class="divider">
+
+    <!-- ========================================================= -->
+    <!-- vhost                                                       -->
+    <!-- ========================================================= -->
+    <section id="vhost">
+      <h2><code>vhost</code></h2>
+      <p>
+        Maps one or more hostnames to a set of URL routing rules.
+        Requests are matched against the <code>Host</code> header
+        (port suffix stripped). At least one vhost is required for
+        HTTP mode; stream-proxy-only configs may omit them.
+      </p>
+
+      <h3 id="vhost-matching">Name matching</h3>
+      <p>
+        The first argument is the primary name; <code>alias</code>
+        adds extra names. Both support two matching modes:
+      </p>
+      <ul>
+        <li><strong>Exact literal</strong> &mdash; the default.
+            The full hostname must match exactly.</li>
+        <li><strong>Regex</strong> &mdash; add <code>regex=#true</code>
+            as a property. The string is compiled as a regular expression
+            anchored at both ends (<code>^...$</code>).
+            Invalid patterns are caught at startup.</li>
+      </ul>
+      <p>For each request, matching proceeds in this order:</p>
+      <ol>
+        <li>Exact literal match across all vhosts &mdash;
+            O(1) lookup.</li>
+        <li>Regex patterns &mdash; in config declaration order;
+            first match wins.</li>
+        <li>Listener <code>default-vhost</code> fallback.</li>
+      </ol>
+<pre><code><span class="cm">// Exact match for the bare domain plus an alias</span>
+<span class="kw">vhost</span> <span class="kw">example.com</span> {
+    <span class="kw">alias</span> <span class="kw">www.example.com</span>
+    <span class="kw">location</span> <span class="str">"/"</span> {
+        <span class="kw">static</span> { <span class="kw">root</span> <span class="str">"/var/www/example"</span> }
+    }
+}
+
+<span class="cm">// Regex -- matches any subdomain of example.com</span>
+<span class="kw">vhost</span> <span class="str">".+\.example\.com"</span> <span class="prop">regex=</span><span class="num">#true</span> {
+    <span class="kw">location</span> <span class="str">"/"</span> {
+        <span class="kw">static</span> { <span class="kw">root</span> <span class="str">"/var/www/wildcard"</span> }
+    }
+}</code></pre>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Children</th><th>Argument</th>
+              <th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><a href="#vhost-matching">alias</a></td>
+              <td>name
+                  <span class="badge badge-rep">repeatable</span>
+              </td>
+              <td>Additional hostname or regex pattern that maps to
+                  this vhost.</td>
+            </tr>
+            <tr>
+              <td><a href="#location">location</a></td>
+              <td>path prefix
+                  <span class="badge badge-req">at least one</span>
+              </td>
+              <td>URL routing rule. Longest prefix match wins;
+                  declaration order does not matter.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <hr class="divider">
+
+    <!-- ========================================================= -->
+    <!-- location                                                    -->
+    <!-- ========================================================= -->
+    <section id="location">
+      <h2><code>location</code></h2>
+      <p>
+        Maps a URL path prefix to a handler. The location with the
+        <strong>longest matching prefix</strong> wins &mdash;
+        declaration order does not matter. Each location contains
+        exactly one handler node.
+      </p>
+      <p>In addition to a handler, a location may carry:</p>
+      <ul>
+        <li>A <strong><code>policy</code></strong> block &mdash;
+            access control rules. See
+            <a href="#policy">Policy blocks</a>.</li>
+        <li>A <strong><code>basic-auth</code></strong> block &mdash;
+            HTTP Basic auth realm. See
+            <a href="#auth-realm">basic-auth</a>.</li>
+        <li><strong><code>request-headers</code></strong> and/or
+            <strong><code>response-headers</code></strong> blocks
+            &mdash; inject or modify headers.
+            See <a href="#header-injection">Header injection</a>.</li>
+      </ul>
+
+      <!-- auth-request -->
+      <h3 id="handler-auth-request">Handler:
+          <code>auth-request</code></h3>
+      <p>
+        The server-side counterpart to the
+        <a href="#auth-subrequest">subrequest</a> authentication
+        back-end. A location using this handler acts as an auth
+        endpoint: it applies its own <code>policy</code> block and
+        <code>basic-auth</code> realm to decide whether the caller
+        is authenticated, then returns <code>200&nbsp;OK</code> on
+        success with <code>X-Auth-User</code> and
+        <code>X-Auth-Groups</code> response headers populated from
+        the resolved identity.
+      </p>
+      <p>
+        The access policy machinery issues the 401 or 403 before the
+        handler itself is reached, so the handler has no configuration.
+      </p>
+<pre><code><span class="kw">location</span> <span class="str">"/auth/validate"</span> {
+    <span class="kw">auth-request</span>
+    <span class="kw">basic-auth</span> <span class="prop">realm=</span><span class="str">"My Service"</span>
+    <span class="kw">policy</span> {
+        <span class="kw">allow</span> { <span class="kw">authenticated</span> }
+        <span class="kw">deny</span>
+    }
+}</code></pre>
+
+      <p><strong>Complete two-server example</strong></p>
+      <p><strong>Auth server</strong> &mdash; validates HTTP Basic
+         credentials via PAM and returns the identity:</p>
+<pre><code><span class="cm">// auth-server.kdl</span>
+<span class="kw">server</span> {
+    <span class="kw">auth</span> <span class="kw">pam</span> { <span class="kw">service</span> <span class="kw">login</span> }
+}
+<span class="kw">listener</span> { <span class="kw">bind</span> <span class="str">"127.0.0.1:9000"</span> }
+<span class="kw">vhost</span> <span class="str">"127.0.0.1"</span> {
+    <span class="kw">location</span> <span class="str">"/validate"</span> {
+        <span class="kw">auth-request</span>
+        <span class="kw">basic-auth</span> <span class="prop">realm=</span><span class="kw">Protected</span>
+        <span class="kw">policy</span> { <span class="kw">allow</span> { <span class="kw">authenticated</span> }; <span class="kw">deny</span> }
+    }
+}</code></pre>
+      <p><strong>App server</strong> &mdash; delegates auth to the
+         auth server and restricts a location to group members:</p>
+<pre><code><span class="cm">// app-server.kdl</span>
+<span class="kw">server</span> {
+    <span class="kw">auth</span> <span class="kw">subrequest</span> {
+        <span class="kw">url</span>            <span class="str">"http://127.0.0.1:9000/validate"</span>
+        <span class="kw">forward-header</span> <span class="kw">Authorization</span>
+        <span class="kw">user-header</span>    <span class="kw">X-Auth-User</span>
+        <span class="kw">groups-header</span>  <span class="kw">X-Auth-Groups</span>
+    }
+}
+<span class="kw">listener</span> { <span class="kw">bind</span> <span class="str">"[::]:80"</span> }
+<span class="kw">vhost</span> <span class="kw">app.example.com</span> {
+    <span class="kw">location</span> <span class="str">"/admin/"</span> {
+        <span class="kw">basic-auth</span> <span class="prop">realm=</span><span class="str">"Admin Area"</span>
+        <span class="kw">policy</span> {
+            <span class="kw">allow</span> { <span class="kw">group</span> <span class="kw">admins</span> }
+            <span class="kw">deny</span>
+        }
+        <span class="kw">static</span> { <span class="kw">root</span> <span class="str">"/var/www/admin"</span> }
+    }
+}</code></pre>
+
+      <!-- basic-auth -->
+      <h3 id="auth-realm"><code>basic-auth</code></h3>
+      <p>
+        Configures the <code>WWW-Authenticate</code> realm sent in
+        <code>401</code> responses. It does not by itself restrict
+        access; pair it with a <code>policy</code> block containing a
+        <code>deny code=401</code> rule (or an <code>authenticated</code>
+        predicate, which issues a 401 challenge automatically for
+        anonymous users).
+      </p>
+<pre><code><span class="kw">location</span> <span class="str">"/members/"</span> {
+    <span class="kw">basic-auth</span> <span class="prop">realm=</span><span class="str">"Members Area"</span>
+    <span class="kw">policy</span> {
+        <span class="kw">allow</span> { <span class="kw">authenticated</span> }
+        <span class="kw">deny</span>  <span class="prop">code=</span><span class="num">401</span>
+    }
+    <span class="kw">static</span> { <span class="kw">root</span> <span class="str">"/var/www/members"</span> }
+}</code></pre>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Form</th><th>Description</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>basic-auth</code></td>
+              <td>Use the default realm <code>"Restricted"</code>.</td>
+            </tr>
+            <tr>
+              <td><code>basic-auth realm="..."</code></td>
+              <td>Property form (one-line).</td>
+            </tr>
+            <tr>
+              <td><code>basic-auth { realm "..." }</code></td>
+              <td>Block form. Both forms accept the same string.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        A server-level <code>auth</code> back-end must be configured
+        for credentials to be validated. Without one, all requests are
+        treated as anonymous and <code>deny code=401</code> will always
+        challenge without ever accepting credentials.
+      </p>
+
+      <!-- CGI-style handlers -->
+      <h3 id="cgi-handlers">Handlers: <code>cgi</code> /
+          <code>fastcgi</code> / <code>scgi</code></h3>
+      <p>
+        These three handlers all speak CGI-adjacent protocols and
+        share several characteristics. They all set
+        <code>REMOTE_ADDR</code> to <code>0.0.0.0</code>; use a
+        <code>request-headers</code> block with
+        <code>{client_ip}</code> to inject the real address
+        (see <a href="#header-injection">Header injection</a>).
+        A new connection is opened per request (no connection
+        pooling).
+      </p>
+
+      <h4 id="handler-cgi"><code>cgi</code>
+          <span class="badge badge-rep">Unix only</span></h4>
+      <p>
+        Executes a CGI script as a child process. One process is
+        forked per request.
+      </p>
+<pre><code><span class="kw">location</span> <span class="str">"/cgi-bin/"</span> {
+    <span class="kw">request-headers</span> { <span class="kw">set</span> <span class="kw">X-Real-IP</span> <span class="str">"{client_ip}"</span> }
+    <span class="kw">cgi</span> {
+        <span class="kw">root</span> <span class="str">"/usr/lib/cgi-bin"</span>
+    }
+}</code></pre>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Children</th><th>Type</th>
+              <th>Default</th><th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr id="handler-cgi-root">
+              <td>root</td><td>path</td><td>&mdash;</td>
+              <td><span class="badge badge-req">required</span>
+                  Directory containing CGI scripts. The request path
+                  maps directly to a file under this directory.
+                  Path traversal is blocked.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h4 id="handler-fastcgi"><code>fastcgi</code></h4>
+      <p>
+        Forwards requests to a FastCGI application server such as
+        PHP-FPM using the binary FastCGI record protocol.
+      </p>
+<pre><code><span class="kw">location</span> <span class="str">"/"</span> {
+    <span class="kw">request-headers</span> { <span class="kw">set</span> <span class="kw">X-Real-IP</span> <span class="str">"{client_ip}"</span> }
+    <span class="kw">fastcgi</span> {
+        <span class="kw">socket</span> <span class="str">"unix:/run/php/fpm.sock"</span>
+        <span class="kw">root</span>   <span class="str">"/var/www/html"</span>
+        <span class="kw">index</span>  <span class="kw">index.php</span>
+    }
+}</code></pre>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Children</th><th>Type</th>
+              <th>Default</th><th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr id="handler-fastcgi-index">
+              <td>index</td><td>string</td><td>&mdash;</td>
+              <td><span class="badge badge-opt">optional</span>
+                  Default script appended to directory requests
+                  (paths ending in <code>/</code>),
+                  e.g. <code>"index.php"</code>.</td>
+            </tr>
+            <tr id="handler-fastcgi-root">
+              <td>root</td><td>path</td><td>&mdash;</td>
+              <td><span class="badge badge-req">required</span>
+                  Document root; combined with the request path to
+                  build <code>SCRIPT_FILENAME</code>.</td>
+            </tr>
+            <tr id="handler-fastcgi-socket">
+              <td>socket</td><td>string</td><td>&mdash;</td>
+              <td><span class="badge badge-req">required</span>
+                  FastCGI socket: <code>unix:/path</code> for a Unix
+                  domain socket or <code>tcp:host:port</code> for
+                  TCP.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h4 id="handler-scgi"><code>scgi</code></h4>
+      <p>
+        Forwards requests to an SCGI application server (Gunicorn,
+        uWSGI, etc.) using the netstring-framed SCGI protocol.
+      </p>
+<pre><code><span class="kw">location</span> <span class="str">"/"</span> {
+    <span class="kw">request-headers</span> { <span class="kw">set</span> <span class="kw">X-Real-IP</span> <span class="str">"{client_ip}"</span> }
+    <span class="kw">scgi</span> {
+        <span class="kw">socket</span> <span class="str">"unix:/run/myapp.sock"</span>
+        <span class="kw">root</span>   <span class="str">"/var/www/html"</span>
+        <span class="kw">index</span>  <span class="kw">index.py</span>
+    }
+}</code></pre>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Children</th><th>Type</th>
+              <th>Default</th><th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr id="handler-scgi-index">
+              <td>index</td><td>string</td><td>&mdash;</td>
+              <td><span class="badge badge-opt">optional</span>
+                  Default script appended to directory
+                  requests.</td>
+            </tr>
+            <tr id="handler-scgi-root">
+              <td>root</td><td>path</td><td>&mdash;</td>
+              <td><span class="badge badge-req">required</span>
+                  Document root for
+                  <code>SCRIPT_FILENAME</code>.</td>
+            </tr>
+            <tr id="handler-scgi-socket">
+              <td>socket</td><td>string</td><td>&mdash;</td>
+              <td><span class="badge badge-req">required</span>
+                  SCGI socket: <code>unix:/path</code> or
+                  <code>tcp:host:port</code>.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- proxy -->
+      <h3 id="handler-proxy">Handler: <code>proxy</code></h3>
+      <p>
+        Reverse-proxies HTTP requests to an upstream server.
+        Connections to the upstream are pooled and reused across
+        requests unless <code>proxy-protocol</code> is set.
+      </p>
+<pre><code><span class="kw">location</span> <span class="str">"/api/"</span> {
+    <span class="kw">proxy</span> {
+        <span class="kw">upstream</span>     <span class="str">"http://127.0.0.1:3000"</span>
+        <span class="kw">strip-prefix</span> <span class="num">#true</span>
+    }
+}
+
+<span class="cm">// With HAProxy PROXY protocol so backend sees the real client IP</span>
+<span class="kw">location</span> <span class="str">"/api/"</span> {
+    <span class="kw">proxy</span> <span class="str">"http://127.0.0.1:3000"</span> {
+        <span class="kw">proxy-protocol</span> <span class="kw">v2</span>
+    }
+}</code></pre>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Children</th><th>Type</th>
+              <th>Default</th><th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr id="handler-proxy-proxy-protocol">
+              <td>proxy-protocol</td>
+              <td><code>v1</code> | <code>v2</code></td>
+              <td>&mdash;</td>
+              <td><span class="badge badge-opt">optional</span>
+                  Send a HAProxy PROXY protocol header on each
+                  upstream connection. Not supported for
+                  <code>unix:</code> upstreams. When set, connection
+                  pooling is disabled because the header is
+                  bound to the connection.</td>
+            </tr>
+            <tr id="handler-proxy-strip-prefix">
+              <td>strip-prefix</td><td>boolean</td>
+              <td><code>#false</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Remove the matched location prefix before
+                  forwarding. With <code>location "/api/"</code> and
+                  <code>strip-prefix #true</code>,
+                  <code>/api/users</code> is forwarded as
+                  <code>/users</code>.</td>
+            </tr>
+            <tr id="handler-proxy-upstream">
+              <td>upstream</td><td>string</td><td>&mdash;</td>
+              <td><span class="badge badge-req">required</span>
+                  Base URL of the upstream server
+                  (<code>http://&hellip;</code> or
+                  <code>https://&hellip;</code>), or a Unix domain
+                  socket path (<code>unix:/path/to/socket</code>).
+                  HTTPS backends are verified against
+                  Mozilla&rsquo;s bundled root certificates.
+                  Unix socket backends receive
+                  <code>Host:&nbsp;localhost</code>.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        The proxy unconditionally appends to
+        <code>X-Forwarded-For</code>, sets <code>X-Real-IP</code>,
+        and overrides <code>Host</code> with the upstream authority.
+        Hop-by-hop headers are stripped from both the forwarded
+        request and the backend response.
+      </p>
+
+      <!-- redirect -->
+      <h3 id="handler-redirect">Handler: <code>redirect</code></h3>
+      <p>Returns an HTTP redirect response.</p>
+<pre><code><span class="cm">// Simple permanent redirect</span>
+<span class="kw">location</span> <span class="str">"/old/"</span> {
+    <span class="kw">redirect</span> {
+        <span class="kw">to</span>   <span class="str">"/new/"</span>
+        <span class="kw">code</span> <span class="num">301</span>
+    }
+}
+
+<span class="cm">// Redirect all HTTP traffic to HTTPS using template variables.</span>
+<span class="cm">// ACME challenges (/.well-known/acme-challenge/) are intercepted</span>
+<span class="cm">// before routing and are never affected by a redirect handler.</span>
+<span class="kw">location</span> <span class="str">"/"</span> {
+    <span class="kw">redirect</span> {
+        <span class="kw">to</span>   <span class="str">"https://{host}{path_and_query}"</span>
+        <span class="kw">code</span> <span class="num">301</span>
+    }
+}</code></pre>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Children</th><th>Type</th>
+              <th>Default</th><th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr id="handler-redirect-code">
+              <td>code</td><td>integer</td><td><code>301</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  HTTP status code: <code>301</code> (permanent) or
+                  <code>302</code> (temporary).</td>
+            </tr>
+            <tr id="handler-redirect-to">
+              <td>to</td><td>URL or path</td><td>&mdash;</td>
+              <td><span class="badge badge-req">required</span>
+                  Destination written to the <code>Location</code>
+                  header. Supports
+                  <a href="#header-injection">template variables</a>
+                  such as <code>{host}</code> and
+                  <code>{path_and_query}</code>.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Header injection -->
+      <h3 id="header-injection">Header injection</h3>
+      <p>
+        The <code>request-headers</code> and
+        <code>response-headers</code> blocks inside a
+        <code>location</code> add, replace, or remove HTTP headers
+        before the request reaches the backend and before the response
+        reaches the client. This works for all handler types.
+      </p>
+<pre><code><span class="kw">location</span> <span class="str">"/api/"</span> {
+    <span class="kw">request-headers</span> {
+        <span class="kw">set</span>    <span class="kw">X-Client-IP</span>       <span class="str">"{client_ip}"</span>
+        <span class="kw">set</span>    <span class="kw">X-Auth-User</span>       <span class="str">"{username}"</span>
+        <span class="kw">set</span>    <span class="kw">X-Auth-Groups</span>     <span class="str">"{groups}"</span>
+        <span class="kw">set</span>    <span class="kw">X-Forwarded-Proto</span> <span class="str">"{scheme}"</span>
+        <span class="kw">remove</span> <span class="kw">Authorization</span>
+    }
+    <span class="kw">response-headers</span> {
+        <span class="kw">set</span>    <span class="kw">X-Frame-Options</span>        <span class="kw">DENY</span>
+        <span class="kw">set</span>    <span class="kw">X-Content-Type-Options</span> <span class="kw">nosniff</span>
+        <span class="kw">add</span>    <span class="kw">Vary</span>                   <span class="kw">Accept-Encoding</span>
+        <span class="kw">remove</span> <span class="kw">Server</span>
+    }
+    <span class="kw">proxy</span> { <span class="kw">upstream</span> <span class="str">"http://backend:8080"</span> }
+}</code></pre>
+      <p><strong>Operations</strong> (applied in declaration order):</p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Operation</th><th>Arguments</th>
+              <th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr id="header-injection-add">
+              <td>add</td><td>name, value</td>
+              <td>Append a value without removing existing values.
+                  Useful for multi-valued headers such as
+                  <code>Vary</code>.</td>
+            </tr>
+            <tr id="header-injection-remove">
+              <td>remove</td><td>name</td>
+              <td>Delete the header. A no-op if absent.</td>
+            </tr>
+            <tr id="header-injection-set">
+              <td>set</td><td>name, value</td>
+              <td>Set the header to this value, replacing any existing
+                  value. Creates the header if absent. Skipped silently
+                  when the rendered value is empty.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p>
+        Value strings may contain
+        <code>{variable}</code> placeholders expanded at request time.
+        Unrecognised placeholders pass through unchanged.
+        A fallback is written <code>{variable|default}</code>: if the
+        variable resolves to an empty string, the default text is used
+        instead.
+      </p>
+<pre><code><span class="kw">set</span> <span class="kw">X-Auth-User</span>   <span class="str">"{username|anonymous}"</span>
+<span class="kw">set</span> <span class="kw">X-Auth-Groups</span> <span class="str">"{groups|none}"</span></code></pre>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Variable</th><th>Value</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>{client_ip}</td>
+                <td>Client IPv4 or IPv6 address</td></tr>
+            <tr><td>{username}</td>
+                <td>Authenticated username; empty string if
+                    anonymous</td></tr>
+            <tr><td>{groups}</td>
+                <td>Authenticated user&rsquo;s groups, comma-joined;
+                    empty if anonymous</td></tr>
+            <tr><td>{method}</td>
+                <td>HTTP request method (GET, POST, &hellip;)</td></tr>
+            <tr><td>{path}</td>
+                <td>Request URI path (without query string)</td></tr>
+            <tr><td>{query}</td>
+                <td>Query string without the leading <code>?</code>;
+                    empty string if absent</td></tr>
+            <tr><td>{path_and_query}</td>
+                <td>Request path plus query string,
+                    e.g. <code>/api/v1?foo=bar</code></td></tr>
+            <tr><td>{host}</td>
+                <td>Value of the Host request header</td></tr>
+            <tr><td>{scheme}</td>
+                <td><code>"https"</code> for TLS listeners,
+                    <code>"http"</code> for plain</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout info">
+        <span class="callout-label">Note</span>
+        <span>
+          Variables that reference authenticated identity
+          (<code>{username}</code>, <code>{groups}</code>) cause the
+          configured auth back-end to run even when there is no
+          <code>policy</code> block. If no credentials are present the
+          variables render as empty strings.
+        </span>
+      </div>
+      <p>
+        FastCGI, SCGI, and CGI handlers set
+        <code>REMOTE_ADDR = 0.0.0.0</code>; use a
+        <code>request-headers</code> rule with
+        <code>{client_ip}</code> to pass the real address as
+        <code>HTTP_X_REAL_IP</code> in the CGI environment.
+        The <code>proxy</code> handler unconditionally appends to
+        <code>X-Forwarded-For</code> and sets <code>X-Real-IP</code>
+        <em>after</em> <code>request-headers</code> rules run, so a
+        <code>remove</code> rule for those headers will be
+        overwritten.
+      </p>
+
+      <!-- static -->
+      <h3 id="handler-static">Handler: <code>static</code></h3>
+      <p>
+        Serves files from a local directory. Supports
+        <code>Range</code> requests, <code>ETag</code> conditional
+        <code>GET</code>, and directory index files. Files are
+        streamed in 64&nbsp;KB chunks without buffering the entire
+        file in memory.
+      </p>
+<pre><code><span class="kw">location</span> <span class="str">"/assets/"</span> {
+    <span class="kw">static</span> {
+        <span class="kw">root</span>         <span class="str">"/var/www/assets"</span>
+        <span class="kw">strip-prefix</span> <span class="num">#true</span>
+        <span class="kw">index-file</span>   <span class="kw">index.html</span>
+        <span class="kw">index-file</span>   <span class="kw">index.htm</span>
+    }
+}</code></pre>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Children</th><th>Type</th>
+              <th>Default</th><th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr id="handler-static-index-file">
+              <td>index-file</td><td>string</td>
+              <td><code>"index.html"</code>,
+                  <code>"index.htm"</code></td>
+              <td><span class="badge badge-rep">repeatable</span>
+                  Filenames tried in order for directory requests.
+                  Returns 403 if none exist. Supplying any
+                  <code>index-file</code> children replaces the
+                  defaults entirely.</td>
+            </tr>
+            <tr id="handler-static-root">
+              <td>root</td><td>path</td><td>&mdash;</td>
+              <td><span class="badge badge-req">required</span>
+                  Filesystem directory to serve. Path traversal
+                  outside <code>root</code> is blocked.</td>
+            </tr>
+            <tr id="handler-static-strip-prefix">
+              <td>strip-prefix</td><td>boolean</td>
+              <td><code>#false</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Remove the matched location prefix before resolving
+                  the file path. With
+                  <code>location "/assets/"</code> and
+                  <code>strip-prefix #true</code>, a request for
+                  <code>/assets/app.js</code> maps to
+                  <code>{root}/app.js</code>.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- status -->
+      <h3 id="handler-status">Handler: <code>status</code></h3>
+      <p>
+        Serves a live server status page. The HTML page auto-refreshes
+        every 10&nbsp;seconds. No children are required.
+      </p>
+<pre><code><span class="kw">location</span> <span class="str">"/status"</span> {
+    <span class="kw">status</span>
+}</code></pre>
+      <p>
+        Protect with a <code>policy</code> block to restrict
+        visibility. The handler responds to any HTTP method;
+        <code>Accept:&nbsp;application/json</code> returns a JSON
+        object with all the same data.
+      </p>
+      <p><strong>HTML output</strong> shows:</p>
+      <ul>
+        <li>Uptime and total / active request counts</li>
+        <li>Request rate: last 5&nbsp;s, 1/5/15-minute rolling
+            averages</li>
+        <li>Status code distribution (2xx / 3xx / 4xx / 5xx)</li>
+        <li>Latency histogram (6 buckets from &lt;1&nbsp;ms to
+            &ge;1&nbsp;s)</li>
+        <li>Resident memory in MiB (Linux only)</li>
+        <li>Server version and process ID</li>
+        <li>Listener table: address, protocol, ACME domain list</li>
+        <li>Virtual host table: names, aliases, locations with
+            handler types</li>
+      </ul>
+<pre><code><span class="cm">// JSON response (Accept: application/json)</span>
+{
+    <span class="str">"version"</span>:         <span class="str">"0.2.0"</span>,
+    <span class="str">"pid"</span>:             <span class="num">12345</span>,
+    <span class="str">"uptime_secs"</span>:     <span class="num">3661</span>,
+    <span class="str">"requests_total"</span>:  <span class="num">98765</span>,
+    <span class="str">"requests_active"</span>: <span class="num">3</span>,
+    <span class="str">"status"</span>:          { <span class="str">"2xx"</span>: <span class="num">95000</span>, <span class="str">"3xx"</span>: <span class="num">1200</span>, <span class="str">"4xx"</span>: <span class="num">500</span>, <span class="str">"5xx"</span>: <span class="num">65</span> },
+    <span class="str">"rates"</span>:           { <span class="str">"current_per_sec"</span>: <span class="num">12.5</span>, <span class="str">"avg_1min"</span>: <span class="num">10.2</span> },
+    <span class="str">"auth"</span>:            <span class="str">"pam:login"</span>
+}</code></pre>
+
+    </section>
+
+    <div class="chapter-head" id="ch-policy-blocks">Policy blocks</div>
+
+    <!-- ========================================================= -->
+    <!-- Policy blocks                                               -->
+    <!-- ========================================================= -->
+    <section id="policy">
+      <h2>Overview</h2>
+      <p>
+        A <code>policy</code> block is a sequence of statements
+        evaluated top to bottom. The <strong>first statement whose
+        predicate matches fires its action and evaluation
+        stops</strong>. If no statement matches, the request is
+        denied with 403.
+      </p>
+      <p>
+        Statements are of the form
+        <code>action [predicate [values&hellip;]]</code>.
+        A statement with no predicate is a <em>catch-all</em> that
+        always matches, so placing a bare <code>allow</code> or
+        <code>deny</code> last acts as the default outcome.
+      </p>
+<pre><code><span class="kw">policy</span> {
+    <span class="kw">allow</span> <span class="kw">address</span> <span class="str">"10.0.0.0/8"</span>   <span class="cm">// allow internal</span>
+    <span class="kw">allow</span> <span class="kw">authenticated</span>            <span class="cm">// allow any logged-in user</span>
+    <span class="kw">deny</span>  <span class="prop">code=</span><span class="num">403</span>                 <span class="cm">// catch-all deny</span>
+}</code></pre>
+
+      <h3>Where policy blocks appear</h3>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Context</th><th>Syntax</th>
+              <th>Available predicates</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>server</code></td>
+              <td><code>policy "name" { &hellip; }</code></td>
+              <td><em>Named definition &mdash; no predicates
+                  evaluated here. See
+                  <a href="#named-policies">Named policies</a>.</em>
+              </td>
+            </tr>
+            <tr>
+              <td><code>location</code></td>
+              <td><code>policy { &hellip; }</code></td>
+              <td>All predicates</td>
+            </tr>
+            <tr>
+              <td><code>listener</code>
+                  (stream mode)</td>
+              <td><code>policy { &hellip; }</code></td>
+              <td><code>address</code>, <code>country</code> only.
+                  Identity predicates are rejected at startup.
+                  Denied connections are closed silently;
+                  <code>redirect</code> is treated as deny.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Statements -->
+      <h3 id="policy-statements">Statements</h3>
+      <p>
+        Every statement begins with an action keyword. All actions are
+        terminal: when a statement fires, no further statements in the
+        block are evaluated.
+      </p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Statement</th><th>Arguments / properties</th>
+              <th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>allow</td><td>[predicate]</td>
+              <td>Permit the request and pass it to the handler.</td>
+            </tr>
+            <tr>
+              <td>apply</td>
+              <td><code>"policy-name"</code></td>
+              <td>Inline the rules of a
+                  <a href="#named-policies">named policy</a> at
+                  this point. The named policy&rsquo;s statements are
+                  spliced into the list in place of the
+                  <code>apply</code>; first-match semantics apply
+                  across the combined sequence. If none of the spliced
+                  rules fire, evaluation continues with the next
+                  statement after the <code>apply</code>.</td>
+            </tr>
+            <tr>
+              <td>deny</td>
+              <td>[predicate] <code>code=N</code>
+                  <em>(default 403)</em></td>
+              <td>Reject the request with the given HTTP status code.
+                  Use <code>deny code=401</code> to issue an HTTP
+                  Basic auth challenge when the location also has a
+                  <code>basic-auth</code> node. Auth predicates
+                  (<code>authenticated</code>, <code>user</code>,
+                  <code>group</code>) issue a 401 challenge
+                  automatically for anonymous users, making an explicit
+                  <code>deny code=401</code> often unnecessary.</td>
+            </tr>
+            <tr>
+              <td>redirect</td>
+              <td>[predicate] <code>to="&hellip;"</code>
+                  <code>code=N</code> <em>(default 302)</em></td>
+              <td>Return an HTTP redirect to the given URL or path.
+                  Not available in stream mode.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Predicates -->
+      <h3 id="policy-predicates">Predicates</h3>
+      <p>
+        A predicate is an optional condition that guards a statement.
+        Without a predicate the statement is a catch-all that always
+        fires. There are two syntactic forms:
+      </p>
+      <ul>
+        <li>
+          <strong>Inline</strong> &mdash; the predicate is written as
+          arguments directly on the statement node. Multiple values
+          within one predicate are <strong>OR</strong>-combined:
+          <code>allow country US CA GB</code> fires when the client is
+          in <em>any</em> of those three countries.
+        </li>
+        <li>
+          <strong>Block</strong> &mdash; the predicate is a child
+          block <code>{ }</code> containing multiple predicate nodes
+          separated by <code>;</code> or newlines. All nodes inside
+          the block must match (<strong>AND</strong>, evaluated
+          left-to-right with short-circuit):
+          <code>allow { address "10.0.0.0/8"; authenticated }</code>
+          fires only when the client is on the internal network
+          <em>and</em> is authenticated.
+        </li>
+      </ul>
+<pre><code><span class="cm">// Inline OR: any of these countries</span>
+<span class="kw">allow</span> <span class="kw">country</span> <span class="kw">US</span> <span class="kw">CA</span> <span class="kw">GB</span>
+
+<span class="cm">// Block AND: internal network AND authenticated</span>
+<span class="kw">allow</span> { <span class="kw">address</span> <span class="str">"10.0.0.0/8"</span>; <span class="kw">authenticated</span> }
+
+<span class="cm">// not: negates a predicate (suppresses 401 challenge for auth predicates)</span>
+<span class="kw">deny</span> <span class="prop">code=</span><span class="num">403</span> <span class="kw">not</span> <span class="kw">country</span> <span class="kw">US</span> <span class="kw">CA</span></code></pre>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Predicate</th><th>Argument(s)</th>
+              <th>Supported in</th><th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>address</td>
+              <td>CIDR or IP (one or more)</td>
+              <td>location, stream</td>
+              <td>Client IP address falls within any of the listed
+                  CIDR ranges or equals any of the listed addresses.
+                  IPv4-mapped IPv6 addresses (e.g.
+                  <code>::ffff:192.0.2.1</code>) are normalised to
+                  plain IPv4 before comparison.</td>
+            </tr>
+            <tr>
+              <td>authenticated</td>
+              <td>&mdash;</td>
+              <td>location only</td>
+              <td>The request carries valid credentials. For anonymous
+                  requests, the predicate fails and automatically
+                  issues a 401 challenge (with the realm from
+                  <code>basic-auth</code> if present). Use
+                  <code>not authenticated</code> to match anonymous
+                  users <em>without</em> challenging.</td>
+            </tr>
+            <tr>
+              <td>country</td>
+              <td>ISO&nbsp;3166-1 alpha-2 code (one or more)</td>
+              <td>location, stream</td>
+              <td>Client country matches any of the listed codes.
+                  Requires <code>server { geoip { db&nbsp;&hellip; }
+                  }</code>. Private and reserved IP ranges are not in
+                  the database and never match; combine with
+                  <code>address</code> to allow them explicitly.
+                  See <a href="#geoip">geoip</a>.</td>
+            </tr>
+            <tr>
+              <td>group</td>
+              <td>name (one or more)</td>
+              <td>location only</td>
+              <td>The authenticated user is a member of any of the
+                  listed groups. Group membership is resolved by the
+                  active auth back-end at authentication time.
+                  Issues a 401 challenge for anonymous users.</td>
+            </tr>
+            <tr>
+              <td>not</td>
+              <td><em>predicate</em> [values&hellip;]</td>
+              <td>both</td>
+              <td>Negates the given predicate. When a negated auth
+                  predicate (<code>not authenticated</code>,
+                  <code>not user</code>, <code>not group</code>)
+                  encounters an anonymous user, the 401 challenge is
+                  suppressed and the predicate matches (an anonymous
+                  user is trivially &ldquo;not authenticated&rdquo;).
+              </td>
+            </tr>
+            <tr>
+              <td>user</td>
+              <td>name (one or more)</td>
+              <td>location only</td>
+              <td>The authenticated username matches any of the listed
+                  names. Issues a 401 challenge for anonymous
+                  users.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="callout info">
+        <span class="callout-label">Lazy evaluation</span>
+        <span>
+          Auth predicates (<code>authenticated</code>,
+          <code>user</code>, <code>group</code>) invoke the auth
+          back-end only when they are actually reached during
+          evaluation. A statement that appears earlier in the block
+          and fires first short-circuits the rest, so the auth
+          back-end is never called. This makes rule order significant
+          for performance as well as correctness: put cheap
+          <code>address</code> checks before expensive auth checks.
+        </span>
+      </div>
+
+      <!-- Named policies -->
+      <h3 id="named-policies">Named policies</h3>
+      <p>
+        Any number of reusable policy blocks can be defined in the
+        <code>server</code> block by giving each a name as its first
+        argument. Named policies are not evaluated at definition time;
+        they are inlined wherever <code>apply "name"</code> appears
+        in a concrete policy block.
+      </p>
+<pre><code><span class="cm">// Definition (server block)</span>
+<span class="kw">server</span> {
+    <span class="kw">policy</span> <span class="kw">geo-filter</span> {
+        <span class="kw">deny</span> <span class="prop">code=</span><span class="num">403</span> <span class="kw">not</span> <span class="kw">country</span> <span class="kw">US</span> <span class="kw">CA</span> <span class="kw">GB</span>
+    }
+    <span class="kw">policy</span> <span class="kw">require-auth</span> {
+        <span class="kw">deny</span> <span class="prop">code=</span><span class="num">401</span> <span class="kw">not</span> <span class="kw">authenticated</span>
+    }
+    <span class="kw">policy</span> <span class="kw">admin-only</span> {
+        <span class="kw">allow</span> <span class="kw">group</span> <span class="kw">admin</span>
+        <span class="kw">deny</span>  <span class="prop">code=</span><span class="num">403</span>
+    }
+}
+
+<span class="cm">// Usage -- the three apply statements expand to six rules:</span>
+<span class="cm">//   deny code=403 not country US CA GB</span>
+<span class="cm">//   deny code=401 not authenticated</span>
+<span class="cm">//   allow group admin</span>
+<span class="cm">//   deny code=403</span>
+<span class="kw">location</span> <span class="str">"/admin/"</span> {
+    <span class="kw">basic-auth</span> <span class="prop">realm=</span><span class="kw">Admin</span>
+    <span class="kw">policy</span> {
+        <span class="kw">apply</span> <span class="kw">geo-filter</span>
+        <span class="kw">apply</span> <span class="kw">require-auth</span>
+        <span class="kw">apply</span> <span class="kw">admin-only</span>
+    }
+    <span class="kw">static</span> { <span class="kw">root</span> <span class="str">"/var/www/admin"</span> }
+}</code></pre>
+      <p>
+        Because <code>apply</code> splices rules in place, the
+        effective rule list is exactly what you would get by writing
+        all the rules out by hand. Named policies compose without
+        any special scoping: if none of a named policy&rsquo;s rules
+        fire, evaluation falls through to the next statement after
+        the <code>apply</code>.
+      </p>
+
+      <h3>More examples</h3>
+<pre><code><span class="cm">// Block CN/RU; require auth for everyone else</span>
+<span class="kw">policy</span> {
+    <span class="kw">deny</span>  <span class="prop">code=</span><span class="num">403</span> <span class="kw">country</span> <span class="kw">CN</span> <span class="kw">RU</span>
+    <span class="kw">deny</span>  <span class="prop">code=</span><span class="num">401</span> <span class="kw">not</span> <span class="kw">authenticated</span>
+    <span class="kw">allow</span>
+}
+
+<span class="cm">// Allow internal IPs unconditionally; require auth for external</span>
+<span class="kw">policy</span> {
+    <span class="kw">allow</span> <span class="kw">address</span> <span class="str">"10.0.0.0/8"</span>
+    <span class="kw">allow</span> <span class="kw">authenticated</span>            <span class="cm">// issues 401 for anonymous</span>
+}
+
+<span class="cm">// AND: only authenticated users FROM the internal network</span>
+<span class="kw">policy</span> {
+    <span class="kw">allow</span> { <span class="kw">address</span> <span class="str">"10.0.0.0/8"</span>; <span class="kw">authenticated</span> }
+    <span class="kw">deny</span>  <span class="prop">code=</span><span class="num">403</span>
+}
+
+<span class="cm">// Redirect unauthenticated users to a login page instead of 401</span>
+<span class="kw">policy</span> {
+    <span class="kw">allow</span> <span class="kw">authenticated</span>
+    <span class="kw">redirect</span> <span class="prop">to=</span><span class="str">"/login/"</span>
+}
+
+<span class="cm">// Stream proxy: restrict by IP (listener level, no auth predicates)</span>
+<span class="kw">listener</span> <span class="str">"[::]:5432"</span> {
+    <span class="kw">proxy</span> <span class="str">"db.internal:5432"</span>
+    <span class="kw">policy</span> {
+        <span class="kw">allow</span> <span class="kw">address</span> <span class="str">"10.0.0.0/8"</span>
+        <span class="kw">deny</span>  <span class="prop">code=</span><span class="num">403</span>
+    }
+}</code></pre>
+    </section>
+
+    <div class="chapter-head" id="ch-reference">Reference</div>
+
+    <!-- ========================================================= -->
+    <!-- Response compression                                        -->
+    <!-- ========================================================= -->
+    <section id="compression">
+      <h2>Response compression</h2>
+      <p>
+        aloha automatically compresses responses when the client sends
+        an <code>Accept-Encoding</code> header that includes
+        <code>br</code> (brotli) or <code>gzip</code>.
+        Brotli is preferred when both are accepted.
+        There is no per-location configuration; compression is always
+        active for eligible responses.
+      </p>
+      <p>Compression is applied to text-based content types:</p>
+      <ul>
+        <li><code>text/*</code></li>
+        <li><code>application/json</code></li>
+        <li><code>application/javascript</code>,
+            <code>application/ecmascript</code></li>
+        <li><code>application/xml</code>,
+            <code>application/xhtml+xml</code></li>
+        <li><code>application/wasm</code>,
+            <code>application/manifest+json</code></li>
+        <li><code>image/svg+xml</code></li>
+      </ul>
+      <p>
+        Responses smaller than 1&nbsp;KB, responses that already carry
+        a <code>Content-Encoding</code> header, and binary formats
+        (images, video, audio, archives) are passed through
+        unmodified.
+      </p>
+      <p>When compression is applied, aloha removes
+         <code>Content-Length</code> and adds:</p>
+<pre><code>Content-Encoding: gzip    (or br)
+Vary: Accept-Encoding</code></pre>
+    </section>
+
+    <!-- ========================================================= -->
+    <!-- Full example                                                -->
+    <!-- ========================================================= -->
+    <section id="example">
+      <h2>Full example</h2>
+<pre><code><span class="cm">// aloha.kdl</span>
+
+<span class="kw">server</span> {
+    <span class="kw">state-dir</span> <span class="str">"/var/lib/aloha"</span>
+    <span class="kw">user</span>      <span class="kw">aloha</span>
+
+    <span class="cm">// Validate credentials via PAM (uses /etc/pam.d/login)</span>
+    <span class="kw">auth</span> <span class="kw">pam</span> { <span class="kw">service</span> <span class="kw">login</span> }
+
+    <span class="cm">// Reusable policy blocks</span>
+    <span class="kw">policy</span> <span class="kw">internal-only</span> {
+        <span class="kw">deny</span> <span class="prop">code=</span><span class="num">403</span> <span class="kw">not</span> <span class="kw">address</span> <span class="str">"10.0.0.0/8"</span>
+    }
+    <span class="kw">policy</span> <span class="kw">require-auth</span> {
+        <span class="kw">deny</span> <span class="prop">code=</span><span class="num">401</span> <span class="kw">not</span> <span class="kw">authenticated</span>
+    }
+    <span class="kw">policy</span> <span class="kw">require-admin</span> {
+        <span class="kw">allow</span> <span class="kw">group</span> <span class="kw">admin</span>
+        <span class="kw">deny</span>  <span class="prop">code=</span><span class="num">403</span>
+    }
+
+    <span class="cm">// Custom error pages</span>
+    <span class="kw">error-page</span> <span class="num">403</span> <span class="prop">path=</span><span class="str">"/var/www/errors/403.html"</span>
+    <span class="kw">error-page</span> <span class="num">401</span> <span class="prop">html=</span><span class="str">"&lt;h1&gt;Authentication Required&lt;/h1&gt;"</span>
+}
+
+<span class="cm">// Plain HTTP -- required for ACME HTTP-01 challenges</span>
+<span class="kw">listener</span> {
+    <span class="kw">bind</span>          <span class="str">"[::]:80"</span>
+    <span class="kw">default-vhost</span> <span class="kw">example.com</span>
+}
+
+<span class="cm">// HTTPS with a Let's Encrypt certificate</span>
+<span class="kw">listener</span> {
+    <span class="kw">bind</span>          <span class="str">"[::]:443"</span>
+    <span class="kw">default-vhost</span> <span class="kw">example.com</span>
+    <span class="kw">tls-acme</span> {
+        <span class="kw">domain</span> <span class="kw">example.com</span> <span class="kw">www.example.com</span>
+        <span class="kw">email</span>  <span class="kw">admin@example.com</span>
+    }
+}
+
+<span class="cm">// Encrypted tunnel to an internal database (stream mode)</span>
+<span class="kw">listener</span> {
+    <span class="kw">bind</span>     <span class="str">"[::]:5433"</span>
+    <span class="kw">tls-file</span> <span class="prop">cert=</span><span class="str">"/etc/aloha/db-cert.pem"</span> <span class="prop">key=</span><span class="str">"/etc/aloha/db-key.pem"</span>
+    <span class="kw">proxy</span> <span class="str">"db.internal:5432"</span> {
+        <span class="kw">proxy-protocol</span> <span class="kw">v2</span>
+    }
+    <span class="kw">policy</span> {
+        <span class="kw">allow</span> <span class="kw">address</span> <span class="str">"10.0.0.0/8"</span>
+        <span class="kw">deny</span>  <span class="prop">code=</span><span class="num">403</span>
+    }
+}
+
+<span class="kw">vhost</span> <span class="kw">example.com</span> {
+    <span class="kw">alias</span> <span class="kw">www.example.com</span>
+
+    <span class="cm">// Status page -- internal network only</span>
+    <span class="kw">location</span> <span class="str">"/status"</span> {
+        <span class="kw">policy</span> { <span class="kw">apply</span> <span class="kw">internal-only</span>; <span class="kw">allow</span> }
+        <span class="kw">status</span>
+    }
+
+    <span class="cm">// Admin area -- internal AND authenticated admin group</span>
+    <span class="kw">location</span> <span class="str">"/admin/"</span> {
+        <span class="kw">basic-auth</span> <span class="prop">realm=</span><span class="kw">Admin</span>
+        <span class="kw">policy</span> {
+            <span class="kw">apply</span> <span class="kw">internal-only</span>   <span class="cm">// 403 if external</span>
+            <span class="kw">apply</span> <span class="kw">require-auth</span>    <span class="cm">// 401 if unauthenticated</span>
+            <span class="kw">apply</span> <span class="kw">require-admin</span>   <span class="cm">// 403 if not in admin group</span>
+        }
+        <span class="kw">request-headers</span> {
+            <span class="kw">set</span> <span class="kw">X-Auth-User</span>   <span class="str">"{username}"</span>
+            <span class="kw">set</span> <span class="kw">X-Auth-Groups</span> <span class="str">"{groups}"</span>
+        }
+        <span class="kw">proxy</span> <span class="str">"http://127.0.0.1:3000"</span>
+    }
+
+    <span class="cm">// API -- inject client info, enforce security headers</span>
+    <span class="kw">location</span> <span class="str">"/api/"</span> {
+        <span class="kw">request-headers</span> {
+            <span class="kw">set</span>    <span class="kw">X-Client-IP</span>       <span class="str">"{client_ip}"</span>
+            <span class="kw">set</span>    <span class="kw">X-Forwarded-Proto</span> <span class="str">"{scheme}"</span>
+            <span class="kw">remove</span> <span class="kw">Authorization</span>
+        }
+        <span class="kw">response-headers</span> {
+            <span class="kw">set</span>    <span class="kw">X-Frame-Options</span>        <span class="kw">DENY</span>
+            <span class="kw">set</span>    <span class="kw">X-Content-Type-Options</span> <span class="kw">nosniff</span>
+            <span class="kw">remove</span> <span class="kw">Server</span>
+        }
+        <span class="kw">proxy</span> {
+            <span class="kw">upstream</span>     <span class="str">"http://127.0.0.1:4000"</span>
+            <span class="kw">strip-prefix</span> <span class="num">#true</span>
+        }
+    }
+
+    <span class="cm">// PHP application via FastCGI</span>
+    <span class="kw">location</span> <span class="str">"/app/"</span> {
+        <span class="kw">request-headers</span> { <span class="kw">set</span> <span class="kw">X-Real-IP</span> <span class="str">"{client_ip}"</span> }
+        <span class="kw">fastcgi</span> {
+            <span class="kw">socket</span> <span class="str">"unix:/run/php/fpm.sock"</span>
+            <span class="kw">root</span>   <span class="str">"/var/www/html"</span>
+            <span class="kw">index</span>  <span class="kw">index.php</span>
+        }
+    }
+
+    <span class="cm">// Old URL redirect</span>
+    <span class="kw">location</span> <span class="str">"/old/"</span> {
+        <span class="kw">redirect</span> { <span class="kw">to</span> <span class="str">"/new/"</span>; <span class="kw">code</span> <span class="num">301</span> }
+    }
+
+    <span class="cm">// Static files</span>
+    <span class="kw">location</span> <span class="str">"/"</span> {
+        <span class="kw">static</span> {
+            <span class="kw">root</span>       <span class="str">"/var/www/example.com"</span>
+            <span class="kw">index-file</span> <span class="kw">index.html</span>
+        }
+    }
+}
+
+<span class="cm">// Wildcard subdomain -- regex match</span>
+<span class="kw">vhost</span> <span class="str">".+\.example\.com"</span> <span class="prop">regex=</span><span class="num">#true</span> {
+    <span class="kw">location</span> <span class="str">"/"</span> {
+        <span class="kw">static</span> { <span class="kw">root</span> <span class="str">"/var/www/wildcard"</span> }
+    }
+}</code></pre>
+    </section>
+
+    <footer>aloha &mdash; configuration reference</footer>
+  </main>
+</div>
+
+<script>
+  // Highlight the sidebar link for the section currently in view.
+  (function () {
+    const links = document.querySelectorAll('.nav-list a');
+    const targets = Array.from(links)
+      .map(a => document.querySelector(a.getAttribute('href')))
+      .filter(Boolean);
+
+    const activate = (el) => {
+      links.forEach(a => a.classList.remove('active'));
+      document.querySelectorAll(`.nav-list a[href="#${el.id}"]`)
+        .forEach(a => a.classList.add('active'));
+    };
+
+    const observer = new IntersectionObserver(
+      entries => {
+        for (const e of entries) {
+          if (e.isIntersecting) { activate(e.target); break; }
+        }
+      },
+      { rootMargin: '-54px 0px -60% 0px', threshold: 0 }
+    );
+    targets.forEach(t => observer.observe(t));
+  })();
+</script>
+
+<script>
+  // Toggle collapsible nav groups.
+  document.querySelectorAll('.nav-parent > a').forEach(a => {
+    a.addEventListener('click', () => {
+      const li = a.parentElement;
+      const ul = li.nextElementSibling;
+      if (ul && ul.classList.contains('nav-children')) {
+        const open = li.classList.toggle('nav-open');
+        ul.classList.toggle('nav-open', open);
+      }
+    });
+  });
+</script>
+
+<script>
+  // Start collapsed on mobile; open is the correct default for desktop.
+  if (window.matchMedia('(max-width: 768px)').matches)
+    document.querySelector('details.sidebar').removeAttribute('open');
+</script>
+
+</body>
+</html>

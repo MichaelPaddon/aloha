@@ -1,0 +1,804 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <title>aloha &mdash; Config Grammar (EBNF)</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+
+    :root {
+      --sidebar-w: 220px;
+
+      --bg:        #f5f7fa;
+      --surface:   #ffffff;
+      --border:    #dde3eb;
+      --text:      #1a2332;
+      --muted:     #5e6e82;
+      --accent:    #1e3a5f;
+      --accent-bg: #edf2f8;
+      --amber:     #b45309;
+      --amber-bg:  #fef3c7;
+
+      /* Code -- light style matching config reference */
+      --code-bg:     #f6f8fa;
+      --code-fg:     #24292e;
+      --code-border: #d0d7de;
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
+                   system-ui, sans-serif;
+      font-size: 15px;
+      line-height: 1.65;
+      color: var(--text);
+      background: var(--bg);
+    }
+
+    /* -- Layout ----------------------------------------------- */
+
+    .shell {
+      display: flex;
+      min-height: 100vh;
+    }
+
+    /* -- Sidebar ---------------------------------------------- */
+
+    .sidebar {
+      width: var(--sidebar-w);
+      flex-shrink: 0;
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      overflow-y: auto;
+      border-right: 1px solid var(--border);
+      background: var(--surface);
+      scrollbar-width: thin;
+    }
+
+    /* Logo at top of sidebar links back to the index page. */
+    .sidebar-brand {
+      display: block;
+      padding: 1rem 1rem 0.75rem;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 0.75rem;
+      text-decoration: none;
+    }
+    .sidebar-brand img {
+      width: 100%;
+      height: auto;
+      display: block;
+    }
+
+    .sidebar-nav {
+      padding: 0 0 2rem;
+    }
+
+    .nav-section { margin-bottom: 1.25rem; }
+
+    .nav-heading {
+      font-size: 0.7rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+      padding: 0 1.25rem 0.35rem;
+    }
+    .nav-heading a {
+      color: inherit;
+      text-decoration: none;
+    }
+    .nav-heading a:hover { color: var(--accent); }
+
+    .nav-list {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+    }
+    .nav-list a {
+      display: block;
+      padding: 0.28rem 1.25rem;
+      font-size: 0.875rem;
+      color: var(--text);
+      text-decoration: none;
+      border-left: 3px solid transparent;
+      transition: color 0.12s, border-color 0.12s, background 0.12s;
+    }
+    .nav-list a:hover {
+      color: var(--accent);
+      background: var(--accent-bg);
+    }
+    .nav-list a.active {
+      color: var(--accent);
+      border-left-color: var(--accent);
+      background: var(--accent-bg);
+      font-weight: 600;
+    }
+    .nav-list.sub a {
+      padding-left: 2.1rem;
+      font-size: 0.83rem;
+      color: var(--muted);
+    }
+    .nav-list.sub a:hover,
+    .nav-list.sub a.active { color: var(--accent); }
+
+    /* -- Content ---------------------------------------------- */
+
+    .content {
+      flex: 1;
+      min-width: 0;
+      padding: 2.5rem 3rem 4rem;
+      max-width: 820px;
+    }
+
+    .page-header { margin-bottom: 2.5rem; }
+    .page-header h1 {
+      font-size: 1.9rem;
+      font-weight: 800;
+      margin: 0 0 0.25rem;
+      color: var(--text);
+      letter-spacing: -0.02em;
+    }
+    .page-header p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.95rem;
+    }
+
+    section { margin-bottom: 3rem; }
+
+    h2 {
+      font-size: 1.2rem;
+      font-weight: 700;
+      color: var(--text);
+      margin: 0 0 1rem;
+      padding-bottom: 0.4rem;
+      border-bottom: 2px solid var(--border);
+      scroll-margin-top: 1.5rem;
+    }
+
+    h3 {
+      font-size: 0.95rem;
+      font-weight: 700;
+      color: var(--text);
+      margin: 1.75rem 0 0.6rem;
+      scroll-margin-top: 1.5rem;
+    }
+
+    p { margin: 0 0 0.9rem; }
+    ul, ol { margin: 0 0 0.9rem; padding-left: 1.5rem; }
+    li { margin-bottom: 0.2rem; }
+
+    /* -- Code blocks ------------------------------------------ */
+
+    pre {
+      background: var(--code-bg);
+      color: var(--code-fg);
+      border: 1px solid var(--code-border);
+      padding: 1.0rem 1.25rem;
+      border-radius: 6px;
+      overflow-x: auto;
+      font-size: 0.82rem;
+      line-height: 1.7;
+      margin: 0 0 1.1rem;
+      font-family: ui-monospace, "SF Mono", Consolas,
+                   "Liberation Mono", monospace;
+    }
+    code {
+      font-family: ui-monospace, "SF Mono", Consolas, monospace;
+      font-size: 0.875em;
+      background: var(--accent-bg);
+      color: var(--accent);
+      padding: 0.1em 0.35em;
+      border-radius: 4px;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      color: inherit;
+      font-size: inherit;
+    }
+
+    /* EBNF syntax colours (light background) */
+    .nt  { color: #0550ae; }               /* non-terminal: blue     */
+    .lit { color: #116329; }               /* literal keyword: green */
+    .op  { color: #6a737d; font-weight: 600; } /* operator: gray     */
+    .cm  { color: #57606a; font-style: italic; } /* comment           */
+
+    /* Non-terminals that carry a link: inherit colour, underline on hover */
+    .nt a {
+      color: inherit;
+      text-decoration: none;
+    }
+    .nt a:hover { text-decoration: underline; }
+
+    /* -- Callouts --------------------------------------------- */
+
+    .callout {
+      display: flex;
+      gap: 0.75rem;
+      padding: 0.85rem 1rem;
+      border-radius: 6px;
+      font-size: 0.875rem;
+      margin: 0 0 1.1rem;
+      border: 1px solid;
+    }
+    .callout-label {
+      flex-shrink: 0;
+      font-size: 0.72rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      line-height: 1.65;
+    }
+    .callout.info  {
+      background: var(--accent-bg);
+      border-color: #b0c4d8;
+      color: #1a3352;
+    }
+    .callout.warn  {
+      background: var(--amber-bg);
+      border-color: #f0c040;
+      color: #7d4e00;
+    }
+
+    /* -- Divider ---------------------------------------------- */
+
+    .divider {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 2.5rem 0;
+    }
+
+    /* -- Footer ----------------------------------------------- */
+
+    footer {
+      font-size: 0.78rem;
+      color: var(--muted);
+      padding-top: 1.5rem;
+      border-top: 1px solid var(--border);
+    }
+
+    /* -- Responsive ------------------------------------------- */
+
+    @media (max-width: 768px) {
+      /* Sidebar stacks above content, full-width, collapsible. */
+      .shell   { flex-direction: column; }
+      .sidebar {
+        width: 100%; height: auto; position: static;
+        border-right: none;
+        border-bottom: 1px solid var(--border);
+      }
+      .sidebar-nav { display: none; }
+      details.sidebar[open] .sidebar-nav { display: block; }
+      details.sidebar summary {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0.6rem 1rem;
+        cursor: pointer;
+        list-style: none;
+        font-size: 0.82rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--muted);
+        border-bottom: 1px solid var(--border);
+      }
+      details.sidebar summary::-webkit-details-marker { display: none; }
+      details.sidebar summary::after {
+        content: "▾";
+        font-size: 1rem;
+        transition: transform 0.15s;
+      }
+      details.sidebar[open] summary::after { transform: rotate(-180deg); }
+      .content { padding: 1.5rem 1.25rem 3rem; }
+      .nav-list a { min-height: 44px; display: flex; align-items: center; }
+    }
+
+    /* Desktop: summary toggle is hidden; sidebar is always open. */
+    @media (min-width: 769px) {
+      details.sidebar summary { display: none; }
+    }
+  </style>
+</head>
+<body>
+
+<div class="shell">
+
+  <!-- Sidebar navigation (collapses to a disclosure widget on mobile) -->
+  <details class="sidebar" open>
+    <a class="sidebar-brand" href="index.html">
+      <img src="aloha-logo.svg" alt="aloha">
+    </a>
+    <summary>Navigation</summary>
+    <nav aria-label="Page navigation">
+    <div class="sidebar-nav">
+
+    <div class="nav-section">
+      <div class="nav-heading">Getting started</div>
+      <ul class="nav-list">
+        <li><a href="#legend">Notation legend</a></li>
+      </ul>
+    </div>
+    <div class="nav-section">
+      <div class="nav-heading">Grammar rules</div>
+      <ul class="nav-list">
+        <li><a href="#top-level">Top-level</a></li>
+        <li><a href="#server">server</a></li>
+        <ul class="nav-list sub">
+          <li><a href="#server-auth">auth backends</a></li>
+          <li><a href="#server-misc">geoip, health, policy, error-page</a></li>
+        </ul>
+        <li><a href="#listener">listener</a></li>
+        <ul class="nav-list sub">
+          <li><a href="#listener-tls">TLS</a></li>
+          <li><a href="#listener-timeouts">Timeouts</a></li>
+          <li><a href="#listener-stream">Stream mode</a></li>
+        </ul>
+        <li><a href="#vhost">vhost</a></li>
+        <li><a href="#location">location</a></li>
+        <li><a href="#handlers">Handlers</a></li>
+        <li><a href="#access">Access control</a></li>
+        <li><a href="#header-ops">Header operations</a></li>
+      </ul>
+    </div>
+
+    </div><!-- .sidebar-nav -->
+    </nav>
+  </details>
+
+  <!-- Main content -->
+  <main class="content">
+
+    <div class="page-header">
+      <h1>Config Grammar (EBNF)</h1>
+      <p>Formal grammar for <code>aloha.kdl</code></p>
+    </div>
+
+    <!-- Notation legend -->
+    <section id="legend">
+      <h2>Notation legend</h2>
+      <p>
+        aloha uses <a href="https://kdl.dev">KDL v2</a> as its
+        configuration language.  The grammar below uses a pseudo-EBNF
+        adapted to KDL&rsquo;s structure.  KDL distinguishes three kinds
+        of values on a node: positional arguments (bare values), named
+        properties (<code>key=value</code>), and child blocks
+        (<code>{ &hellip; }</code>).  Each is shown explicitly in the
+        rules below.
+      </p>
+<pre><code><span class="cm">(* Notation used throughout this document *)</span>
+
+<span class="nt">&lt;name&gt;</span>            <span class="cm">(* non-terminal &mdash; defined elsewhere in this grammar *)</span>
+<span class="lit">"literal"</span>         <span class="cm">(* literal KDL node name or string value *)</span>
+<span class="nt">&lt;string&gt;</span>          <span class="cm">(* any KDL string *)</span>
+<span class="nt">&lt;integer&gt;</span>         <span class="cm">(* KDL integer value *)</span>
+<span class="nt">&lt;boolean&gt;</span>         <span class="cm">(* #true or #false *)</span>
+<span class="op">[</span> x <span class="op">]</span>            <span class="cm">(* x is optional *)</span>
+x <span class="op">|</span> y             <span class="cm">(* either x or y *)</span>
+x<span class="op">*</span>               <span class="cm">(* zero or more repetitions of x *)</span>
+x<span class="op">+</span>               <span class="cm">(* one or more repetitions of x *)</span>
+<span class="op">{</span> &hellip; <span class="op">}</span>          <span class="cm">(* KDL child block *)</span>
+<span class="lit">prop</span><span class="op">=</span><span class="nt">&lt;value&gt;</span>      <span class="cm">(* named KDL property (not a positional argument) *)</span>
+<span class="cm">(* comment *)</span>     <span class="cm">(* explanatory note, not part of the syntax *)</span></code></pre>
+      <div class="callout info">
+        <span class="callout-label">Note</span>
+        <span>
+          See the <a href="config.html">Configuration Reference</a>
+          for prose explanations, defaults, and annotated examples for
+          every node.
+        </span>
+      </div>
+    </section>
+
+    <!-- Top-level -->
+    <section id="top-level">
+      <h2>Top-level</h2>
+      <p>
+        A config file contains at most one <code>server</code> block,
+        one or more <code>listener</code> blocks, and zero or more
+        <code>vhost</code> blocks.  Any other top-level node is a hard
+        error.
+      </p>
+<pre><code><span class="nt">config</span>   <span class="op">=</span> <span class="nt"><a href="#server">server</a></span><span class="op">?</span> <span class="nt"><a href="#listener">listener</a></span><span class="op">+</span> <span class="nt"><a href="#vhost">vhost</a></span><span class="op">*</span>
+
+<span class="nt">server</span>   <span class="op">=</span> <span class="lit">"server"</span>                                    <span class="op">{</span> <span class="nt"><a href="#server">server-child</a></span><span class="op">*</span> <span class="op">}</span>
+<span class="nt">listener</span> <span class="op">=</span> <span class="lit">"listener"</span> <span class="op">[</span><span class="nt"><a href="#legend">&lt;string&gt;</a></span><span class="op">]</span>                     <span class="op">{</span> <span class="nt"><a href="#listener">listener-child</a></span><span class="op">*</span> <span class="op">}</span>
+<span class="nt">vhost</span>    <span class="op">=</span> <span class="lit">"vhost"</span> <span class="nt"><a href="#legend">&lt;string&gt;</a></span> <span class="op">[</span> <span class="lit">regex</span><span class="op">=</span><span class="nt"><a href="#legend">&lt;boolean&gt;</a></span> <span class="op">]</span>  <span class="op">{</span> <span class="nt"><a href="#vhost">vhost-child</a></span><span class="op">*</span> <span class="op">}</span></code></pre>
+      <div class="callout info">
+        <span class="callout-label">Note</span>
+        <span>
+          <code>vhost</code> blocks are required when at least one HTTP
+          listener is present.  A config consisting only of stream
+          listeners (with a <code>proxy</code> child) needs no vhosts.
+        </span>
+      </div>
+    </section>
+
+    <!-- server -->
+    <section id="server">
+      <h2>server</h2>
+      <p>Global server settings.  All children are optional.</p>
+<pre><code><span class="nt">server-child</span> <span class="op">=</span>
+    <span class="lit">"state-dir"</span>                    <span class="nt"><a href="#legend">&lt;string&gt;</a></span>
+  <span class="op">|</span> <span class="lit">"user"</span>                         <span class="nt"><a href="#legend">&lt;string&gt;</a></span>
+  <span class="op">|</span> <span class="lit">"group"</span>                        <span class="nt"><a href="#legend">&lt;string&gt;</a></span>
+  <span class="op">|</span> <span class="lit">"inherit-supplementary-groups"</span> <span class="nt"><a href="#legend">&lt;boolean&gt;</a></span>
+  <span class="op">|</span> <span class="nt"><a href="#server">tls-options-block</a></span>
+  <span class="op">|</span> <span class="nt"><a href="#server-auth">auth-backend</a></span>
+  <span class="op">|</span> <span class="nt"><a href="#server-misc">geoip-block</a></span>
+  <span class="op">|</span> <span class="nt"><a href="#server-misc">health-block</a></span>
+  <span class="op">|</span> <span class="nt"><a href="#server-misc">policy-def</a></span>
+  <span class="op">|</span> <span class="nt"><a href="#server-misc">error-page-def</a></span></code></pre>
+
+      <h3>TLS defaults</h3>
+<pre><code><span class="nt">tls-options-block</span> <span class="op">=</span> <span class="lit">"tls"</span> <span class="op">{</span> <span class="nt"><a href="#server">tls-option</a></span><span class="op">*</span> <span class="op">}</span>
+<span class="nt">tls-option</span>        <span class="op">=</span>   <span class="lit">"min-version"</span> <span class="op">(</span><span class="lit">"1.2"</span> <span class="op">|</span> <span class="lit">"1.3"</span><span class="op">)</span>
+                    <span class="op">|</span> <span class="lit">"cipher"</span>      <span class="nt"><a href="#legend">&lt;string&gt;</a></span></code></pre>
+
+      <h3 id="server-auth">Authentication backends</h3>
+      <p>
+        Exactly one <code>auth</code> node may appear inside
+        <code>server</code>.  The second positional argument names the
+        backend type.
+      </p>
+<pre><code><span class="nt">auth-backend</span> <span class="op">=</span>
+    <span class="lit">"auth"</span> <span class="lit">"pam"</span>        <span class="op">[</span> <span class="op">{</span> <span class="nt"><a href="#server-auth">pam-child</a></span><span class="op">*</span> <span class="op">}</span> <span class="op">]</span>
+  <span class="op">|</span> <span class="lit">"auth"</span> <span class="lit">"ldap"</span>       <span class="op">{</span> <span class="nt"><a href="#server-auth">ldap-child</a></span><span class="op">*</span> <span class="op">}</span>
+  <span class="op">|</span> <span class="lit">"auth"</span> <span class="lit">"subrequest"</span> <span class="op">(</span> <span class="nt"><a href="#legend">&lt;string&gt;</a></span> <span class="op">|</span> <span class="op">{</span> <span class="nt"><a href="#server-auth">subrequest-child</a></span><span class="op">*</span> <span class="op">}</span> <span class="op">)</span>
+  <span class="op">|</span> <span class="lit">"auth"</span> <span class="lit">"jwt"</span>        <span class="op">[</span> <span class="op">{</span> <span class="nt"><a href="#server-auth">jwt-child</a></span><span class="op">*</span> <span class="op">}</span> <span class="op">]</span>
+
+<span class="nt">pam-child</span> <span class="op">=</span>
+    <span class="lit">"service"</span>   <span class="nt"><a href="#legend">&lt;string&gt;</a></span>   <span class="cm">(* default: "login" *)</span>
+
+<span class="nt">ldap-child</span> <span class="op">=</span>
+    <span class="lit">"url"</span>          <span class="nt"><a href="#legend">&lt;string&gt;</a></span>   <span class="cm">(* required; ldap:// ldaps:// ldapi:// *)</span>
+  <span class="op">|</span> <span class="lit">"bind-dn"</span>      <span class="nt"><a href="#legend">&lt;string&gt;</a></span>   <span class="cm">(* required; must contain {user} *)</span>
+  <span class="op">|</span> <span class="lit">"base-dn"</span>      <span class="nt"><a href="#legend">&lt;string&gt;</a></span>   <span class="cm">(* required *)</span>
+  <span class="op">|</span> <span class="lit">"group-filter"</span> <span class="nt"><a href="#legend">&lt;string&gt;</a></span>   <span class="cm">(* default: "(memberUid={user})" *)</span>
+  <span class="op">|</span> <span class="lit">"group-attr"</span>   <span class="nt"><a href="#legend">&lt;string&gt;</a></span>   <span class="cm">(* default: "cn" *)</span>
+  <span class="op">|</span> <span class="lit">"starttls"</span>     <span class="nt"><a href="#legend">&lt;boolean&gt;</a></span>  <span class="cm">(* default: #false *)</span>
+  <span class="op">|</span> <span class="lit">"timeout"</span>      <span class="nt"><a href="#legend">&lt;integer&gt;</a></span>  <span class="cm">(* seconds; default: 5 *)</span>
+
+<span class="nt">subrequest-child</span> <span class="op">=</span>
+    <span class="lit">"url"</span>            <span class="nt"><a href="#legend">&lt;string&gt;</a></span>   <span class="cm">(* required; http:// scheme *)</span>
+  <span class="op">|</span> <span class="lit">"forward-header"</span> <span class="nt"><a href="#legend">&lt;string&gt;</a></span><span class="op">+</span> <span class="cm">(* repeatable; header names to pass through *)</span>
+  <span class="op">|</span> <span class="lit">"user-header"</span>    <span class="nt"><a href="#legend">&lt;string&gt;</a></span>   <span class="cm">(* response header carrying the username *)</span>
+  <span class="op">|</span> <span class="lit">"groups-header"</span>  <span class="nt"><a href="#legend">&lt;string&gt;</a></span>   <span class="cm">(* response header carrying group list *)</span>
+  <span class="op">|</span> <span class="lit">"timeout"</span>        <span class="nt"><a href="#legend">&lt;integer&gt;</a></span>  <span class="cm">(* seconds; default: 5 *)</span>
+
+<span class="nt">jwt-child</span> <span class="op">=</span>
+    <span class="lit">"cookie-name"</span> <span class="nt"><a href="#legend">&lt;string&gt;</a></span>   <span class="cm">(* default: "aloha_session" *)</span>
+  <span class="op">|</span> <span class="lit">"validity"</span>    <span class="nt"><a href="#legend">&lt;integer&gt;</a></span>  <span class="cm">(* seconds; default: 300 *)</span>
+  <span class="op">|</span> <span class="lit">"wrap"</span>        <span class="nt"><a href="#legend">&lt;string&gt;</a></span>   <span class="cm">(* optional inner backend type: "pam" | "ldap" | "subrequest" *)</span>
+                               <span class="cm">(* same child syntax as the corresponding auth-backend *)</span></code></pre>
+      <div class="callout info">
+        <span class="callout-label">Note</span>
+        <span>
+          <code>auth jwt</code> runs as a standalone token validator
+          when no <code>wrap</code> child is present (it validates
+          incoming cookies and bearer tokens but never issues new
+          ones).  With <code>wrap</code>, it wraps an inner credential
+          backend: successful credential logins receive a session
+          cookie, and subsequent requests are validated by JWT alone.
+        </span>
+      </div>
+      <div class="callout info">
+        <span class="callout-label">Note</span>
+        <span>
+          The <code>auth subrequest</code> short form
+          <code>auth&nbsp;subrequest&nbsp;"http://…"</code> passes the
+          URL as a positional argument and is equivalent to the block
+          form <code>auth&nbsp;subrequest&nbsp;{&nbsp;url&nbsp;"http://…"&nbsp;}</code>.
+        </span>
+      </div>
+
+      <h3 id="server-misc">GeoIP, health, named policies, error pages</h3>
+<pre><code><span class="nt">geoip-block</span>    <span class="op">=</span> <span class="lit">"geoip"</span>      <span class="op">(</span><span class="nt"><a href="#legend">&lt;string&gt;</a></span> <span class="op">|</span> <span class="op">{</span> <span class="lit">"db"</span> <span class="nt"><a href="#legend">&lt;string&gt;</a></span> <span class="op">}</span><span class="op">)</span>
+<span class="nt">health-block</span>   <span class="op">=</span> <span class="lit">"health"</span>     <span class="op">(</span><span class="nt"><a href="#legend">&lt;boolean&gt;</a></span> <span class="op">|</span> <span class="op">{</span> <span class="lit">"enabled"</span> <span class="nt"><a href="#legend">&lt;boolean&gt;</a></span> <span class="op">}</span><span class="op">)</span><span class="op">?</span>
+<span class="nt">policy-def</span>     <span class="op">=</span> <span class="lit">"policy"</span>     <span class="nt"><a href="#legend">&lt;string&gt;</a></span> <span class="op">{</span> <span class="nt"><a href="#access">policy-statement</a></span><span class="op">*</span> <span class="op">}</span>
+<span class="nt">error-page-def</span> <span class="op">=</span>
+    <span class="lit">"error-page"</span> <span class="nt"><a href="#legend">&lt;integer&gt;</a></span> <span class="lit">path</span><span class="op">=</span><span class="nt"><a href="#legend">&lt;string&gt;</a></span>  <span class="cm">(* path to an HTML file *)</span>
+  <span class="op">|</span> <span class="lit">"error-page"</span> <span class="nt"><a href="#legend">&lt;integer&gt;</a></span> <span class="lit">html</span><span class="op">=</span><span class="nt"><a href="#legend">&lt;string&gt;</a></span>  <span class="cm">(* inline HTML string *)</span></code></pre>
+    </section>
+
+    <!-- listener -->
+    <section id="listener">
+      <h2>listener</h2>
+<pre><code><span class="nt">listener</span> <span class="op">=</span> <span class="lit">"listener"</span> <span class="op">[</span><span class="nt"><a href="#legend">&lt;string&gt;</a></span><span class="op">]</span> <span class="op">[{</span> <span class="nt"><a href="#listener">listener-child</a></span><span class="op">*</span> <span class="op">}]</span>
+   <span class="cm">(* optional positional string is the bind address *)</span>
+
+<span class="nt">listener-child</span> <span class="op">=</span>
+    <span class="lit">"bind"</span>                 <span class="nt"><a href="#legend">&lt;string&gt;</a></span>                         <span class="cm">(* if not given as positional *)</span>
+  <span class="op">|</span> <span class="lit">"accept-proxy-protocol"</span> <span class="op">(</span><span class="lit">"v1"</span> <span class="op">|</span> <span class="lit">"v2"</span><span class="op">)</span>                   <span class="cm">(* HAProxy PROXY protocol on incoming connections *)</span>
+  <span class="op">|</span> <span class="nt"><a href="#listener-tls">tls-node</a></span>                                                  <span class="cm">(* at most one; valid in both HTTP and stream mode *)</span>
+  <span class="op">|</span> <span class="lit">"proxy"</span>                <span class="nt"><a href="#legend">&lt;string&gt;</a></span> <span class="op">[{</span> <span class="nt"><a href="#listener-stream">stream-proxy-opt</a></span><span class="op">*</span> <span class="op">}]</span>   <span class="cm">(* stream mode: upstream address *)</span>
+  <span class="op">|</span> <span class="nt"><a href="#access">policy-block</a></span>                                              <span class="cm">(* stream mode only *)</span>
+  <span class="op">|</span> <span class="lit">"default-vhost"</span>        <span class="op">(</span><span class="nt"><a href="#legend">&lt;string&gt;</a></span> <span class="op">|</span> <span class="lit">#null</span><span class="op">)</span>               <span class="cm">(* HTTP mode only; #null disables fallback *)</span>
+  <span class="op">|</span> <span class="nt"><a href="#listener-timeouts">timeouts-block</a></span>                                            <span class="cm">(* HTTP mode only *)</span>
+  <span class="op">|</span> <span class="lit">"max-connections"</span>      <span class="nt"><a href="#legend">&lt;integer&gt;</a></span>                        <span class="cm">(* HTTP + stream mode; defer connections at limit *)</span>
+  <span class="op">|</span> <span class="lit">"max-request-body"</span>     <span class="nt"><a href="#legend">&lt;integer&gt;</a></span>                        <span class="cm">(* bytes; HTTP mode only; returns 413 on excess *)</span>
+   <span class="cm">(* "proxy" is mutually exclusive with "default-vhost" and "timeouts" *)</span></code></pre>
+
+      <h3 id="listener-tls">TLS</h3>
+      <p>
+        Three mutually exclusive sibling nodes select the TLS mode.
+        Each accepts its mode-specific values either as properties
+        (one-line form) or as child nodes (block form), plus optional
+        <code>min-version</code> and <code>cipher</code> children
+        (inherited from <a href="#server">server › tls</a> defaults).
+      </p>
+<pre><code><span class="nt">tls-node</span> <span class="op">=</span>
+    <span class="lit">"tls-file"</span>
+        <span class="op">[</span> <span class="lit">cert</span><span class="op">=</span><span class="nt"><a href="#legend">&lt;string&gt;</a></span> <span class="op">]</span> <span class="op">[</span> <span class="lit">key</span><span class="op">=</span><span class="nt"><a href="#legend">&lt;string&gt;</a></span> <span class="op">]</span>
+        <span class="op">[{</span> <span class="nt"><a href="#listener-tls">tls-file-child</a></span><span class="op">*</span> <span class="nt"><a href="#server">tls-option</a></span><span class="op">*</span> <span class="op">}]</span>
+  <span class="op">|</span> <span class="lit">"tls-self-signed"</span>
+        <span class="op">[{</span> <span class="nt"><a href="#server">tls-option</a></span><span class="op">*</span> <span class="op">}]</span>
+  <span class="op">|</span> <span class="lit">"tls-acme"</span>
+        <span class="op">[</span> <span class="lit">domain</span><span class="op">=</span><span class="nt"><a href="#legend">&lt;string&gt;</a></span> <span class="op">]</span> <span class="op">[</span> <span class="lit">email</span><span class="op">=</span><span class="nt"><a href="#legend">&lt;string&gt;</a></span> <span class="op">]</span>
+        <span class="op">[{</span> <span class="nt"><a href="#listener-tls">tls-acme-child</a></span><span class="op">+</span> <span class="nt"><a href="#server">tls-option</a></span><span class="op">*</span> <span class="op">}]</span>
+
+<span class="nt">tls-file-child</span> <span class="op">=</span> <span class="lit">"cert"</span> <span class="nt"><a href="#legend">&lt;string&gt;</a></span> <span class="op">|</span> <span class="lit">"key"</span> <span class="nt"><a href="#legend">&lt;string&gt;</a></span>
+
+<span class="nt">tls-acme-child</span> <span class="op">=</span>
+    <span class="lit">"domain"</span>         <span class="nt"><a href="#legend">&lt;string&gt;</a></span><span class="op">+</span>  <span class="cm">(* at least one required overall; variadic *)</span>
+  <span class="op">|</span> <span class="lit">"name"</span>           <span class="nt"><a href="#legend">&lt;string&gt;</a></span>   <span class="cm">(* storage name; default: first domain *)</span>
+  <span class="op">|</span> <span class="lit">"email"</span>          <span class="nt"><a href="#legend">&lt;string&gt;</a></span>
+  <span class="op">|</span> <span class="lit">"staging"</span>        <span class="nt"><a href="#legend">&lt;boolean&gt;</a></span>  <span class="cm">(* default: #false *)</span>
+  <span class="op">|</span> <span class="lit">"server"</span>         <span class="nt"><a href="#legend">&lt;string&gt;</a></span>   <span class="cm">(* ACME directory URL override *)</span>
+  <span class="op">|</span> <span class="lit">"retry-interval"</span> <span class="nt"><a href="#legend">&lt;integer&gt;</a></span>  <span class="cm">(* seconds; default: 3600 *)</span></code></pre>
+      <div class="callout warn">
+        <span class="callout-label">Required</span>
+        <span>
+          <code>tls-file</code> requires both <code>cert</code> and
+          <code>key</code>.  <code>tls-acme</code> requires at least
+          one <code>domain</code> and a <code>state-dir</code> on the
+          <code>server</code> block.
+        </span>
+      </div>
+
+      <h3 id="listener-timeouts">Timeouts</h3>
+<pre><code><span class="nt">timeouts-block</span> <span class="op">=</span> <span class="lit">"timeouts"</span> <span class="nt"><a href="#listener-timeouts">timeout-prop</a></span><span class="op">*</span> <span class="op">[{</span> <span class="nt"><a href="#listener-timeouts">timeout-child</a></span><span class="op">*</span> <span class="op">}]</span>
+   <span class="cm">(* properties and child nodes are equivalent; both forms accepted *)</span>
+
+<span class="nt">timeout-prop</span>  <span class="op">=</span>   <span class="lit">request-header</span><span class="op">=</span><span class="nt"><a href="#legend">&lt;integer&gt;</a></span>  <span class="cm">(* default 30; 0 = unlimited *)</span>
+              <span class="op">|</span>   <span class="lit">handler</span><span class="op">=</span><span class="nt"><a href="#legend">&lt;integer&gt;</a></span>
+              <span class="op">|</span>   <span class="lit">keepalive</span><span class="op">=</span><span class="nt"><a href="#legend">&lt;integer&gt;</a></span>
+
+<span class="nt">timeout-child</span> <span class="op">=</span>
+    <span class="lit">"request-header"</span> <span class="nt"><a href="#legend">&lt;integer&gt;</a></span>  <span class="cm">(* seconds; default 30; 0 = unlimited *)</span>
+  <span class="op">|</span> <span class="lit">"handler"</span>        <span class="nt"><a href="#legend">&lt;integer&gt;</a></span>  <span class="cm">(* seconds; returns 408 on expiry *)</span>
+  <span class="op">|</span> <span class="lit">"keepalive"</span>      <span class="nt"><a href="#legend">&lt;integer&gt;</a></span>  <span class="cm">(* seconds; 0 disables keep-alive *)</span></code></pre>
+
+      <h3 id="listener-stream">Stream mode (<code>proxy</code> child)</h3>
+      <p>
+        A <code>proxy</code> child activates stream mode: raw bytes are
+        forwarded to the upstream over TCP or a Unix domain socket; HTTP
+        routing does not apply.  The positional argument is the upstream
+        address (required).  TLS termination on the incoming connection
+        uses the same <code>tls-*</code> nodes as HTTP listeners.  A
+        <code>tls</code> child inside <code>proxy</code> re-encrypts the
+        upstream connection.
+      </p>
+<pre><code><span class="nt">stream-proxy-opt</span> <span class="op">=</span>
+    <span class="lit">"proxy-protocol"</span> <span class="op">(</span><span class="lit">"v1"</span> <span class="op">|</span> <span class="lit">"v2"</span><span class="op">)</span>      <span class="cm">(* prepend PROXY header to upstream *)</span>
+  <span class="op">|</span> <span class="lit">"tls"</span>            <span class="op">[{</span> <span class="lit">"skip-verify"</span> <span class="op">}]</span>  <span class="cm">(* re-TLS to upstream; skip-verify disables cert check *)</span></code></pre>
+      <div class="callout info">
+        <span class="callout-label">Note</span>
+        <span>
+          The <code>policy</code> block on a stream listener may only
+          use <code>address</code> and <code>country</code> predicates.
+          <code>user</code>, <code>group</code>, and
+          <code>authenticated</code> are forbidden because stream mode
+          has no HTTP authentication layer.
+        </span>
+      </div>
+    </section>
+
+    <!-- vhost -->
+    <section id="vhost">
+      <h2>vhost</h2>
+<pre><code><span class="nt">vhost-child</span> <span class="op">=</span>
+    <span class="lit">"alias"</span> <span class="nt"><a href="#legend">&lt;string&gt;</a></span> <span class="op">[</span> <span class="lit">regex</span><span class="op">=</span><span class="nt"><a href="#legend">&lt;boolean&gt;</a></span> <span class="op">]</span>
+  <span class="op">|</span> <span class="nt"><a href="#location">location</a></span></code></pre>
+      <p>
+        Vhost names and aliases are literal hostnames by default; set
+        <code>regex=#true</code> to treat the value as an anchored
+        regex matched against the request Host.  Matching order: exact
+        literal lookup (O(1)), then regex patterns in config declaration
+        order, then the listener&rsquo;s <code>default-vhost</code>
+        fallback.
+      </p>
+    </section>
+
+    <!-- location -->
+    <section id="location">
+      <h2>location</h2>
+<pre><code><span class="nt">location</span>       <span class="op">=</span> <span class="lit">"location"</span> <span class="nt"><a href="#legend">&lt;string&gt;</a></span> <span class="op">{</span> <span class="nt"><a href="#location">location-child</a></span><span class="op">*</span> <span class="op">}</span>
+<span class="nt">location-child</span> <span class="op">=</span>
+    <span class="nt"><a href="#handlers">handler</a></span>                        <span class="cm">(* exactly one required *)</span>
+  <span class="op">|</span> <span class="nt"><a href="#access">policy-block</a></span>
+  <span class="op">|</span> <span class="nt"><a href="#header-ops">basic-auth-block</a></span>
+  <span class="op">|</span> <span class="nt"><a href="#header-ops">request-headers-block</a></span>
+  <span class="op">|</span> <span class="nt"><a href="#header-ops">response-headers-block</a></span></code></pre>
+      <p>
+        Locations within a vhost are matched by longest-prefix.  The
+        path argument is a literal prefix, not a regex.
+      </p>
+    </section>
+
+    <!-- handlers -->
+    <section id="handlers">
+      <h2>Handlers</h2>
+      <p>
+        Exactly one handler node must appear inside each
+        <code>location</code> block.
+      </p>
+<pre><code><span class="cm">(* Each handler accepts its primary field as a positional arg, a property,
+   or a child node.  Modifiers (strip-prefix, code) are property/child.  *)</span>
+<span class="nt">handler</span> <span class="op">=</span>
+    <span class="lit">"static"</span>       <span class="op">[</span><span class="nt"><a href="#legend">&lt;string&gt;</a></span><span class="op">]</span> <span class="op">[</span><span class="lit">strip-prefix</span><span class="op">=</span><span class="nt"><a href="#legend">&lt;boolean&gt;</a></span><span class="op">]</span> <span class="op">[{</span> <span class="nt"><a href="#handlers">static-child</a></span><span class="op">*</span> <span class="op">}]</span>
+  <span class="op">|</span> <span class="lit">"proxy"</span>        <span class="op">[</span><span class="nt"><a href="#legend">&lt;string&gt;</a></span><span class="op">]</span> <span class="op">[</span><span class="lit">strip-prefix</span><span class="op">=</span><span class="nt"><a href="#legend">&lt;boolean&gt;</a></span><span class="op">]</span> <span class="op">[{</span> <span class="nt"><a href="#handlers">proxy-child</a></span><span class="op">*</span> <span class="op">}]</span>
+  <span class="op">|</span> <span class="lit">"redirect"</span>     <span class="op">[</span><span class="nt"><a href="#legend">&lt;string&gt;</a></span><span class="op">]</span> <span class="op">[</span><span class="lit">code</span><span class="op">=</span><span class="nt"><a href="#legend">&lt;integer&gt;</a></span><span class="op">]</span>  <span class="op">[{</span> <span class="nt"><a href="#handlers">redirect-child</a></span><span class="op">*</span> <span class="op">}]</span>
+  <span class="op">|</span> <span class="lit">"fastcgi"</span>      <span class="op">[</span><span class="lit">socket</span><span class="op">=</span><span class="nt"><a href="#legend">&lt;string&gt;</a></span> <span class="lit">root</span><span class="op">=</span><span class="nt"><a href="#legend">&lt;string&gt;</a></span> <span class="lit">index</span><span class="op">=</span><span class="nt"><a href="#legend">&lt;string&gt;</a></span><span class="op">]</span> <span class="op">[{</span> <span class="nt"><a href="#handlers">fastcgi-child</a></span><span class="op">*</span> <span class="op">}]</span>
+  <span class="op">|</span> <span class="lit">"scgi"</span>         <span class="op">[</span><span class="lit">socket</span><span class="op">=</span><span class="nt"><a href="#legend">&lt;string&gt;</a></span> <span class="lit">root</span><span class="op">=</span><span class="nt"><a href="#legend">&lt;string&gt;</a></span> <span class="lit">index</span><span class="op">=</span><span class="nt"><a href="#legend">&lt;string&gt;</a></span><span class="op">]</span> <span class="op">[{</span> <span class="nt"><a href="#handlers">scgi-child</a></span><span class="op">*</span> <span class="op">}]</span>
+  <span class="op">|</span> <span class="lit">"cgi"</span>          <span class="op">(</span><span class="nt"><a href="#legend">&lt;string&gt;</a></span> <span class="op">|</span> <span class="lit">root</span><span class="op">=</span><span class="nt"><a href="#legend">&lt;string&gt;</a></span> <span class="op">|</span> <span class="op">{</span> <span class="lit">"root"</span> <span class="nt"><a href="#legend">&lt;string&gt;</a></span> <span class="op">})</span>
+  <span class="op">|</span> <span class="lit">"status"</span>                                                                    <span class="cm">(* no arguments *)</span>
+  <span class="op">|</span> <span class="lit">"auth-request"</span>                                                              <span class="cm">(* no arguments *)</span>
+
+<span class="nt">static-child</span>   <span class="op">=</span>   <span class="lit">"root"</span>         <span class="nt"><a href="#legend">&lt;string&gt;</a></span>   <span class="cm">(* required *)</span>
+               <span class="op">|</span>   <span class="lit">"strip-prefix"</span> <span class="nt"><a href="#legend">&lt;boolean&gt;</a></span>  <span class="cm">(* default: #false *)</span>
+               <span class="op">|</span>   <span class="lit">"index-file"</span>   <span class="nt"><a href="#legend">&lt;string&gt;</a></span><span class="op">+</span>  <span class="cm">(* repeatable; default: "index.html" "index.htm" *)</span>
+
+<span class="nt">proxy-child</span>    <span class="op">=</span>   <span class="lit">"upstream"</span>       <span class="nt"><a href="#legend">&lt;string&gt;</a></span>              <span class="cm">(* required; "http://host:port" *)</span>
+               <span class="op">|</span>   <span class="lit">"proxy-protocol"</span> <span class="op">(</span><span class="lit">"v1"</span> <span class="op">|</span> <span class="lit">"v2"</span><span class="op">)</span>          <span class="cm">(* send HAProxy PROXY header to upstream *)</span>
+               <span class="op">|</span>   <span class="lit">"strip-prefix"</span>   <span class="nt"><a href="#legend">&lt;boolean&gt;</a></span>              <span class="cm">(* default: #false *)</span>
+
+<span class="nt">redirect-child</span> <span class="op">=</span>   <span class="lit">"to"</span>           <span class="nt"><a href="#legend">&lt;string&gt;</a></span>   <span class="cm">(* required *)</span>
+               <span class="op">|</span>   <span class="lit">"code"</span>         <span class="nt"><a href="#legend">&lt;integer&gt;</a></span>  <span class="cm">(* default: 301 *)</span>
+
+<span class="nt">fastcgi-child</span>  <span class="op">=</span>   <span class="lit">"socket"</span>       <span class="nt"><a href="#legend">&lt;string&gt;</a></span>   <span class="cm">(* required; "unix:/path" or "host:port" *)</span>
+               <span class="op">|</span>   <span class="lit">"root"</span>         <span class="nt"><a href="#legend">&lt;string&gt;</a></span>   <span class="cm">(* required *)</span>
+               <span class="op">|</span>   <span class="lit">"index"</span>        <span class="nt"><a href="#legend">&lt;string&gt;</a></span>
+
+<span class="nt">scgi-child</span>     <span class="op">=</span>   <span class="lit">"socket"</span>       <span class="nt"><a href="#legend">&lt;string&gt;</a></span>   <span class="cm">(* required *)</span>
+               <span class="op">|</span>   <span class="lit">"root"</span>         <span class="nt"><a href="#legend">&lt;string&gt;</a></span>   <span class="cm">(* required *)</span>
+               <span class="op">|</span>   <span class="lit">"index"</span>        <span class="nt"><a href="#legend">&lt;string&gt;</a></span></code></pre>
+      <div class="callout info">
+        <span class="callout-label">Note</span>
+        <span>
+          <code>auth-request</code> exposes the current request&rsquo;s
+          resolved identity as response headers
+          (<code>X-Auth-User</code>, <code>X-Auth-Groups</code>).  It
+          is used as the upstream endpoint referenced by an
+          <code>auth subrequest</code> backend on another vhost.
+          Access enforcement happens before the handler runs, so the
+          handler only fires when access is allowed.
+        </span>
+      </div>
+    </section>
+
+    <!-- access control -->
+    <section id="access">
+      <h2>Access control</h2>
+<pre><code><span class="cm">(* Inline policy in a location or stream listener,
+   or named policy defined in a server block:        *)</span>
+<span class="nt">policy-block</span>     <span class="op">=</span> <span class="lit">"policy"</span> <span class="op">[</span><span class="nt"><a href="#legend">&lt;string&gt;</a></span><span class="op">]</span> <span class="op">{</span> <span class="nt"><a href="#access">policy-statement</a></span><span class="op">*</span> <span class="op">}</span>
+                   <span class="cm">(* no name = inline; with name = named policy in server block *)</span>
+
+<span class="nt">policy-statement</span> <span class="op">=</span>
+    <span class="lit">"allow"</span>    <span class="op">[</span> <span class="nt"><a href="#access">predicate</a></span> <span class="op">]</span>
+  <span class="op">|</span> <span class="lit">"deny"</span>     <span class="op">[</span> <span class="lit">code</span><span class="op">=</span><span class="nt"><a href="#legend">&lt;integer&gt;</a></span> <span class="op">]</span> <span class="op">[</span> <span class="nt"><a href="#access">predicate</a></span> <span class="op">]</span>      <span class="cm">(* default code: 403 *)</span>
+  <span class="op">|</span> <span class="lit">"redirect"</span> <span class="lit">to</span><span class="op">=</span><span class="nt"><a href="#legend">&lt;string&gt;</a></span> <span class="op">[</span> <span class="lit">code</span><span class="op">=</span><span class="nt"><a href="#legend">&lt;integer&gt;</a></span> <span class="op">]</span> <span class="op">[</span> <span class="nt"><a href="#access">predicate</a></span> <span class="op">]</span>   <span class="cm">(* default code: 302 *)</span>
+  <span class="op">|</span> <span class="lit">"apply"</span>    <span class="nt"><a href="#legend">&lt;string&gt;</a></span>                                    <span class="cm">(* inline rules from a named policy *)</span>
+
+<span class="cm">(* A predicate is either inline (args on the statement node) or
+   a child block (AND across multiple pred-node entries).        *)</span>
+<span class="cm">(* Inline: *)</span>   <span class="nt">predicate</span>  <span class="op">=</span>  <span class="nt"><a href="#access">pred-type</a></span> <span class="nt"><a href="#legend">&lt;string&gt;</a></span><span class="op">*</span>
+                            <span class="op">|</span>  <span class="lit">"not"</span> <span class="nt"><a href="#access">pred-type</a></span> <span class="nt"><a href="#legend">&lt;string&gt;</a></span><span class="op">*</span>
+<span class="cm">(* Block (AND): *)</span>        <span class="op">|</span>  <span class="op">{</span> <span class="nt"><a href="#access">pred-node</a></span><span class="op">+</span> <span class="op">}</span>
+
+<span class="nt">pred-type</span> <span class="op">=</span> <span class="lit">"address"</span> <span class="op">|</span> <span class="lit">"country"</span> <span class="op">|</span> <span class="lit">"user"</span> <span class="op">|</span> <span class="lit">"group"</span> <span class="op">|</span> <span class="lit">"authenticated"</span>
+
+<span class="cm">(* Inside a child block, each predicate is a node: *)</span>
+<span class="nt">pred-node</span> <span class="op">=</span>
+    <span class="lit">"address"</span>       <span class="nt"><a href="#access">&lt;cidr-or-ip&gt;</a></span><span class="op">+</span>         <span class="cm">(* OR across values *)</span>
+  <span class="op">|</span> <span class="lit">"country"</span>       <span class="nt"><a href="#access">&lt;iso2&gt;</a></span><span class="op">+</span>               <span class="cm">(* OR across values; ISO 3166-1 alpha-2 *)</span>
+  <span class="op">|</span> <span class="lit">"user"</span>          <span class="nt"><a href="#legend">&lt;string&gt;</a></span><span class="op">+</span>             <span class="cm">(* OR across values *)</span>
+  <span class="op">|</span> <span class="lit">"group"</span>         <span class="nt"><a href="#legend">&lt;string&gt;</a></span><span class="op">+</span>             <span class="cm">(* OR across values *)</span>
+  <span class="op">|</span> <span class="lit">"authenticated"</span>
+  <span class="op">|</span> <span class="lit">"not"</span>           <span class="nt"><a href="#access">pred-type</a></span> <span class="nt"><a href="#legend">&lt;string&gt;</a></span><span class="op">*</span>  <span class="cm">(* negate *)</span>
+
+<span class="nt">&lt;cidr-or-ip&gt;</span> <span class="op">=</span> <span class="nt"><a href="#legend">&lt;string&gt;</a></span>  <span class="cm">(* e.g. "10.0.0.0/8" or "::1" *)</span>
+<span class="nt">&lt;iso2&gt;</span>       <span class="op">=</span> <span class="nt"><a href="#legend">&lt;string&gt;</a></span>  <span class="cm">(* e.g. "US" "DE" *)</span></code></pre>
+      <div class="callout info">
+        <span class="callout-label">Semantics</span>
+        <span>
+          Statements are first-match; a <code>policy</code> block with
+          no matching rule returns 403.  Multiple values on one
+          predicate are OR-combined
+          (<code>country&nbsp;"US"&nbsp;"CA"</code> matches either).
+          Multiple predicates in a child block are AND-combined,
+          evaluated left-to-right with short-circuit.
+          <code>not</code> inverts a predicate; when it suppresses an
+          auth challenge (e.g. <code>not&nbsp;authenticated</code> for
+          an anonymous user) no 401 is issued.  Auth predicates
+          (<code>authenticated</code>, <code>user</code>,
+          <code>group</code>) automatically return 401 when the user
+          is anonymous, without requiring an explicit
+          <code>deny&nbsp;code=401</code>.
+        </span>
+      </div>
+      <div class="callout info">
+        <span class="callout-label">Named policies</span>
+        <span>
+          <code>apply&nbsp;"name"</code> splices a named policy&rsquo;s
+          rules at that point &mdash; first-match semantics continue
+          across the flattened list.  Circular references are detected
+          at startup.
+        </span>
+      </div>
+    </section>
+
+    <!-- header operations -->
+    <section id="header-ops">
+      <h2>Header operations</h2>
+<pre><code><span class="nt">basic-auth-block</span> <span class="op">=</span>
+    <span class="lit">"basic-auth"</span>                                   <span class="cm">(* realm default: "Restricted" *)</span>
+  <span class="op">|</span> <span class="lit">"basic-auth"</span> <span class="lit">realm</span><span class="op">=</span><span class="nt"><a href="#legend">&lt;string&gt;</a></span>                   <span class="cm">(* property form *)</span>
+  <span class="op">|</span> <span class="lit">"basic-auth"</span> <span class="op">{</span> <span class="op">[</span> <span class="lit">"realm"</span> <span class="nt"><a href="#legend">&lt;string&gt;</a></span> <span class="op">]</span> <span class="op">}</span>          <span class="cm">(* block form *)</span>
+
+<span class="nt">request-headers-block</span>  <span class="op">=</span> <span class="lit">"request-headers"</span>  <span class="op">{</span> <span class="nt"><a href="#header-ops">header-op</a></span><span class="op">*</span> <span class="op">}</span>
+<span class="nt">response-headers-block</span> <span class="op">=</span> <span class="lit">"response-headers"</span> <span class="op">{</span> <span class="nt"><a href="#header-ops">header-op</a></span><span class="op">*</span> <span class="op">}</span>
+
+<span class="nt">header-op</span> <span class="op">=</span>
+    <span class="lit">"set"</span>    <span class="nt"><a href="#legend">&lt;string&gt;</a></span> <span class="nt"><a href="#legend">&lt;string&gt;</a></span>  <span class="cm">(* header-name value *)</span>
+  <span class="op">|</span> <span class="lit">"add"</span>    <span class="nt"><a href="#legend">&lt;string&gt;</a></span> <span class="nt"><a href="#legend">&lt;string&gt;</a></span>  <span class="cm">(* header-name value *)</span>
+  <span class="op">|</span> <span class="lit">"remove"</span> <span class="nt"><a href="#legend">&lt;string&gt;</a></span>           <span class="cm">(* header-name *)</span></code></pre>
+    </section>
+
+    <footer>aloha &mdash; config grammar (EBNF)</footer>
+  </main>
+</div>
+
+<script>
+  // Highlight the sidebar link for whichever section is currently in view.
+  (function () {
+    const links = document.querySelectorAll('.nav-list a');
+    const targets = Array.from(links)
+      .map(a => document.querySelector(a.getAttribute('href')))
+      .filter(Boolean);
+
+    const activate = (el) => {
+      links.forEach(a => a.classList.remove('active'));
+      const link = document.querySelector(
+        `.nav-list a[href="#${el.id}"]`
+      );
+      if (link) link.classList.add('active');
+    };
+
+    const observer = new IntersectionObserver(
+      entries => {
+        for (const e of entries) {
+          if (e.isIntersecting) { activate(e.target); break; }
+        }
+      },
+      { rootMargin: '-54px 0px -60% 0px', threshold: 0 }
+    );
+    targets.forEach(t => observer.observe(t));
+  })();
+</script>
+
+<script>
+  // Start collapsed on mobile; open is the correct default for desktop.
+  if (window.matchMedia('(max-width: 768px)').matches)
+    document.querySelector('details.sidebar').removeAttribute('open');
+</script>
+
+</body>
+</html>

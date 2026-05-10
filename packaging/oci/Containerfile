@@ -1,0 +1,68 @@
+# ── Builder stage ─────────────────────────────────────────────────────────────
+FROM rust:1-slim-trixie AS builder
+
+# aws-lc-rs build requirements: cmake (build system), clang (C compiler),
+# perl (build scripts).  pkg-config is used by several cargo build scripts.
+# libpam0g-dev: needed to link against -lpam and -lpam_misc for PAM auth.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        cmake \
+        clang \
+        perl \
+        pkg-config \
+        libpam0g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# ── Dependency caching layer ──────────────────────────────────────────────────
+# Build a stub binary from the manifests alone so that Docker/podman can cache
+# the compiled dependency graph.  Re-used on subsequent builds when only src/
+# changes.
+COPY Cargo.toml Cargo.lock ./
+RUN mkdir src \
+    && echo 'fn main() {}' > src/main.rs \
+    && cargo build --release \
+    # Remove stub output so cargo recompiles main.rs from the real source.
+    # The dep object files in deps/ are preserved — no need to rebuild them.
+    && rm -f target/release/aloha target/release/aloha.d \
+             target/release/deps/aloha-* \
+    && rm -rf src
+
+# ── Real build ────────────────────────────────────────────────────────────────
+COPY src ./src
+RUN cargo build --release
+
+# ── Runtime stage ─────────────────────────────────────────────────────────────
+FROM debian:trixie-slim
+
+# ca-certificates: required for ACME HTTPS requests to Let's Encrypt.
+# libpam0g: runtime shared library for PAM authentication.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        adduser \
+        ca-certificates \
+        libpam0g \
+    && rm -rf /var/lib/apt/lists/* \
+    && addgroup --system aloha \
+    && adduser --system --ingroup aloha \
+               --no-create-home --home /nonexistent \
+               --shell /usr/sbin/nologin \
+               --gecos "aloha HTTP server" aloha \
+    # Web root — static assets served by the default vhost.
+    && install -d -o aloha -g aloha -m 755 /var/www/aloha \
+    # State dir — ACME certificates and account keys.  700: private keys.
+    && install -d -o aloha -g aloha -m 700 /var/lib/aloha
+
+COPY --from=builder /build/target/release/aloha /usr/bin/aloha
+
+# Default web assets (index.html, config.html, aloha-logo.svg).
+COPY docs/ /var/www/aloha/
+
+COPY packaging/oci/aloha-container.kdl /etc/aloha.kdl
+
+# Start as root so aloha can bind ports 80/443, then drop to aloha:aloha
+# via server.user in the config.  In rootless podman "root" inside the
+# container maps to the host user in the user namespace, not host root.
+EXPOSE 80 443
+
+ENTRYPOINT ["/usr/bin/aloha"]
+CMD ["--config", "/etc/aloha.kdl"]
