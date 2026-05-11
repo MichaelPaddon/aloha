@@ -1568,6 +1568,58 @@ mod tests {
         server.await.unwrap();
     }
 
+    // -- Stream proxy integration tests --------------------------------
+
+    // Verify run_stream_proxy forwards raw bytes to the upstream.
+    #[tokio::test]
+    async fn stream_proxy_forwards_bytes_to_upstream() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener as TokioTcpListener;
+
+        // Start an echo backend.
+        let backend_l =
+            TokioTcpListener::bind("127.0.0.1:0").await.unwrap();
+        let backend_addr = backend_l.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut conn, _) = backend_l.accept().await.unwrap();
+            let mut buf = vec![0u8; 4];
+            conn.read_exact(&mut buf).await.unwrap();
+            conn.write_all(&buf).await.unwrap();
+        });
+
+        // Start the stream proxy pointing at the echo backend.
+        let proxy_l =
+            TokioTcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = proxy_l.local_addr().unwrap();
+        let cfg = crate::config::Config::parse(&format!(
+            r#"listener {{ bind "{proxy_addr}"; proxy "{backend_addr}" }}"#,
+        ))
+        .unwrap()
+        .listeners
+        .into_iter()
+        .next()
+        .unwrap();
+        let (tx, rx) = watch::channel(false);
+        tokio::spawn(run_stream_proxy(
+            cfg,
+            BoundSocket::Tcp(proxy_l),
+            None,
+            None,
+            rx,
+            None,
+            None,
+        ));
+
+        // Connect through the proxy and echo.
+        let mut client =
+            tokio::net::TcpStream::connect(proxy_addr).await.unwrap();
+        client.write_all(b"ping").await.unwrap();
+        let mut buf = vec![0u8; 4];
+        client.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"ping");
+        drop(tx); // signal shutdown
+    }
+
     // -- Component tests: full HTTP server + client -------------------
 
     fn redirect_state() -> Arc<AppState> {
