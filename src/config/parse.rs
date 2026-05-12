@@ -512,16 +512,16 @@ fn parse_tls_file(
     name: &str,
 ) -> anyhow::Result<TlsConfig> {
     let line = node_line(src, node);
-    let nn = node.name().value();
+    let node_name = node.name().value();
     let cert = prop_or_child_str(node, "cert").ok_or_else(|| {
         anyhow!(
-            "{name}:{line}: {nn} requires 'cert' (as cert=\"...\" \
+            "{name}:{line}: {node_name} requires 'cert' (as cert=\"...\" \
              property or as a 'cert' child)"
         )
     })?;
     let key = prop_or_child_str(node, "key").ok_or_else(|| {
         anyhow!(
-            "{name}:{line}: {nn} requires 'key' (as key=\"...\" \
+            "{name}:{line}: {node_name} requires 'key' (as key=\"...\" \
              property or as a 'key' child)"
         )
     })?;
@@ -534,7 +534,7 @@ fn parse_tls_self_signed(
     name: &str,
 ) -> anyhow::Result<TlsConfig> {
     let line = node_line(src, node);
-    let nn = node.name().value();
+    let node_name = node.name().value();
     // Reject misuse: self-signed accepts only tls-options children.
     for forbidden in ["cert", "key", "domain", "email", "staging"] {
         if node
@@ -543,7 +543,7 @@ fn parse_tls_self_signed(
             .unwrap_or(false)
         {
             bail!(
-                "{name}:{line}: {nn} has no '{forbidden}' \
+                "{name}:{line}: {node_name} has no '{forbidden}' \
                  (it generates an in-memory cert)"
             );
         }
@@ -557,7 +557,7 @@ fn parse_tls_acme(
     name: &str,
 ) -> anyhow::Result<TlsConfig> {
     let line = node_line(src, node);
-    let nn = node.name().value();
+    let node_name = node.name().value();
     // Domains: prefer block form (allows multi-SAN); accept a single
     // domain via the `domain="..."` property as a one-line shorthand.
     let mut domains: Vec<String> = node
@@ -577,7 +577,7 @@ fn parse_tls_acme(
     }
     if domains.is_empty() {
         bail!(
-            "{name}:{line}: {nn} requires at least one 'domain' \
+            "{name}:{line}: {node_name} requires at least one 'domain' \
              (as domain=\"...\" property or as 'domain' child node(s))"
         );
     }

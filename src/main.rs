@@ -619,11 +619,10 @@ async fn build_cert_registry(
     cert_state: &cert_state::SharedCertState,
 ) -> anyhow::Result<CertRegistry> {
     let mut registry = HashMap::new();
-    let empty_options = config::TlsOptions::default();
     for def in defs {
         let acceptor = build_acceptor_from_source(
             &def.source,
-            &empty_options,
+            &Default::default(),
             tls_defaults,
             state_dir,
             challenges,

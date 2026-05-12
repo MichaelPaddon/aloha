@@ -560,18 +560,6 @@ impl Config {
                 }
             }
         }
-        // Top-level certificate definitions must not themselves be
-        // references (refs cannot nest).  parse_certificate enforces
-        // this, but double-check defensively.
-        for c in &self.certificates {
-            if let TlsConfig::Ref(name) = &c.source {
-                bail!(
-                    "certificate '{}' source is a reference to '{name}' \
-                     -- references may not nest",
-                    c.name
-                );
-            }
-        }
         // Every listener `TlsConfig::Ref` must resolve.
         for (i, l) in self.listeners.iter().enumerate() {
             if let Some(t) = &l.tls
@@ -696,7 +684,7 @@ impl Config {
     }
 
     // Reject configurations where two distinct certificate sources
-    // would claim the same on-disk slot.  See validate() for context.
+    // would claim the same on-disk slot.
     fn check_cert_identity_conflicts(&self) -> anyhow::Result<()> {
         // Collect every concrete cert source the server will instantiate,
         // tagged with a human-readable origin for error messages.  A
