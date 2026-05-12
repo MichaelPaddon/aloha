@@ -1628,6 +1628,10 @@
           </tbody>
         </table>
       </div>
+      <p>
+        The bind address may also be written as the listener&rsquo;s
+        positional argument: <code>listener "[::]:80" { &hellip; }</code>.
+      </p>
 
       <!-- Stream proxy -->
       <h3 id="stream-proxy"><code>proxy</code> &mdash; Stream
@@ -1681,22 +1685,35 @@
         <span class="kw">deny</span>  <span class="prop">code=</span><span class="num">403</span>
     }
 }</code></pre>
+      <p><strong>Arguments</strong></p>
       <div class="table-wrap">
         <table>
           <thead>
             <tr>
-              <th>Children</th><th>Type</th>
-              <th>Default</th><th>Description</th>
+              <th>Position</th><th>Type</th><th>Description</th>
             </tr>
           </thead>
           <tbody>
             <tr id="stream-proxy-upstream">
-              <td>upstream</td><td>string</td><td>&mdash;</td>
-              <td><span class="badge badge-req">required positional</span>
+              <td>upstream</td><td>string</td>
+              <td><span class="badge badge-req">required</span>
                   Upstream address: <code>"host:port"</code> for TCP
                   or <code>"unix:/path"</code> for a Unix domain
                   socket.</td>
             </tr>
+          </tbody>
+        </table>
+      </div>
+      <p><strong>Children</strong></p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Child</th><th>Type</th>
+              <th>Default</th><th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
             <tr id="stream-proxy-proxy-protocol">
               <td>proxy-protocol</td>
               <td><code>v1</code> | <code>v2</code></td>
@@ -2330,6 +2347,12 @@
         </table>
       </div>
       <p>
+        <code>upstream</code> may also be written as the handler&rsquo;s
+        positional argument: <code>proxy "http://&hellip;"</code>.
+        <code>strip-prefix</code> may be written as a property:
+        <code>proxy strip-prefix=#true</code>.
+      </p>
+      <p>
         The proxy unconditionally appends to
         <code>X-Forwarded-For</code>, sets <code>X-Real-IP</code>,
         and overrides <code>Host</code> with the upstream authority.
@@ -2384,6 +2407,12 @@
           </tbody>
         </table>
       </div>
+      <p>
+        <code>to</code> may also be written as the handler&rsquo;s
+        positional argument: <code>redirect "/new/"</code>.
+        <code>code</code> may be written as a property:
+        <code>redirect "/new/" code=301</code>.
+      </p>
 
       <!-- Header injection -->
       <h3 id="header-injection">Header injection</h3>
@@ -2562,6 +2591,12 @@
           </tbody>
         </table>
       </div>
+      <p>
+        <code>root</code> may also be written as the handler&rsquo;s
+        positional argument: <code>static "/var/www/assets"</code>.
+        <code>strip-prefix</code> may be written as a property:
+        <code>static "/var/www/assets" strip-prefix=#true</code>.
+      </p>
 
       <!-- status -->
       <h3 id="handler-status">Handler: <code>status</code></h3>
