@@ -473,7 +473,8 @@ a{color:var(--accent)}
 .sidebar-live{display:flex;align-items:center;gap:.4rem;
   padding:.45rem 1rem;font-size:.78rem;color:var(--muted);
   border-bottom:1px solid var(--border)}
-.sidebar-nav{padding:.6rem 0 1rem;flex:1}
+.sidebar details>summary{display:none}
+.sidebar-nav{display:block;padding:.6rem 0 1rem;flex:1}
 .nav-group-label{font-size:.68rem;font-weight:700;
   text-transform:uppercase;letter-spacing:.09em;color:var(--muted);
   padding:.6rem 1.25rem .2rem}
@@ -905,7 +906,7 @@ fn render_html(
     <span class="live-dot" id="live-dot"></span>
     <span id="live-label">Live</span>
   </div>
-  <details open>
+  <details>
     <summary>Navigation</summary>
     <nav class="sidebar-nav">
       <div class="nav-group-label">Overview</div>
