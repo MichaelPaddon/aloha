@@ -527,14 +527,20 @@ x<span class="op">+</span>               <span class="cm">(* one or more repetit
 
       <h3 id="listener-tls">TLS</h3>
       <p>
-        Three mutually exclusive sibling nodes select the TLS mode.
-        Each accepts its mode-specific values either as properties
-        (one-line form) or as child nodes (block form), plus optional
+        Four mutually exclusive sibling nodes select the TLS mode.  The
+        inline forms (<code>tls-file</code>, <code>tls-self-signed</code>,
+        <code>tls-acme</code>) carry their source inside the listener;
+        <code>tls</code> instead references a named
+        <a href="#certificate">top-level <code>certificate</code></a> so
+        multiple listeners can share one acceptor (and, for ACME, one
+        renewal loop).  All four forms accept optional
         <code>min-version</code> and <code>cipher</code> children
         (inherited from <a href="#server">server › tls</a> defaults).
       </p>
 <pre><code><span class="nt">tls-node</span> <span class="op">=</span>
-    <span class="lit">"tls-file"</span>
+    <span class="lit">"tls"</span> <span class="op">(</span> <span class="nt"><a href="#legend">&lt;string&gt;</a></span> <span class="op">|</span> <span class="lit">cert</span><span class="op">=</span><span class="nt"><a href="#legend">&lt;string&gt;</a></span> <span class="op">)</span>
+        <span class="op">[{</span> <span class="nt"><a href="#server">tls-option</a></span><span class="op">*</span> <span class="op">}]</span>           <span class="cm">(* reference a top-level certificate *)</span>
+  <span class="op">|</span> <span class="lit">"tls-file"</span>
         <span class="op">[</span> <span class="lit">cert</span><span class="op">=</span><span class="nt"><a href="#legend">&lt;string&gt;</a></span> <span class="op">]</span> <span class="op">[</span> <span class="lit">key</span><span class="op">=</span><span class="nt"><a href="#legend">&lt;string&gt;</a></span> <span class="op">]</span>
         <span class="op">[{</span> <span class="nt"><a href="#listener-tls">tls-file-child</a></span><span class="op">*</span> <span class="nt"><a href="#server">tls-option</a></span><span class="op">*</span> <span class="op">}]</span>
   <span class="op">|</span> <span class="lit">"tls-self-signed"</span>
@@ -558,9 +564,29 @@ x<span class="op">+</span>               <span class="cm">(* one or more repetit
           <code>tls-file</code> requires both <code>cert</code> and
           <code>key</code>.  <code>tls-acme</code> requires at least
           one <code>domain</code> and a <code>state-dir</code> on the
-          <code>server</code> block.
+          <code>server</code> block.  Two listeners may not carry inline
+          <code>tls-acme</code> blocks that resolve to the same on-disk
+          slot (same explicit <code>name</code> or same first domain);
+          define a top-level <code>certificate</code> and reference it
+          from both.
         </span>
       </div>
+
+      <h3 id="certificate">Top-level certificate</h3>
+      <p>
+        A named certificate definition.  Any number of listeners can
+        reference it via <code>tls cert="<em>name</em>"</code>; for ACME
+        sources they share a single renewal loop and on-disk cert
+        directory.  The body holds exactly one source child whose
+        contents match the corresponding inline form.
+      </p>
+<pre><code><span class="nt">certificate</span> <span class="op">=</span> <span class="lit">"certificate"</span> <span class="nt"><a href="#legend">&lt;string&gt;</a></span>
+                <span class="op">{</span> <span class="nt"><a href="#certificate">cert-source</a></span> <span class="op">}</span>   <span class="cm">(* positional string is the certificate's name *)</span>
+
+<span class="nt">cert-source</span> <span class="op">=</span>
+    <span class="lit">"acme"</span>        <span class="op">{</span> <span class="nt"><a href="#listener-tls">tls-acme-child</a></span><span class="op">+</span> <span class="op">}</span>
+  <span class="op">|</span> <span class="lit">"files"</span>       <span class="op">(</span> <span class="lit">cert</span><span class="op">=</span><span class="nt"><a href="#legend">&lt;string&gt;</a></span> <span class="lit">key</span><span class="op">=</span><span class="nt"><a href="#legend">&lt;string&gt;</a></span> <span class="op">|</span> <span class="op">{</span> <span class="nt"><a href="#listener-tls">tls-file-child</a></span><span class="op">+</span> <span class="op">}</span> <span class="op">)</span>
+  <span class="op">|</span> <span class="lit">"self-signed"</span></code></pre>
 
       <h3 id="listener-timeouts">Timeouts</h3>
 <pre><code><span class="nt">timeouts-block</span> <span class="op">=</span> <span class="lit">"timeouts"</span> <span class="nt"><a href="#listener-timeouts">timeout-prop</a></span><span class="op">*</span> <span class="op">[{</span> <span class="nt"><a href="#listener-timeouts">timeout-child</a></span><span class="op">*</span> <span class="op">}]</span>

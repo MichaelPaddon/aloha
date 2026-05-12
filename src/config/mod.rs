@@ -15,7 +15,9 @@ use std::path::Path;
 
 mod kdl;
 mod parse;
-use parse::{node_line, parse_listener, parse_server, parse_vhost};
+use parse::{
+    node_line, parse_certificate, parse_listener, parse_server, parse_vhost,
+};
 #[cfg(test)]
 mod tests;
 
@@ -48,6 +50,22 @@ pub struct Config {
     pub listeners: Vec<ListenerConfig>,
     // Ordered; the router builds an index keyed by name + aliases.
     pub vhosts: Vec<VHostConfig>,
+    // Top-level named certificate definitions.  Listeners refer to
+    // these by name via `tls cert="<name>"`, so a single ACME manager
+    // and on-disk certificate directory can be shared across listeners.
+    pub certificates: Vec<CertificateDef>,
+}
+
+/// A named certificate defined at the top level of the config.  Multiple
+/// listeners may reference the same definition; at startup it produces
+/// exactly one acceptor (and, for ACME, one renewal loop) that is shared
+/// among them via `Arc<ArcSwap<TlsAcceptor>>`.
+#[derive(Debug, Clone)]
+pub struct CertificateDef {
+    pub name: String,
+    /// The certificate source.  Never `TlsConfig::Ref` (refs cannot
+    /// nest); validated at parse time.
+    pub source: TlsConfig,
 }
 
 #[derive(Debug, Default)]
@@ -300,6 +318,9 @@ pub enum TlsConfig {
         // Default 3600 keeps well within Let's Encrypt rate limits.
         retry_interval_secs: u64,
     },
+    /// Reference to a top-level `certificate "<name>" { ... }`.
+    /// Refs cannot nest; the referent is always a concrete source.
+    Ref(String),
 }
 
 /// TLS protocol constraints.  Empty / None fields mean "use defaults".
@@ -478,6 +499,11 @@ impl Config {
                 "vhost" => {
                     config.vhosts.push(parse_vhost(node, text, name)?);
                 }
+                "certificate" => {
+                    config
+                        .certificates
+                        .push(parse_certificate(node, text, name)?);
+                }
                 other => {
                     bail!("{name}:{line}: unknown top-level node '{other}'")
                 }
@@ -525,18 +551,67 @@ impl Config {
                  configured"
             );
         }
+        // Certificate names must be unique.
+        {
+            let mut seen: HashSet<&str> = HashSet::new();
+            for c in &self.certificates {
+                if !seen.insert(c.name.as_str()) {
+                    bail!("duplicate certificate name '{}'", c.name);
+                }
+            }
+        }
+        // Top-level certificate definitions must not themselves be
+        // references (refs cannot nest).  parse_certificate enforces
+        // this, but double-check defensively.
+        for c in &self.certificates {
+            if let TlsConfig::Ref(name) = &c.source {
+                bail!(
+                    "certificate '{}' source is a reference to '{name}' \
+                     -- references may not nest",
+                    c.name
+                );
+            }
+        }
+        // Every listener `TlsConfig::Ref` must resolve.
+        for (i, l) in self.listeners.iter().enumerate() {
+            if let Some(t) = &l.tls
+                && let TlsConfig::Ref(name) = &t.cert
+                && !self.certificates.iter().any(|c| &c.name == name)
+            {
+                bail!(
+                    "listener[{i}] references unknown certificate \
+                     '{name}'; define it at the top level with \
+                     `certificate \"{name}\" {{ ... }}`"
+                );
+            }
+        }
         // ACME mode requires a state_dir for cert/account storage.
+        // Detect ACME via direct usage *or* a Ref that resolves to ACME.
         let uses_acme = self
             .listeners
             .iter()
             .filter_map(|l| l.tls.as_ref())
-            .any(|t| matches!(t.cert, TlsConfig::Acme { .. }));
+            .any(|t| {
+                self.resolve_cert(&t.cert)
+                    .is_some_and(|c| matches!(c, TlsConfig::Acme { .. }))
+            })
+            || self
+                .certificates
+                .iter()
+                .any(|c| matches!(c.source, TlsConfig::Acme { .. }));
         if uses_acme && self.server.state_dir.is_none() {
             bail!(
                 "server.state-dir is required when any listener \
                  uses tls mode=acme"
             );
         }
+        // On-disk identity check: two distinct cert sources cannot
+        // claim the same persistent storage slot.  For ACME this is
+        // the cert directory name (explicit `name` or domains[0]); for
+        // file-based certs it is the (cert_path, key_path) tuple.  This
+        // catches the historical foot-gun of two listeners each carrying
+        // an inline `tls-acme` block with the same default name.
+        self.check_cert_identity_conflicts()?;
         // Validate regex syntax for any vhost name or alias flagged
         // with regex=#true.  Compile errors are caught here rather
         // than at the first incoming request.
@@ -618,6 +693,91 @@ impl Config {
             );
         }
         Ok(())
+    }
+
+    // Reject configurations where two distinct certificate sources
+    // would claim the same on-disk slot.  See validate() for context.
+    fn check_cert_identity_conflicts(&self) -> anyhow::Result<()> {
+        // Collect every concrete cert source the server will instantiate,
+        // tagged with a human-readable origin for error messages.  A
+        // listener that refers to a top-level certificate by name is
+        // skipped: the named cert is already in the list and we don't
+        // want to double-count a deliberate share.
+        let mut sources: Vec<(String, &TlsConfig)> = Vec::new();
+        for c in &self.certificates {
+            sources.push((format!("certificate \"{}\"", c.name), &c.source));
+        }
+        for (i, l) in self.listeners.iter().enumerate() {
+            let Some(t) = &l.tls else { continue };
+            if matches!(t.cert, TlsConfig::Ref(_)) {
+                continue;
+            }
+            sources.push((format!("listener[{i}] inline tls"), &t.cert));
+        }
+
+        // Group by on-disk identity.  Self-signed sources have no
+        // persistent identity (each is ephemeral and in-memory), so we
+        // skip them.
+        let mut by_acme_name: HashMap<&str, Vec<&str>> = HashMap::new();
+        let mut by_files: HashMap<(&str, &str), Vec<&str>> = HashMap::new();
+        for (origin, src) in &sources {
+            match src {
+                TlsConfig::Acme { domains, name, .. } => {
+                    let key = name.as_deref().unwrap_or(&domains[0]);
+                    by_acme_name.entry(key).or_default().push(origin);
+                }
+                TlsConfig::Files { cert, key } => {
+                    by_files
+                        .entry((cert.as_str(), key.as_str()))
+                        .or_default()
+                        .push(origin);
+                }
+                TlsConfig::SelfSigned | TlsConfig::Ref(_) => {}
+            }
+        }
+        for (key, owners) in &by_acme_name {
+            if owners.len() > 1 {
+                bail!(
+                    "ACME cert directory '{key}' is claimed by multiple \
+                     sources: {}. Define a single top-level \
+                     `certificate \"{key}\" {{ acme {{ ... }} }}` and \
+                     have each listener reference it via \
+                     `tls cert=\"{key}\"` to share one renewal loop \
+                     and on-disk slot",
+                    owners.join(", ")
+                );
+            }
+        }
+        for ((cert, key), owners) in &by_files {
+            if owners.len() > 1 {
+                bail!(
+                    "file-based cert (cert=\"{cert}\", key=\"{key}\") is \
+                     claimed by multiple sources: {}. Define a single \
+                     top-level `certificate \"...\" {{ files cert=... \
+                     key=... }}` and have each listener reference it",
+                    owners.join(", ")
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Resolve a TlsConfig to its concrete source, following one level
+    /// of `Ref`.  Returns `None` only if a `Ref` points at an unknown
+    /// name (which validation rejects, so callers post-validation can
+    /// `.expect()`).
+    pub fn resolve_cert<'a>(
+        &'a self,
+        cfg: &'a TlsConfig,
+    ) -> Option<&'a TlsConfig> {
+        match cfg {
+            TlsConfig::Ref(name) => self
+                .certificates
+                .iter()
+                .find(|c| &c.name == name)
+                .map(|c| &c.source),
+            other => Some(other),
+        }
     }
 
     // Returns the set of all known hostnames (names + aliases).

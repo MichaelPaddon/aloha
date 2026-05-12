@@ -41,6 +41,11 @@ pub fn build_acceptor(
             // called with the Acme variant.
             unreachable!("Acme TLS handled by AcmeManager")
         }
+        TlsConfig::Ref(_) => {
+            // Refs are resolved by the cert registry in main.rs before
+            // any acceptor construction.
+            unreachable!("TlsConfig::Ref resolved before build_acceptor")
+        }
     }
 }
 

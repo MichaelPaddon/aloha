@@ -3494,3 +3494,436 @@ fn auth_subrequest_missing_url_is_error() {
         "expected url error, got: {err}"
     );
 }
+
+// -- Named certificates --------------------------------------------
+
+#[test]
+fn certificate_acme_parses() {
+    let cfg = Config::parse(
+        r#"
+        server { state-dir "/tmp/aloha-test" }
+        certificate "main" {
+            acme {
+                domain "example.com"
+                domain "www.example.com"
+                email "admin@example.com"
+            }
+        }
+        listener {
+            bind "[::]:443"
+            tls cert="main"
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap();
+    assert_eq!(cfg.certificates.len(), 1);
+    assert_eq!(cfg.certificates[0].name, "main");
+    if let TlsConfig::Acme { domains, email, .. } = &cfg.certificates[0].source
+    {
+        assert_eq!(domains, &["example.com", "www.example.com"]);
+        assert_eq!(email.as_deref(), Some("admin@example.com"));
+    } else {
+        panic!("expected Acme source");
+    }
+    assert!(matches!(
+        cfg.listeners[0].tls.as_ref().unwrap().cert,
+        TlsConfig::Ref(ref n) if n == "main"
+    ));
+}
+
+#[test]
+fn certificate_files_parses() {
+    let cfg = Config::parse(
+        r#"
+        certificate "internal" {
+            files cert="/etc/aloha/cert.pem" key="/etc/aloha/key.pem"
+        }
+        listener {
+            bind "[::]:443"
+            tls cert="internal"
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap();
+    if let TlsConfig::Files { cert, key } = &cfg.certificates[0].source {
+        assert_eq!(cert, "/etc/aloha/cert.pem");
+        assert_eq!(key, "/etc/aloha/key.pem");
+    } else {
+        panic!("expected Files source");
+    }
+}
+
+#[test]
+fn certificate_self_signed_parses() {
+    let cfg = Config::parse(
+        r#"
+        certificate "dev" {
+            self-signed
+        }
+        listener {
+            bind "[::]:443"
+            tls cert="dev"
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap();
+    assert!(matches!(
+        cfg.certificates[0].source,
+        TlsConfig::SelfSigned
+    ));
+}
+
+#[test]
+fn tls_ref_positional_form() {
+    // `tls "main"` is the same as `tls cert="main"`.
+    let cfg = Config::parse(
+        r#"
+        certificate "main" { self-signed }
+        listener {
+            bind "[::]:443"
+            tls "main"
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap();
+    assert!(matches!(
+        cfg.listeners[0].tls.as_ref().unwrap().cert,
+        TlsConfig::Ref(ref n) if n == "main"
+    ));
+}
+
+#[test]
+fn tls_ref_with_option_overrides() {
+    // A listener referencing a named cert may still carry its own
+    // TlsOptions overrides.
+    let cfg = Config::parse(
+        r#"
+        certificate "main" { self-signed }
+        listener {
+            bind "[::]:443"
+            tls cert="main" {
+                min-version "1.3"
+            }
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap();
+    let tls = cfg.listeners[0].tls.as_ref().unwrap();
+    assert!(matches!(tls.cert, TlsConfig::Ref(_)));
+    assert!(matches!(
+        tls.options.min_version,
+        Some(crate::config::TlsVersion::Tls13)
+    ));
+}
+
+#[test]
+fn two_listeners_share_named_acme_cert() {
+    // The whole point of the refactor: two listeners with one ACME cert.
+    let cfg = Config::parse(
+        r#"
+        server { state-dir "/tmp/aloha-test" }
+        certificate "main" {
+            acme {
+                domain "example.com"
+                email "a@b.com"
+            }
+        }
+        listener {
+            bind "[::]:443"
+            tls cert="main"
+        }
+        listener {
+            bind "[::]:8443"
+            tls cert="main"
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap();
+    assert_eq!(cfg.certificates.len(), 1);
+    assert_eq!(cfg.listeners.len(), 2);
+    for l in &cfg.listeners {
+        assert!(matches!(
+            l.tls.as_ref().unwrap().cert,
+            TlsConfig::Ref(ref n) if n == "main"
+        ));
+    }
+}
+
+#[test]
+fn tls_ref_without_name_is_error() {
+    let err = Config::parse(
+        r#"
+        listener {
+            bind "[::]:443"
+            tls
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err.contains("certificate name") || err.contains("cert="),
+        "expected hint about cert name, got: {err}"
+    );
+}
+
+#[test]
+fn tls_ref_to_unknown_name_is_error() {
+    let err = Config::parse(
+        r#"
+        listener {
+            bind "[::]:443"
+            tls cert="missing"
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err.contains("unknown certificate") && err.contains("missing"),
+        "expected unknown-cert error, got: {err}"
+    );
+}
+
+#[test]
+fn duplicate_certificate_names_is_error() {
+    let err = Config::parse(
+        r#"
+        certificate "main" { self-signed }
+        certificate "main" { self-signed }
+        listener {
+            bind "[::]:443"
+            tls cert="main"
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err.contains("duplicate") && err.contains("main"),
+        "expected duplicate-name error, got: {err}"
+    );
+}
+
+#[test]
+fn certificate_without_source_is_error() {
+    let err = Config::parse(
+        r#"
+        certificate "main" {
+        }
+        listener {
+            bind "[::]:443"
+            tls cert="main"
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err.contains("source") || err.contains("body"),
+        "expected source error, got: {err}"
+    );
+}
+
+#[test]
+fn certificate_with_two_sources_is_error() {
+    let err = Config::parse(
+        r#"
+        certificate "main" {
+            self-signed
+            files cert="c.pem" key="k.pem"
+        }
+        listener {
+            bind "[::]:443"
+            tls cert="main"
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err.contains("more than one") || err.contains("source"),
+        "expected multiple-source error, got: {err}"
+    );
+}
+
+#[test]
+fn two_inline_acme_with_same_default_name_is_error() {
+    // Both listeners default name to "example.com" -> they'd race on
+    // state_dir/certs/example.com/.  Before the refactor this silently
+    // corrupted; now it's a parse-time error pointing at the fix.
+    let err = Config::parse(
+        r#"
+        server { state-dir "/tmp/aloha-test" }
+        listener {
+            bind "[::]:443"
+            tls-acme {
+                domain "example.com"
+                email "a@b.com"
+            }
+        }
+        listener {
+            bind "[::]:8443"
+            tls-acme {
+                domain "example.com"
+                email "a@b.com"
+            }
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err.contains("example.com")
+            && (err.contains("multiple")
+                || err.contains("claimed")
+                || err.contains("certificate")),
+        "expected on-disk conflict error, got: {err}"
+    );
+}
+
+#[test]
+fn two_inline_acme_with_distinct_names_is_ok() {
+    // Different explicit names avoid the on-disk slot conflict.  This
+    // is the historical workaround and must remain valid.
+    let cfg = Config::parse(
+        r#"
+        server { state-dir "/tmp/aloha-test" }
+        listener {
+            bind "[::]:443"
+            tls-acme {
+                domain "example.com"
+                name "main"
+                email "a@b.com"
+            }
+        }
+        listener {
+            bind "[::]:8443"
+            tls-acme {
+                domain "example.com"
+                name "secondary"
+                email "a@b.com"
+            }
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap();
+    assert_eq!(cfg.listeners.len(), 2);
+}
+
+#[test]
+fn named_acme_uses_state_dir_validation() {
+    // ACME via a named cert still requires server.state-dir.
+    let err = Config::parse(
+        r#"
+        certificate "main" {
+            acme {
+                domain "example.com"
+                email "a@b.com"
+            }
+        }
+        listener {
+            bind "[::]:443"
+            tls cert="main"
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err.contains("state-dir"),
+        "expected state-dir requirement, got: {err}"
+    );
+}
+
+#[test]
+fn mixed_inline_and_named_certs_compose() {
+    // An inline cert on one listener and a named cert on another --
+    // common during incremental migration to named certs.
+    let cfg = Config::parse(
+        r#"
+        server { state-dir "/tmp/aloha-test" }
+        certificate "main" {
+            acme {
+                domain "example.com"
+                email "a@b.com"
+            }
+        }
+        listener {
+            bind "[::]:443"
+            tls cert="main"
+        }
+        listener {
+            bind "127.0.0.1:9443"
+            tls-self-signed
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap();
+    assert_eq!(cfg.certificates.len(), 1);
+    assert!(matches!(
+        cfg.listeners[0].tls.as_ref().unwrap().cert,
+        TlsConfig::Ref(_)
+    ));
+    assert!(matches!(
+        cfg.listeners[1].tls.as_ref().unwrap().cert,
+        TlsConfig::SelfSigned
+    ));
+}
+
+#[test]
+fn certificate_without_name_is_error() {
+    let err = Config::parse(
+        r#"
+        certificate {
+            self-signed
+        }
+        listener { bind "[::]:80" }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err.contains("name"),
+        "expected name-required error, got: {err}"
+    );
+}
+
+#[test]
+fn two_files_certs_with_same_paths_is_error() {
+    let err = Config::parse(
+        r#"
+        listener {
+            bind "[::]:443"
+            tls-file cert="/etc/aloha/c.pem" key="/etc/aloha/k.pem"
+        }
+        listener {
+            bind "[::]:8443"
+            tls-file cert="/etc/aloha/c.pem" key="/etc/aloha/k.pem"
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err.contains("file-based") || err.contains("claimed"),
+        "expected file conflict error, got: {err}"
+    );
+}

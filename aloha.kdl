@@ -53,19 +53,16 @@ listener {
 // Useful for development or when a real cert is not yet available.
 listener {
     bind "[::]:443"
-    tls
+    tls-self-signed
 }
 
 // HTTPS -- explicit PEM cert/key (production)
 // listener {
 //     bind "[::]:443"
-//     tls "file" {
-//         cert "/etc/aloha/cert.pem"
-//         key  "/etc/aloha/key.pem"
-//     }
+//     tls-file cert="/etc/aloha/cert.pem" key="/etc/aloha/key.pem"
 // }
 
-// HTTPS -- ACME / Let's Encrypt.
+// HTTPS -- ACME / Let's Encrypt (inline form).
 // Requires the port-80 listener above (HTTP-01 challenge) and
 // state-dir in the server block (see above).
 //
@@ -75,7 +72,7 @@ listener {
 // validations per account per hostname per hour.
 // listener {
 //     bind "[::]:443"
-//     tls "acme" {
+//     tls-acme {
 //         domain "example.com"
 //         domain "www.example.com"
 //         email "admin@example.com"
@@ -83,13 +80,41 @@ listener {
 //     }
 // }
 
-// HTTPS -- ACME staging server (for testing the ACME flow)
+// --- Named certificates (shared across listeners) ---
+//
+// Define a certificate once at the top level and reference it from any
+// number of listeners with `tls cert="<name>"`.  All references share a
+// single ACME manager, on-disk cert directory, and renewal loop, so
+// only one HTTP-01 challenge runs per renewal regardless of how many
+// listeners terminate with the same cert.
+//
+// Use this whenever two or more listeners would otherwise need
+// identical `tls-acme` blocks -- aloha now rejects such configurations
+// at parse time (they would race on the same cert directory).
+//
+// certificate "main" {
+//     acme {
+//         domain "example.com"
+//         domain "www.example.com"
+//         email "admin@example.com"
+//         // staging #true
+//     }
+// }
 // listener {
 //     bind "[::]:443"
-//     tls "acme" {
-//         domain "example.com"
-//         staging #true
-//     }
+//     tls cert="main"
+// }
+// listener {
+//     bind "[::]:8443"
+//     tls cert="main"      // shares the cert above
+// }
+//
+// File-based and self-signed sources work the same way:
+// certificate "internal" {
+//     files cert="/etc/aloha/internal.crt" key="/etc/aloha/internal.key"
+// }
+// certificate "dev" {
+//     self-signed
 // }
 
 // Listener with explicit timeout settings

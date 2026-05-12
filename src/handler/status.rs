@@ -66,7 +66,7 @@ impl ServerSummary {
             .listeners
             .iter()
             .map(|l| {
-                let (protocol, acme_domains) = listener_protocol(l);
+                let (protocol, acme_domains) = listener_protocol(l, config);
                 ListenerSummary {
                     address: l.bind.clone(),
                     protocol,
@@ -141,16 +141,17 @@ fn auth_desc(b: &AuthBackend) -> AuthDesc {
 
 fn listener_protocol(
     l: &crate::config::ListenerConfig,
+    config: &Config,
 ) -> (String, Vec<String>) {
     if l.stream.is_some() {
         match &l.tls {
             None => ("stream".into(), Vec::new()),
-            Some(tls) => tls_protocol_name(tls, "TLS-stream"),
+            Some(tls) => tls_protocol_name(tls, "TLS-stream", config),
         }
     } else {
         match &l.tls {
             None => ("HTTP".into(), Vec::new()),
-            Some(tls) => tls_protocol_name(tls, "HTTPS"),
+            Some(tls) => tls_protocol_name(tls, "HTTPS", config),
         }
     }
 }
@@ -158,8 +159,13 @@ fn listener_protocol(
 fn tls_protocol_name(
     tls: &crate::config::TlsListenerConfig,
     prefix: &str,
+    config: &Config,
 ) -> (String, Vec<String>) {
-    match &tls.cert {
+    // Follow a Ref one level to the underlying source.  After
+    // validation a Ref always resolves; treat an unresolved ref as
+    // "unknown" rather than panic.
+    let source = config.resolve_cert(&tls.cert).unwrap_or(&tls.cert);
+    match source {
         TlsConfig::Files { .. } => {
             (format!("{prefix}-file"), Vec::new())
         }
@@ -169,6 +175,7 @@ fn tls_protocol_name(
         TlsConfig::Acme { domains, .. } => {
             (format!("{prefix}-ACME"), domains.clone())
         }
+        TlsConfig::Ref(_) => (format!("{prefix}-unknown"), Vec::new()),
     }
 }
 
