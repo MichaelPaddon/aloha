@@ -102,6 +102,24 @@ listener {
 //     }
 // }
 
+// HTTP/3 over QUIC.
+// Requires aloha to be built with `--features http3`.  The bind address
+// uses a `udp:` prefix; the rest of the listener block (tls, default-vhost,
+// timeouts) is identical to a TCP listener.  ACME renewals roll over the
+// QUIC endpoint alongside the TCP TLS acceptor without restarting aloha.
+//
+// When a TCP/TLS listener and a UDP listener share the same port number,
+// aloha auto-injects `Alt-Svc: h3=":<port>"; ma=86400` on the TCP
+// listener's HTTP/1.1 and HTTP/2 responses so browsers can discover the
+// HTTP/3 endpoint.  Use `response-headers { set "Alt-Svc" "..." }` to
+// override, or `remove "Alt-Svc"` to suppress.
+// listener {
+//     bind "udp:[::]:443"
+//     tls-acme {
+//         domain "example.com"
+//     }
+// }
+
 
 // --- Virtual hosts ---
 //

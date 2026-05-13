@@ -3494,3 +3494,113 @@ fn auth_subrequest_missing_url_is_error() {
         "expected url error, got: {err}"
     );
 }
+
+// -- QUIC / HTTP/3 listener config ---------------------------------
+
+#[test]
+fn udp_prefix_selects_quic_transport() {
+    let cfg = Config::parse(
+        r#"
+        listener { bind "[::]:443"; tls-self-signed }
+        listener { bind "udp:[::]:443"; tls-self-signed }
+        vhost h { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap();
+    assert_eq!(cfg.listeners[0].transport, Transport::Tcp);
+    assert_eq!(cfg.listeners[1].transport, Transport::Udp);
+}
+
+#[test]
+fn udp_listener_without_tls_is_rejected() {
+    // QUIC mandates TLS at the transport level; surface that at parse
+    // time rather than letting an unencrypted UDP socket open.
+    let err = Config::parse(
+        r#"
+        listener { bind "udp:[::]:443" }
+        vhost h { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err.contains("udp:") && err.contains("tls"),
+        "expected tls-required error, got: {err}"
+    );
+}
+
+#[test]
+fn udp_listener_rejects_stream_mode() {
+    let err = Config::parse(
+        r#"
+        listener {
+            bind "udp:[::]:443"
+            tls-self-signed
+            proxy "127.0.0.1:5432"
+        }
+        vhost h { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err.contains("proxy") && err.contains("udp"),
+        "expected stream-mode rejection, got: {err}"
+    );
+}
+
+#[test]
+fn auto_alt_svc_populated_on_matching_tcp_listener() {
+    // Same-port TCP + UDP pair: TCP listener should carry an Alt-Svc
+    // value pointing h3 clients at the UDP port.
+    let cfg = Config::parse(
+        r#"
+        listener { bind "[::]:443"; tls-self-signed }
+        listener { bind "udp:[::]:443"; tls-self-signed }
+        vhost h { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap();
+    let tcp = &cfg.listeners[0];
+    let udp = &cfg.listeners[1];
+    assert_eq!(tcp.transport, Transport::Tcp);
+    let alt = tcp.auto_alt_svc.as_deref().expect("auto_alt_svc set");
+    assert!(alt.contains("h3=\":443\""), "unexpected: {alt}");
+    assert!(alt.contains("ma="), "missing max-age in: {alt}");
+    // UDP listener itself never carries Alt-Svc -- it would only
+    // advertise to other QUIC clients, which is meaningless.
+    assert!(udp.auto_alt_svc.is_none());
+}
+
+#[test]
+fn auto_alt_svc_only_when_ports_match() {
+    // h3 on a different port from the TCP TLS endpoint: no automatic
+    // advertisement -- the user has to set Alt-Svc explicitly via the
+    // existing headers mechanism for that topology.
+    let cfg = Config::parse(
+        r#"
+        listener { bind "[::]:443"; tls }
+        listener { bind "udp:[::]:8443"; tls-self-signed }
+        vhost h { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap();
+    assert!(cfg.listeners[0].auto_alt_svc.is_none());
+    assert!(cfg.listeners[1].auto_alt_svc.is_none());
+}
+
+#[test]
+fn auto_alt_svc_skips_plain_http_listeners() {
+    // Auto-Alt-Svc only applies to TLS listeners.  A bare port-80
+    // HTTP listener should not advertise h3 even when a same-port
+    // UDP listener is configured (which would be unusual but legal).
+    let cfg = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        listener { bind "udp:[::]:80"; tls-self-signed }
+        vhost h { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap();
+    assert!(cfg.listeners[0].auto_alt_svc.is_none());
+}

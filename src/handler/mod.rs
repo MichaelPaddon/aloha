@@ -14,11 +14,10 @@ pub mod static_files;
 pub mod status;
 
 use crate::config::HandlerConfig;
-use crate::error::{HttpResponse, response_redirect};
+use crate::error::{HttpResponse, ReqBody, response_redirect};
 use crate::headers::{RequestContext, Template};
 use crate::metrics::Metrics;
 use hyper::Request;
-use hyper::body::Incoming;
 use std::sync::Arc;
 
 pub enum Handler {
@@ -108,7 +107,7 @@ impl Handler {
 
     pub async fn serve(
         &self,
-        req: Request<Incoming>,
+        req: Request<ReqBody>,
         matched_prefix: &str,
         ctx: &RequestContext<'_>,
     ) -> HttpResponse {

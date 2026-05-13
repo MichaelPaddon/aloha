@@ -6,9 +6,10 @@ use crate::error::{
     HttpResponse, bytes_body, response_400, response_403, response_404,
     response_416, response_500,
 };
+use crate::error::ReqBody;
 use bytes::Bytes;
 use http_body_util::BodyExt;
-use hyper::body::{Body, Frame, Incoming};
+use hyper::body::{Body, Frame};
 use hyper::{Request, Response, StatusCode};
 use std::fs::Metadata;
 use std::io::{self, SeekFrom};
@@ -40,7 +41,7 @@ impl StaticHandler {
 
     pub async fn serve(
         &self,
-        req: Request<Incoming>,
+        req: Request<ReqBody>,
         matched_prefix: &str,
     ) -> HttpResponse {
         let uri_path = req.uri().path();
@@ -209,7 +210,7 @@ impl StaticHandler {
 // Multi-range requests (e.g. `bytes=0-499,600-999`) are not supported;
 // they are treated as absent and a 200 is returned instead.
 fn parse_range_header(
-    req: &Request<Incoming>,
+    req: &Request<ReqBody>,
     file_len: u64,
 ) -> Option<Result<(u64, u64), ()>> {
     let value = req.headers().get("range").and_then(|v| v.to_str().ok())?;
@@ -394,7 +395,7 @@ fn compute_etag(meta: &Metadata) -> String {
     format!("\"{}-{}\"", mtime, meta.len())
 }
 
-fn is_not_modified(req: &Request<Incoming>, etag: &str) -> bool {
+fn is_not_modified(req: &Request<ReqBody>, etag: &str) -> bool {
     req.headers()
         .get("if-none-match")
         .and_then(|v| v.to_str().ok())
@@ -481,7 +482,7 @@ mod tests {
         parse_range_header_str(range_hdr, file_len)
     }
 
-    // Mirrors parse_range_header without needing a real Request<Incoming>.
+    // Mirrors parse_range_header without needing a real Request<ReqBody>.
     fn parse_range_header_str(
         hdr: &str,
         file_len: u64,

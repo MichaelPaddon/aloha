@@ -11,9 +11,9 @@
 use crate::cert_state::{CertState, SharedCertState};
 use crate::config::{AuthBackend, Config, HandlerConfig, TlsConfig};
 use crate::error::{HttpResponse, bytes_body};
+use crate::error::ReqBody;
 use crate::metrics::{Metrics, Snapshot, SparklineData, TimePeriod};
 use bytes::Bytes;
-use hyper::body::Incoming;
 use hyper::{Request, Response, StatusCode};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -211,7 +211,7 @@ impl StatusHandler {
 
     pub async fn serve(
         &self,
-        req: Request<Incoming>,
+        req: Request<ReqBody>,
         _matched_prefix: &str,
     ) -> HttpResponse {
         let period = query_period(req.uri());

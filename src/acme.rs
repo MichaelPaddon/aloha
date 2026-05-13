@@ -183,6 +183,7 @@ impl AcmeManager {
     pub async fn renewal_loop(
         self: Arc<Self>,
         acceptor: Arc<ArcSwap<TlsAcceptor>>,
+        cert_tx: tokio::sync::watch::Sender<Arc<tls::CertPair>>,
         initial_failed: bool,
     ) {
         let mut last_failed = initial_failed;
@@ -200,21 +201,47 @@ impl AcmeManager {
             tokio::time::sleep(sleep).await;
 
             match self.acquire_cert().await {
-                Ok(()) => match self.build_acceptor() {
-                    Ok(new_acc) => {
-                        acceptor.store(Arc::new(new_acc));
-                        self.publish_cert_state();
-                        last_failed = false;
-                        tracing::info!(
-                            cert = self.config.cert_name(),
-                            "ACME certificate acquired and activated"
-                        );
+                Ok(()) => {
+                    // Load the fresh pair once; reuse for both the TLS
+                    // acceptor (TCP path) and the watch publication
+                    // (QUIC subscribers).  Failing here leaves the old
+                    // cert in place rather than dropping the listener.
+                    match self.load_cert_pair() {
+                        Ok(pair) => {
+                            match tls::make_acceptor_from_refs(
+                                &pair.chain, &pair.key, &self.tls_opts,
+                            ) {
+                                Ok(new_acc) => {
+                                    acceptor.store(Arc::new(new_acc));
+                                    // Publish to QUIC subscribers; a
+                                    // send error means no receivers,
+                                    // which is fine.
+                                    let _ = cert_tx.send(Arc::new(pair));
+                                    self.publish_cert_state();
+                                    last_failed = false;
+                                    tracing::info!(
+                                        cert = self.config.cert_name(),
+                                        "ACME certificate acquired and \
+                                         activated"
+                                    );
+                                }
+                                Err(e) => {
+                                    last_failed = true;
+                                    tracing::error!(
+                                        "failed to build acceptor from \
+                                         renewed ACME cert: {e:#}"
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            last_failed = true;
+                            tracing::error!(
+                                "failed to load ACME cert: {e:#}"
+                            );
+                        }
                     }
-                    Err(e) => {
-                        last_failed = true;
-                        tracing::error!("failed to load ACME cert: {e:#}");
-                    }
-                },
+                }
                 Err(e) => {
                     last_failed = true;
                     tracing::warn!(
@@ -275,6 +302,20 @@ impl AcmeManager {
             &dir.join("key.pem"),
         )?;
         tls::make_acceptor(chain, key, &self.tls_opts)
+    }
+
+    // Load the stored cert+key as a `CertPair`, the canonical
+    // representation shared between the TCP TLS acceptor and the QUIC
+    // server config.  Used by `renewal_loop` to publish a fresh pair on
+    // every rotation so subscribers (e.g. quinn::Endpoint) can rebuild
+    // their own protocol-specific config without re-reading from disk.
+    pub(crate) fn load_cert_pair(&self) -> anyhow::Result<tls::CertPair> {
+        let dir = self.cert_dir();
+        let (chain, key) = tls::load_cert_and_key(
+            &dir.join("cert.pem"),
+            &dir.join("key.pem"),
+        )?;
+        Ok(tls::CertPair { chain, key })
     }
 
     // Publish the current cert's expiry into the shared state so the

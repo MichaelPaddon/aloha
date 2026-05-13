@@ -110,6 +110,16 @@ impl TestServer {
     /// Use this when you need to inject a custom authenticator, JWT
     /// manager, or error pages that cannot be expressed in KDL alone.
     pub async fn start_with_state(state: Arc<AppState>) -> Self {
+        Self::start_with_state_and_alt_svc(state, None).await
+    }
+
+    /// Like `start_with_state` but lets a test pre-set the listener's
+    /// `auto_alt_svc` field so the Alt-Svc injection path can be
+    /// exercised end-to-end.
+    pub async fn start_with_state_and_alt_svc(
+        state: Arc<AppState>,
+        auto_alt_svc: Option<String>,
+    ) -> Self {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -117,6 +127,7 @@ impl TestServer {
         let (tx, rx) = watch::channel(false);
         let cfg = ListenerConfig {
             bind: addr.to_string(),
+            transport: crate::config::Transport::Tcp,
             tls: None,
             stream: None,
             accept_proxy_protocol: None,
@@ -124,6 +135,7 @@ impl TestServer {
             timeouts: Timeouts::default(),
             max_connections: None,
             max_request_body: None,
+            auto_alt_svc,
         };
         tokio::spawn(run_plain(
             cfg,

@@ -17,6 +17,8 @@ and access control — all from a single readable `aloha.kdl` file.
 - Automatic certificates via Let's Encrypt (ACME HTTP-01)
 - Self-signed for development; PEM file for managed certificates
 - HTTP/1.1 and HTTP/2 (ALPN negotiation) on all TLS listeners
+- HTTP/3 over QUIC (opt-in `http3` cargo feature; `udp:` bind prefix)
+  with automatic Alt-Svc advertisement on the matching TCP listener
 - Static file serving: streaming, Range requests, ETag caching
 
 **Routing & backends**
@@ -101,6 +103,45 @@ cargo generate-rpm  # target/generate-rpm/aloha-<version>-1.<arch>.rpm
 
 Requires `cargo-deb` and `cargo-generate-rpm`
 (`cargo install cargo-deb cargo-generate-rpm`).
+
+## HTTP/3
+
+HTTP/3 over QUIC is available behind the `http3` cargo feature:
+
+```
+cargo build --release --features http3
+```
+
+A QUIC listener is just a `listener` block whose bind address carries
+the `udp:` prefix; it shares the same TLS configuration syntax (and
+the same ACME hot-swap plumbing) as a TCP listener:
+
+```kdl
+listener { bind "[::]:443";     tls-acme { domain "example.com" } }
+listener { bind "udp:[::]:443"; tls-acme { domain "example.com" } }
+```
+
+When a TCP/TLS listener and a UDP listener share the same port, aloha
+automatically injects `Alt-Svc: h3=":<port>"; ma=86400` on the TCP
+listener's HTTP/1.1 and HTTP/2 responses, so clients can discover the
+HTTP/3 endpoint without any extra configuration. Use the existing
+`response-headers { set "Alt-Svc" "..." }` mechanism inside a location
+or vhost block to override the auto-injected value, or `remove "Alt-Svc"`
+to suppress it.
+
+The auto-injection only fires when no `Alt-Svc` header is already
+present on the response, so user header rules always win.
+
+ACME certificate renewals roll over both transports atomically: the
+TCP TLS acceptor and the QUIC `Endpoint` subscribe to the same cert
+source, so a renewal swaps in the new certificate on both paths
+without restarting aloha.
+
+Systemd socket activation works for `udp:` listeners too — declare a
+matching `ListenDatagram=` socket and aloha will adopt the inherited
+fd instead of binding a fresh one, preserving the UDP socket across
+restarts (in-flight QUIC connections still rely on the operator's
+seamless-upgrade strategy).
 
 ## Contributing
 

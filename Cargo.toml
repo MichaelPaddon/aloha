@@ -10,12 +10,27 @@ license = "BSD-2-Clause"
 name = "aloha"
 path = "src/main.rs"
 
+[features]
+# Default to a slim build that only does HTTP/1.1 + HTTP/2 over TCP/TLS.
+default = []
+# Pull in quinn + h3 and enable rustls's quic feature so that listeners
+# bound with a `udp:` prefix can serve HTTP/3.  Off by default so that
+# operators who don't want the extra dependency surface get the smaller
+# build.
+# rustls 0.23 exposes QUIC APIs unconditionally (no feature flag), so
+# we only need to pull in the QUIC stack crates here.
+http3 = ["dep:quinn", "dep:h3", "dep:h3-quinn"]
+
 [dependencies]
 hyper              = { version = "1",    features = ["http1", "http2", "server"] }
 hyper-util         = { version = "0.1",  features = ["tokio", "server", "server-auto", "client", "client-legacy"] }
 http-body-util     = "0.1"
 bytes              = "1"
 rustls             = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }
+# HTTP/3 stack -- only compiled when the `http3` feature is on.
+quinn              = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs"], optional = true }
+h3                 = { version = "0.0.8", optional = true }
+h3-quinn           = { version = "0.0.10", optional = true }
 rustls-pemfile     = "2"
 tokio-rustls       = "0.26"
 rcgen              = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }

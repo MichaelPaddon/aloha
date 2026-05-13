@@ -5,8 +5,8 @@
 // listener.rs, never by this handler.
 
 use crate::error::{HttpResponse, bytes_body};
+use crate::error::ReqBody;
 use crate::headers::RequestContext;
-use hyper::body::Incoming;
 use hyper::header::HeaderValue;
 use hyper::{Request, Response, StatusCode};
 
@@ -18,7 +18,7 @@ impl AuthRequestHandler {
     }
 
     // Build the 200 response with identity headers.  Extracted so
-    // tests can exercise it without a live `Request<Incoming>`.
+    // tests can exercise it without a live `Request<ReqBody>`.
     fn make_response(ctx: &RequestContext<'_>) -> HttpResponse {
         let mut builder = Response::builder().status(StatusCode::OK);
 
@@ -42,7 +42,7 @@ impl AuthRequestHandler {
 
     pub async fn serve(
         &self,
-        _req: Request<Incoming>,
+        _req: Request<ReqBody>,
         _matched_prefix: &str,
         ctx: &RequestContext<'_>,
     ) -> HttpResponse {

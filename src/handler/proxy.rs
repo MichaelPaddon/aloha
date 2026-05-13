@@ -10,6 +10,7 @@
 
 use crate::config::ProxyProtocolVersion;
 use crate::error::{HttpResponse, response_502};
+use crate::error::ReqBody;
 use crate::listener::{LocalAddr, LocalUnixPath};
 use crate::proxy_proto;
 use http_body_util::{BodyExt, combinators::BoxBody};
@@ -158,7 +159,7 @@ impl ProxyHandler {
 
     pub async fn serve(
         &self,
-        req: Request<Incoming>,
+        req: Request<ReqBody>,
         matched_prefix: &str,
     ) -> HttpResponse {
         if let Some(version) = self.proxy_protocol {
@@ -191,7 +192,7 @@ impl ProxyHandler {
 
     fn prepare_backend_request(
         &self,
-        req: Request<Incoming>,
+        req: Request<ReqBody>,
         matched_prefix: &str,
     ) -> anyhow::Result<Request<UpstreamBody>> {
         let peer_ip = req
@@ -224,7 +225,7 @@ impl ProxyHandler {
     // Supports both TCP and Unix socket upstreams.
     async fn serve_with_proxy_protocol(
         &self,
-        req: Request<Incoming>,
+        req: Request<ReqBody>,
         matched_prefix: &str,
         version: ProxyProtocolVersion,
     ) -> HttpResponse {
@@ -702,7 +703,7 @@ mod tests {
         .unwrap();
 
         // Build a minimal hyper server + client pair to produce a
-        // real Request<Incoming>.
+        // real Request<ReqBody>.
         let (client_io, server_io) = tokio::io::duplex(4096);
         let client_io = hyper_util::rt::TokioIo::new(client_io);
         let server_io = hyper_util::rt::TokioIo::new(server_io);
@@ -723,6 +724,8 @@ mod tests {
                             req.extensions_mut().insert(LocalAddr(local));
                             let h = handler_clone.clone();
                             async move {
+                                use http_body_util::BodyExt;
+                                let req = req.map(|b| b.boxed());
                                 Ok::<_, std::convert::Infallible>(
                                     h.serve(req, "/").await,
                                 )
@@ -803,6 +806,8 @@ mod tests {
                             req.extensions_mut().insert(LocalAddr(local));
                             let h = handler_clone.clone();
                             async move {
+                                use http_body_util::BodyExt;
+                                let req = req.map(|b| b.boxed());
                                 Ok::<_, std::convert::Infallible>(
                                     h.serve(req, "/").await,
                                 )

@@ -15,6 +15,18 @@ use std::path::PathBuf;
 pub type BoxBody = ErasedBody<Bytes, std::io::Error>;
 pub type HttpResponse = Response<BoxBody>;
 
+/// Type-erased *request* body shared by all handlers.  Hyper's TCP
+/// path delivers `hyper::body::Incoming`; the HTTP/3 path delivers a
+/// `Full<Bytes>` (the request body is buffered up front by the QUIC
+/// adapter).  Both are boxed into `ReqBody` at the listener boundary
+/// so handler signatures don't have to be generic over the body type
+/// and proxy/CGI/FastCGI/SCGI backends see a single concrete body
+/// from either transport.
+///
+/// The error type is `hyper::Error` because the proxy handler forwards
+/// request bodies to a `hyper-util` Client whose body bound matches.
+pub type ReqBody = ErasedBody<Bytes, hyper::Error>;
+
 // Wrap an owned or static byte buffer in the common body type.
 pub fn bytes_body(b: impl Into<Bytes>) -> BoxBody {
     Full::new(b.into())

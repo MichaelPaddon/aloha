@@ -4,9 +4,9 @@
 
 use super::cgi_util::{build_cgi_env, parse_cgi_response};
 use crate::error::{HttpResponse, response_404, response_502};
+use crate::error::ReqBody;
 use http_body_util::BodyExt;
 use hyper::Request;
-use hyper::body::Incoming;
 use std::path::PathBuf;
 use std::process::Stdio;
 use tokio::io::AsyncWriteExt;
@@ -25,7 +25,7 @@ impl CgiHandler {
 
     pub async fn serve(
         &self,
-        req: Request<Incoming>,
+        req: Request<ReqBody>,
         matched_prefix: &str,
     ) -> HttpResponse {
         let (parts, body) = req.into_parts();

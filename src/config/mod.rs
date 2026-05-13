@@ -233,10 +233,32 @@ pub struct UpstreamTlsConfig {
     pub skip_verify: bool,
 }
 
+/// Transport layer for a listener.  TCP is the default; UDP is selected
+/// by the `udp:` bind prefix and indicates that the listener serves
+/// HTTP/3 over QUIC.  Validation guarantees `Udp` listeners always have
+/// a `tls` block and never have a `stream` block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Transport {
+    Tcp,
+    Udp,
+}
+
+impl Default for Transport {
+    fn default() -> Self {
+        Transport::Tcp
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ListenerConfig {
     // Bind address: "host:port" for TCP or "unix:/path" for Unix sockets.
+    // The `udp:` prefix selects QUIC/HTTP/3; the suffix follows the same
+    // "host:port" syntax as a TCP bind.
     pub bind: String,
+    // Tcp for plain TCP/TLS HTTP listeners and Unix sockets; Udp for
+    // QUIC/HTTP/3 listeners.  Determined by the bind-address prefix at
+    // parse time.
+    pub transport: Transport,
     pub tls: Option<TlsListenerConfig>,
     // When Some: stream proxy mode (forward raw bytes to upstream).
     // When None: HTTP routing mode (vhost/location dispatch).
@@ -256,6 +278,13 @@ pub struct ListenerConfig {
     // Reject requests whose Content-Length exceeds this (bytes).
     // None = unlimited.  Checked before any handler runs.
     pub max_request_body: Option<u64>,
+    // Pre-computed `Alt-Svc` header value to auto-inject on responses
+    // from this TCP/TLS listener.  Populated by `Config::parse` when a
+    // matching UDP listener (same port) is defined so that h1/h2 clients
+    // can discover the HTTP/3 endpoint without any extra config.  Only
+    // applied when the response does not already carry an `Alt-Svc`
+    // header, so user header rules always win.
+    pub auto_alt_svc: Option<String>,
 }
 
 impl ListenerConfig {
@@ -495,6 +524,35 @@ impl Config {
                 };
             }
         }
+        // Auto-Alt-Svc: for every TCP/TLS listener whose port matches a
+        // UDP listener's port, pre-build an `Alt-Svc: h3=":<port>"; ma=...`
+        // header value.  The listener service injects it on responses that
+        // don't already carry an Alt-Svc header so user header rules can
+        // still override.  Cross-listener inference is intentionally scoped
+        // to "same port number" -- topology beyond that (h3 on a different
+        // port, multi-endpoint advertisements) is handled by the existing
+        // `headers { response { set "Alt-Svc" "..." } }` mechanism.
+        let udp_ports: std::collections::HashSet<u16> = config
+            .listeners
+            .iter()
+            .filter(|l| l.transport == Transport::Udp)
+            .filter_map(|l| port_of_bind(&l.bind))
+            .collect();
+        if !udp_ports.is_empty() {
+            for listener in config.listeners.iter_mut() {
+                if listener.transport != Transport::Tcp
+                    || listener.tls.is_none()
+                {
+                    continue;
+                }
+                if let Some(port) = port_of_bind(&listener.bind)
+                    && udp_ports.contains(&port)
+                {
+                    listener.auto_alt_svc =
+                        Some(format!("h3=\":{port}\"; ma=86400"));
+                }
+            }
+        }
         config.validate()?;
         Ok(config)
     }
@@ -630,6 +688,21 @@ impl Config {
             })
             .collect()
     }
+}
+
+/// Extract the port number from a listener bind string.  Returns None
+/// for Unix sockets (which carry no port) and for malformed addresses
+/// (which `bind_socket` will reject later anyway).  Strips both `udp:`
+/// and -- for safety -- any other future protocol prefix that follows
+/// the same `<scheme>:<addr>` shape used for `unix:`.
+fn port_of_bind(bind: &str) -> Option<u16> {
+    let s = bind.strip_prefix("udp:").unwrap_or(bind);
+    if s.starts_with("unix:") {
+        return None;
+    }
+    // Bracketed IPv6 ("[::]:443") and bare host:port ("0.0.0.0:443")
+    // both put the port after the last ':'.
+    s.rsplit_once(':').and_then(|(_, p)| p.parse::<u16>().ok())
 }
 
 // Returns true iff any rule in `stmts` (recursively through Apply

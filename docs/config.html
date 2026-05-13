@@ -1591,11 +1591,23 @@
               <td>bind</td><td>string</td><td>&mdash;</td>
               <td><span class="badge badge-req">required</span>
                   Address to listen on. Use <code>"host:port"</code>
-                  for TCP (e.g. <code>"[::]:8080"</code>) or
+                  for TCP (e.g. <code>"[::]:8080"</code>),
+                  <code>"udp:host:port"</code> for QUIC/HTTP/3 (requires
+                  the <code>http3</code> cargo feature), or
                   <code>"unix:/path"</code> for a Unix domain socket.
                   If a matching socket was inherited from a parent
                   process (seamless upgrade), aloha adopts it instead
-                  of calling <code>bind(2)</code>.</td>
+                  of calling <code>bind(2)</code>.
+                  <br><br>
+                  Pairing a TCP/TLS listener with a <code>udp:</code>
+                  listener on the same port enables automatic
+                  HTTP/3 advertisement via the <code>Alt-Svc</code>
+                  response header. The auto-injected value
+                  (<code>h3=":&lt;port&gt;"; ma=86400</code>) is only
+                  added when no <code>Alt-Svc</code> header is already
+                  present on the response, so a
+                  <code>response-headers { set "Alt-Svc" "..." }</code>
+                  rule in a location or vhost always wins.</td>
             </tr>
             <tr id="listener-default-vhost">
               <td>default-vhost</td>

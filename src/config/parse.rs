@@ -294,8 +294,38 @@ pub(super) fn parse_listener(
     let bind = arg_str(node, 0)
         .or_else(|| child_str(node, "bind"))
         .ok_or_else(|| anyhow!("{name}:{line}: listener requires 'bind'"))?;
+    // `udp:` prefix selects QUIC/HTTP/3.  The remainder is the same
+    // "host:port" string that a TCP bind would carry, so downstream
+    // socket-binding code parses it identically once the prefix has
+    // been consumed.
+    let transport = if bind.starts_with("udp:") {
+        crate::config::Transport::Udp
+    } else {
+        crate::config::Transport::Tcp
+    };
     let children = node.children().map(|d| d.nodes()).unwrap_or_default();
     let tls = parse_listener_tls(children.iter(), src, name)?;
+    // QUIC mandates TLS at the transport level -- there is no
+    // plaintext mode -- and stream-proxy mode requires byte-oriented
+    // semantics that UDP doesn't provide.  Catch both at parse time
+    // so the user gets a clear error rather than a startup panic.
+    if transport == crate::config::Transport::Udp {
+        if tls.is_none() {
+            bail!(
+                "{name}:{line}: udp: listeners require a tls block \
+                 (QUIC mandates TLS)"
+            );
+        }
+        if let Some(bad) =
+            children.iter().find(|n| n.name().value() == "proxy")
+        {
+            let bad_line = node_line(src, bad);
+            bail!(
+                "{name}:{bad_line}: 'proxy' (stream mode) is not \
+                 supported on udp: listeners"
+            );
+        }
+    }
 
     // A 'proxy' child activates stream mode: raw bytes forwarded to upstream.
     let proxy_node = children.iter().find(|n| n.name().value() == "proxy");
@@ -362,6 +392,7 @@ pub(super) fn parse_listener(
         return Ok((
             ListenerConfig {
                 bind,
+                transport,
                 tls,
                 stream,
                 accept_proxy_protocol,
@@ -369,6 +400,7 @@ pub(super) fn parse_listener(
                 timeouts: Timeouts::default(),
                 max_connections,
                 max_request_body: None,
+                auto_alt_svc: None,
             },
             // No raw default-vhost for stream listeners.
             Some(None),
@@ -403,6 +435,7 @@ pub(super) fn parse_listener(
     Ok((
         ListenerConfig {
             bind,
+            transport,
             tls,
             stream: None,
             accept_proxy_protocol,
@@ -410,6 +443,7 @@ pub(super) fn parse_listener(
             timeouts,
             max_connections,
             max_request_body,
+            auto_alt_svc: None,
         },
         raw_default_vhost,
     ))
