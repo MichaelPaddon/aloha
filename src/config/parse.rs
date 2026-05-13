@@ -133,7 +133,24 @@ pub(super) fn parse_server(
         health,
         policies,
         error_pages,
+        cert_key_mode: parse_file_mode(node, "cert-key-mode")
+            .context("server.cert-key-mode")?,
     })
+}
+
+// Parse an octal file-mode string such as "0640" or "0o640".
+// Returns None if the key is absent.
+fn parse_file_mode(node: &KdlNode, key: &str) -> anyhow::Result<Option<u32>> {
+    let Some(s) = child_str(node, key) else {
+        return Ok(None);
+    };
+    let digits = s
+        .strip_prefix("0o")
+        .or_else(|| s.strip_prefix('0'))
+        .unwrap_or(s.as_str());
+    u32::from_str_radix(digits, 8)
+        .map(Some)
+        .map_err(|_| anyhow::anyhow!("invalid octal mode: {s:?}"))
 }
 
 fn parse_geoip(

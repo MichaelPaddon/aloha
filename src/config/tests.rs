@@ -3927,3 +3927,45 @@ fn two_files_certs_with_same_paths_is_error() {
         "expected file conflict error, got: {err}"
     );
 }
+
+#[test]
+fn cert_key_mode_default_is_none() {
+    let cfg = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        server {}
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap();
+    assert_eq!(cfg.server.cert_key_mode, None);
+}
+
+#[test]
+fn cert_key_mode_parses_octal_string() {
+    let cfg = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        server {
+            cert-key-mode "0640"
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap();
+    assert_eq!(cfg.server.cert_key_mode, Some(0o640));
+}
+
+#[test]
+fn cert_key_mode_invalid_is_error() {
+    let result = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        server {
+            cert-key-mode "notamode"
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    );
+    assert!(result.is_err());
+}

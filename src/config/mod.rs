@@ -93,6 +93,11 @@ pub struct ServerConfig {
     pub policies: HashMap<String, Vec<PolicyRuleDef>>,
     // Per-status-code custom error pages.
     pub error_pages: Vec<(u16, ErrorPageDef)>,
+    // Unix file mode for ACME private key files (key.pem).
+    // None means use the default 0o600 (owner read-write only).
+    // Set to e.g. Some(0o640) to make cert keys group-readable.
+    // acme_account.json is always written 0o600 regardless of this setting.
+    pub cert_key_mode: Option<u32>,
 }
 
 /// Built-in health endpoint configuration.

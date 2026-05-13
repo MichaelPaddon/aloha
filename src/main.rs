@@ -280,12 +280,15 @@ async fn main() -> anyhow::Result<()> {
     // `certificate` definition, regardless of how many listeners refer
     // to it.  This is the single change that turns "each listener
     // races on its own ACME directory" into "one shared renewal loop".
+    let cert_key_mode = config.server.cert_key_mode.unwrap_or(0o600);
+
     let cert_registry = build_cert_registry(
         &config.certificates,
         &tls_defaults,
         state_dir.as_ref(),
         &challenges,
         &cert_state,
+        cert_key_mode,
     )
     .await
     .context("building certificate registry")?;
@@ -346,6 +349,7 @@ async fn main() -> anyhow::Result<()> {
             &challenges,
             &cert_state,
             &cert_registry,
+            cert_key_mode,
         )
         .await?;
         let rx = shutdown_rx.clone();
@@ -369,6 +373,7 @@ async fn main() -> anyhow::Result<()> {
             &challenges,
             &cert_state,
             &cert_registry,
+            cert_key_mode,
         )
         .await?;
         let stream_mode = cfg.stream.as_ref().unwrap();
@@ -495,6 +500,7 @@ async fn build_tls_acceptor(
     challenges: &ChallengeMap,
     cert_state: &cert_state::SharedCertState,
     registry: &CertRegistry,
+    cert_key_mode: u32,
 ) -> anyhow::Result<Arc<ArcSwap<tokio_rustls::TlsAcceptor>>> {
     if let TlsConfig::Ref(name) = &tls_cfg.cert {
         return registry
@@ -509,6 +515,7 @@ async fn build_tls_acceptor(
         state_dir,
         challenges,
         cert_state,
+        cert_key_mode,
     )
     .await
 }
@@ -523,6 +530,7 @@ async fn build_acceptor_from_source(
     state_dir: Option<&PathBuf>,
     challenges: &ChallengeMap,
     cert_state: &cert_state::SharedCertState,
+    cert_key_mode: u32,
 ) -> anyhow::Result<Arc<ArcSwap<tokio_rustls::TlsAcceptor>>> {
     match cert {
         TlsConfig::Acme {
@@ -548,6 +556,7 @@ async fn build_acceptor_from_source(
                         retry_interval: Duration::from_secs(
                             *retry_interval_secs,
                         ),
+                        cert_key_mode,
                     },
                     challenges.clone(),
                     resolved,
@@ -617,6 +626,7 @@ async fn build_cert_registry(
     state_dir: Option<&PathBuf>,
     challenges: &ChallengeMap,
     cert_state: &cert_state::SharedCertState,
+    cert_key_mode: u32,
 ) -> anyhow::Result<CertRegistry> {
     let mut registry = HashMap::new();
     for def in defs {
@@ -627,6 +637,7 @@ async fn build_cert_registry(
             state_dir,
             challenges,
             cert_state,
+            cert_key_mode,
         )
         .await
         .with_context(|| {
