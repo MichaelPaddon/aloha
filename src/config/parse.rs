@@ -1,10 +1,11 @@
 use super::kdl::*;
 use super::{
-    AuthBackend, BasicAuthConfig, ErrorPageDef, GeoIpConfig, HandlerConfig,
-    HeaderOpConfig, HealthConfig, LdapAuthConfig, ListenerConfig,
-    LocationConfig, PolicyRuleDef, ProxyProtocolVersion, ServerConfig,
-    StreamMode, SubrequestAuthConfig, Timeouts, TlsConfig, TlsListenerConfig,
-    TlsOptions, TlsVersion, UpstreamTlsConfig, VHostConfig, VHostName,
+    AuthBackend, BasicAuthConfig, CertificateDef, ErrorPageDef, GeoIpConfig,
+    HandlerConfig, HeaderOpConfig, HealthConfig, LdapAuthConfig,
+    ListenerConfig, LocationConfig, PolicyRuleDef, ProxyProtocolVersion,
+    ServerConfig, StreamMode, SubrequestAuthConfig, Timeouts, TlsConfig,
+    TlsListenerConfig, TlsOptions, TlsVersion, UpstreamTlsConfig, VHostConfig,
+    VHostName,
 };
 use crate::access::{PolicyAction, Predicate};
 use ::kdl::KdlNode;
@@ -132,7 +133,24 @@ pub(super) fn parse_server(
         health,
         policies,
         error_pages,
+        cert_key_mode: parse_file_mode(node, "cert-key-mode")
+            .context("server.cert-key-mode")?,
     })
+}
+
+// Parse an octal file-mode string such as "0640" or "0o640".
+// Returns None if the key is absent.
+fn parse_file_mode(node: &KdlNode, key: &str) -> anyhow::Result<Option<u32>> {
+    let Some(s) = child_str(node, key) else {
+        return Ok(None);
+    };
+    let digits = s
+        .strip_prefix("0o")
+        .or_else(|| s.strip_prefix('0'))
+        .unwrap_or(s.as_str());
+    u32::from_str_radix(digits, 8)
+        .map(Some)
+        .map_err(|_| anyhow::anyhow!("invalid octal mode: {s:?}"))
 }
 
 fn parse_geoip(
@@ -535,9 +553,10 @@ fn parse_timeouts(node: &KdlNode) -> Timeouts {
 }
 
 /// Resolve TLS configuration for a listener.  Walks the listener's
-/// children once and handles the three distinct node names
-/// (`tls-file`, `tls-self-signed`, `tls-acme`) plus the legacy `tls`
-/// node, which is rejected with a migration hint.
+/// children once and handles the three inline forms (`tls-file`,
+/// `tls-self-signed`, `tls-acme`) plus `tls cert="<name>"`, which
+/// references a top-level `certificate` definition so multiple listeners
+/// can share a single ACME manager and on-disk cert directory.
 fn parse_listener_tls<'a, I: IntoIterator<Item = &'a KdlNode>>(
     children: I,
     src: &str,
@@ -546,7 +565,7 @@ fn parse_listener_tls<'a, I: IntoIterator<Item = &'a KdlNode>>(
     let mut tls_nodes: Vec<&KdlNode> = Vec::new();
     for child in children {
         match child.name().value() {
-            "tls-file" | "tls-self-signed" | "tls-acme" => {
+            "tls-file" | "tls-self-signed" | "tls-acme" | "tls" => {
                 tls_nodes.push(child)
             }
             _ => {}
@@ -557,17 +576,43 @@ fn parse_listener_tls<'a, I: IntoIterator<Item = &'a KdlNode>>(
         [n] => *n,
         [_, n2, ..] => {
             let line = node_line(src, n2);
-            bail!("{name}:{line}: at most one 'tls-*' node per listener");
+            bail!(
+                "{name}:{line}: at most one 'tls' / 'tls-*' node per \
+                 listener"
+            );
         }
     };
     let cert = match node.name().value() {
         "tls-file" => parse_tls_file(node, src, name)?,
         "tls-self-signed" => parse_tls_self_signed(node, src, name)?,
         "tls-acme" => parse_tls_acme(node, src, name)?,
+        "tls" => parse_tls_ref(node, src, name)?,
         _ => unreachable!(),
     };
     let options = parse_tls_options(node, src, name)?;
     Ok(Some(TlsListenerConfig { cert, options }))
+}
+
+// Listener `tls cert="<name>"` -- reference a top-level certificate.
+// Accepts positional form (`tls "main"`) as a shorthand.
+fn parse_tls_ref(
+    node: &KdlNode,
+    src: &str,
+    name: &str,
+) -> anyhow::Result<TlsConfig> {
+    let line = node_line(src, node);
+    let ref_name = arg_str(node, 0)
+        .or_else(|| prop_or_child_str(node, "cert"))
+        .ok_or_else(|| {
+            anyhow!(
+                "{name}:{line}: 'tls' on a listener requires a \
+                 certificate name -- either as positional \
+                 (`tls \"main\"`) or property (`tls cert=\"main\"`). \
+                 For an inline cert use 'tls-file', 'tls-self-signed', \
+                 or 'tls-acme' instead"
+            )
+        })?;
+    Ok(TlsConfig::Ref(ref_name))
 }
 
 fn parse_tls_file(
@@ -576,15 +621,16 @@ fn parse_tls_file(
     name: &str,
 ) -> anyhow::Result<TlsConfig> {
     let line = node_line(src, node);
+    let node_name = node.name().value();
     let cert = prop_or_child_str(node, "cert").ok_or_else(|| {
         anyhow!(
-            "{name}:{line}: tls-file requires 'cert' (as cert=\"...\" \
+            "{name}:{line}: {node_name} requires 'cert' (as cert=\"...\" \
              property or as a 'cert' child)"
         )
     })?;
     let key = prop_or_child_str(node, "key").ok_or_else(|| {
         anyhow!(
-            "{name}:{line}: tls-file requires 'key' (as key=\"...\" \
+            "{name}:{line}: {node_name} requires 'key' (as key=\"...\" \
              property or as a 'key' child)"
         )
     })?;
@@ -597,7 +643,8 @@ fn parse_tls_self_signed(
     name: &str,
 ) -> anyhow::Result<TlsConfig> {
     let line = node_line(src, node);
-    // Reject misuse: tls-self-signed accepts only tls-options children.
+    let node_name = node.name().value();
+    // Reject misuse: self-signed accepts only tls-options children.
     for forbidden in ["cert", "key", "domain", "email", "staging"] {
         if node
             .children()
@@ -605,7 +652,7 @@ fn parse_tls_self_signed(
             .unwrap_or(false)
         {
             bail!(
-                "{name}:{line}: tls-self-signed has no '{forbidden}' \
+                "{name}:{line}: {node_name} has no '{forbidden}' \
                  (it generates an in-memory cert)"
             );
         }
@@ -619,6 +666,7 @@ fn parse_tls_acme(
     name: &str,
 ) -> anyhow::Result<TlsConfig> {
     let line = node_line(src, node);
+    let node_name = node.name().value();
     // Domains: prefer block form (allows multi-SAN); accept a single
     // domain via the `domain="..."` property as a one-line shorthand.
     let mut domains: Vec<String> = node
@@ -638,7 +686,7 @@ fn parse_tls_acme(
     }
     if domains.is_empty() {
         bail!(
-            "{name}:{line}: tls-acme requires at least one 'domain' \
+            "{name}:{line}: {node_name} requires at least one 'domain' \
              (as domain=\"...\" property or as 'domain' child node(s))"
         );
     }
@@ -652,6 +700,56 @@ fn parse_tls_acme(
             .map(|n| n as u64)
             .unwrap_or(3600),
     })
+}
+
+/// Parse a top-level `certificate "<name>" { ... }` node.
+///
+/// The body holds exactly one source child: `acme { ... }`,
+/// `files cert=... key=...`, or `self-signed`.  The source parsers
+/// (`parse_tls_acme` etc.) are reused verbatim -- they look at properties
+/// and child nodes by key, not by their own node name.
+pub(super) fn parse_certificate(
+    node: &KdlNode,
+    src: &str,
+    name: &str,
+) -> anyhow::Result<CertificateDef> {
+    let line = node_line(src, node);
+    let cert_name = req_arg_str(node, 0).with_context(|| {
+        format!(
+            "{name}:{line}: certificate requires a name as its first argument"
+        )
+    })?;
+
+    let mut source_nodes: Vec<&KdlNode> = Vec::new();
+    for child in node.children().map(|d| d.nodes()).unwrap_or_default() {
+        match child.name().value() {
+            "acme" | "files" | "self-signed" => source_nodes.push(child),
+            _ => {}
+        }
+    }
+    let source_node = match source_nodes.as_slice() {
+        [] => bail!(
+            "{name}:{line}: certificate '{cert_name}' has no source body; \
+             expected one of 'acme {{ ... }}', 'files cert=... key=...', \
+             or 'self-signed'"
+        ),
+        [n] => *n,
+        [_, n2, ..] => {
+            let line = node_line(src, n2);
+            bail!(
+                "{name}:{line}: certificate '{cert_name}' has more than \
+                 one source body; pick one of 'acme', 'files', or \
+                 'self-signed'"
+            );
+        }
+    };
+    let source = match source_node.name().value() {
+        "acme" => parse_tls_acme(source_node, src, name)?,
+        "files" => parse_tls_file(source_node, src, name)?,
+        "self-signed" => parse_tls_self_signed(source_node, src, name)?,
+        _ => unreachable!(),
+    };
+    Ok(CertificateDef { name: cert_name, source })
 }
 
 // Parse TLS version/cipher options from any tls node (server or

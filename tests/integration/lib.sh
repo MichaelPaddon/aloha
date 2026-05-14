@@ -58,11 +58,13 @@ H3GET=/usr/bin/h3get
 h3get_run() {
     local out_var="$1" err_var="$2" url="$3"
     shift 3
-    local rc tmpdir
+    local rc=0 tmpdir
     tmpdir=$(mktemp -d)
+    # h3get returns non-zero for 4xx/5xx; capture rc explicitly so
+    # `set -e` in run.sh doesn't abort the suite on negative-path
+    # assertions (e.g. asserting a 403).
     "$H3GET" --skip-verify --max-time 5 "$@" "$url" \
-        >"$tmpdir/out" 2>"$tmpdir/err"
-    rc=$?
+        >"$tmpdir/out" 2>"$tmpdir/err" || rc=$?
     H3GET_RC=$rc
     printf -v "$out_var" "%s" "$(cat "$tmpdir/out")"
     printf -v "$err_var" "%s" "$(cat "$tmpdir/err")"

@@ -560,7 +560,10 @@
             <li><a href="#tls-file">key</a></li>
           </ul>
           <li><a href="#tls-self-signed">tls-self-signed</a></li>
+          <li><a href="#tls-ref">tls (ref)</a></li>
         </ul>
+
+        <li><a href="#certificate">certificate</a></li>
 
         <li class="nav-parent"><a href="#vhost">vhost<span class="nav-tog">›</span></a></li>
         <ul class="nav-list sub nav-children">
@@ -1640,6 +1643,10 @@
           </tbody>
         </table>
       </div>
+      <p>
+        The bind address may also be written as the listener&rsquo;s
+        positional argument: <code>listener "[::]:80" { &hellip; }</code>.
+      </p>
 
       <!-- Stream proxy -->
       <h3 id="stream-proxy"><code>proxy</code> &mdash; Stream
@@ -1693,22 +1700,35 @@
         <span class="kw">deny</span>  <span class="prop">code=</span><span class="num">403</span>
     }
 }</code></pre>
+      <p><strong>Arguments</strong></p>
       <div class="table-wrap">
         <table>
           <thead>
             <tr>
-              <th>Children</th><th>Type</th>
-              <th>Default</th><th>Description</th>
+              <th>Position</th><th>Type</th><th>Description</th>
             </tr>
           </thead>
           <tbody>
             <tr id="stream-proxy-upstream">
-              <td>upstream</td><td>string</td><td>&mdash;</td>
-              <td><span class="badge badge-req">required positional</span>
+              <td>upstream</td><td>string</td>
+              <td><span class="badge badge-req">required</span>
                   Upstream address: <code>"host:port"</code> for TCP
                   or <code>"unix:/path"</code> for a Unix domain
                   socket.</td>
             </tr>
+          </tbody>
+        </table>
+      </div>
+      <p><strong>Children</strong></p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Child</th><th>Type</th>
+              <th>Default</th><th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
             <tr id="stream-proxy-proxy-protocol">
               <td>proxy-protocol</td>
               <td><code>v1</code> | <code>v2</code></td>
@@ -1842,6 +1862,15 @@
               <td>Obtain and renew certificates automatically via
                   ACME HTTP-01.</td>
             </tr>
+            <tr id="tls-ref">
+              <td><code>tls</code></td>
+              <td>certificate name (positional or
+                  <code>cert=&quot;<em>name</em>&quot;</code>)</td>
+              <td>Reference a top-level
+                  <a href="#certificate"><code>certificate</code></a>.
+                  Multiple listeners that share a name share a single
+                  acceptor (and, for ACME, one renewal loop).</td>
+            </tr>
           </tbody>
         </table>
       </div>
@@ -1849,6 +1878,17 @@
         <span class="callout-label">Note</span>
         <span>HTTP/1.1 and HTTP/2 are both supported on TLS listeners;
           protocol selection is automatic via ALPN.</span>
+      </div>
+      <div class="callout warn">
+        <span class="callout-label">Conflict</span>
+        <span>
+          Two listeners may not carry inline <code>tls-acme</code>
+          blocks that resolve to the same on-disk slot &mdash; the same
+          explicit <code>name</code>, or the same first
+          <code>domain</code> when <code>name</code> is unset.  Define a
+          top-level <code>certificate</code> and reference it from both
+          listeners.
+        </span>
       </div>
 
       <h4 id="tls-acme"><code>tls-acme</code> &mdash; ACME /
@@ -1921,6 +1961,63 @@
         </table>
       </div>
 
+    </section>
+
+    <hr class="divider">
+
+    <!-- ========================================================= -->
+    <!-- certificate                                                 -->
+    <!-- ========================================================= -->
+    <section id="certificate">
+      <h2><code>certificate</code></h2>
+      <p>
+        Defines a named certificate at the top level of the config so
+        that any number of listeners can share it via
+        <code>tls cert=&quot;<em>name</em>&quot;</code>.  For ACME
+        sources this collapses what would otherwise be N independent
+        renewal loops &mdash; one per listener &mdash; into a single
+        background task that hot-swaps one shared acceptor.
+      </p>
+      <p>
+        The body contains exactly one source child:
+        <code>acme</code>, <code>files</code>, or
+        <code>self-signed</code>.  Each accepts the same properties and
+        children as the corresponding inline form
+        (<a href="#tls-acme"><code>tls-acme</code></a>,
+        <a href="#tls-file"><code>tls-file</code></a>,
+        <a href="#tls-self-signed"><code>tls-self-signed</code></a>).
+      </p>
+<pre><code><span class="cm">// One ACME cert shared by two listeners</span>
+<span class="kw">certificate</span> <span class="str">"main"</span> {
+    <span class="kw">acme</span> {
+        <span class="kw">domain</span> <span class="kw">example.com</span> <span class="kw">www.example.com</span>
+        <span class="kw">email</span>  <span class="kw">admin@example.com</span>
+    }
+}
+<span class="kw">listener</span> {
+    <span class="kw">bind</span> <span class="str">"[::]:443"</span>
+    <span class="kw">tls</span> <span class="prop">cert=</span><span class="str">"main"</span>
+}
+<span class="kw">listener</span> {
+    <span class="kw">bind</span> <span class="str">"[::]:8443"</span>
+    <span class="kw">tls</span> <span class="prop">cert=</span><span class="str">"main"</span>
+}
+
+<span class="cm">// File-based shared cert</span>
+<span class="kw">certificate</span> <span class="str">"internal"</span> {
+    <span class="kw">files</span> <span class="prop">cert=</span><span class="str">"/etc/aloha/internal.crt"</span> <span class="prop">key=</span><span class="str">"/etc/aloha/internal.key"</span>
+}</code></pre>
+      <div class="callout info">
+        <span class="callout-label">When to use</span>
+        <span>
+          Use a named <code>certificate</code> whenever two or more
+          listeners would otherwise need identical
+          <code>tls-acme</code> or <code>tls-file</code> blocks.  Aloha
+          rejects such configurations at parse time because the
+          duplicate ACME managers would race on the same on-disk
+          directory.
+        </span>
+      </div>
     </section>
 
     <hr class="divider">
@@ -2365,6 +2462,12 @@
         </table>
       </div>
       <p>
+        <code>upstream</code> may also be written as the handler&rsquo;s
+        positional argument: <code>proxy "http://&hellip;"</code>.
+        <code>strip-prefix</code> may be written as a property:
+        <code>proxy strip-prefix=#true</code>.
+      </p>
+      <p>
         The proxy unconditionally appends to
         <code>X-Forwarded-For</code>, sets <code>X-Real-IP</code>,
         and overrides <code>Host</code> with the upstream authority.
@@ -2429,6 +2532,12 @@
           </tbody>
         </table>
       </div>
+      <p>
+        <code>to</code> may also be written as the handler&rsquo;s
+        positional argument: <code>redirect "/new/"</code>.
+        <code>code</code> may be written as a property:
+        <code>redirect "/new/" code=301</code>.
+      </p>
 
       <!-- Header injection -->
       <h3 id="header-injection">Header injection</h3>
@@ -2607,6 +2716,12 @@
           </tbody>
         </table>
       </div>
+      <p>
+        <code>root</code> may also be written as the handler&rsquo;s
+        positional argument: <code>static "/var/www/assets"</code>.
+        <code>strip-prefix</code> may be written as a property:
+        <code>static "/var/www/assets" strip-prefix=#true</code>.
+      </p>
 
       <!-- status -->
       <h3 id="handler-status">Handler: <code>status</code></h3>

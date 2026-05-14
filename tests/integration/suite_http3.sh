@@ -50,13 +50,21 @@ listener {
 }
 vhost localhost {
     location "/open" {
-        static { root "/tmp/www"; index-file index.html; }
+        static {
+            root "/tmp/www"
+            index-file index.html
+            strip-prefix #true
+        }
         response-headers {
             set "X-Aloha-Middleware" "h3-saw-this"
         }
     }
     location "/locked" {
-        static { root "/tmp/www"; index-file index.html; }
+        static {
+            root "/tmp/www"
+            index-file index.html
+            strip-prefix #true
+        }
         policy {
             allow address "10.99.99.0/24"
             deny code=403

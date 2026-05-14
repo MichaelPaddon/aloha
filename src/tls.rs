@@ -35,6 +35,7 @@ pub struct CertPair {
 /// seeded once and never updated.  For ACME the renewal loop publishes
 /// the new pair before swapping the TLS acceptor, so any QUIC listener
 /// subscribed to the same source rolls over the cert atomically.
+#[derive(Clone)]
 pub struct CertSource {
     pub tls: Arc<ArcSwap<TlsAcceptor>>,
     pub cert_rx: watch::Receiver<Arc<CertPair>>,
@@ -157,6 +158,11 @@ pub fn build_acceptor_with_pair_alpn(
         }
         TlsConfig::Acme { .. } => {
             unreachable!("Acme TLS handled by AcmeManager")
+        }
+        TlsConfig::Ref(_) => {
+            // Refs are resolved by the cert registry in main.rs before
+            // any acceptor construction.
+            unreachable!("TlsConfig::Ref resolved before build_acceptor")
         }
     }
 }

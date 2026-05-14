@@ -55,6 +55,9 @@ pub struct AcmeConfig {
     pub state_dir: PathBuf,
     // How long to wait between retries after a failed acquisition.
     pub retry_interval: Duration,
+    // Unix file mode for key.pem. Default 0o600; set to 0o640 to allow
+    // group-readable certs. acme_account.json is always 0o600.
+    pub cert_key_mode: u32,
 }
 
 impl AcmeConfig {
@@ -364,6 +367,7 @@ impl AcmeManager {
             &self.cert_dir(),
             cert_pem.as_bytes(),
             key_pem.as_bytes(),
+            self.config.cert_key_mode,
         )
         .await?;
 
@@ -394,6 +398,7 @@ async fn atomic_write_cert_dir(
     dir: &std::path::Path,
     cert_pem: &[u8],
     key_pem: &[u8],
+    mode: u32,
 ) -> anyhow::Result<()> {
     let parent = dir.parent().context("cert dir has no parent")?;
     let name = dir
@@ -411,7 +416,7 @@ async fn atomic_write_cert_dir(
     tokio::fs::write(staging.join("cert.pem"), cert_pem)
         .await
         .context("writing cert.pem to staging")?;
-    tokio::fs::write(staging.join("key.pem"), key_pem)
+    write_private_file(&staging.join("key.pem"), key_pem, mode)
         .await
         .context("writing key.pem to staging")?;
 
@@ -525,6 +530,18 @@ impl RealProvisioner {
             let json = tokio::fs::read_to_string(&self.account_path)
                 .await
                 .context("reading ACME account credentials")?;
+            // Fix permissions for files written by older aloha versions
+            // that did not set an explicit mode (best-effort on upgrade).
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                tokio::fs::set_permissions(
+                    &self.account_path,
+                    std::fs::Permissions::from_mode(0o600),
+                )
+                .await
+                .ok();
+            }
             let creds: AccountCredentials = serde_json::from_str(&json)
                 .context("deserializing ACME credentials")?;
             return Account::builder()
@@ -558,10 +575,12 @@ impl RealProvisioner {
                 .await
                 .context("creating state directory")?;
         }
-        tokio::fs::write(
+        write_private_file(
             &self.account_path,
             serde_json::to_string_pretty(&creds)
-                .context("serializing ACME credentials")?,
+                .context("serializing ACME credentials")?
+                .as_bytes(),
+            0o600,
         )
         .await
         .context("saving ACME credentials")?;
@@ -643,6 +662,37 @@ fn warn_if_not_yet_valid(pem: &[u8]) {
     }
 }
 
+// -- Private file writer -------------------------------------------
+
+async fn write_private_file(
+    path: &std::path::Path,
+    data: &[u8],
+    mode: u32,
+) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut f = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(mode)
+            .open(path)
+            .await?;
+        f.write_all(data).await?;
+        // set_permissions ensures the mode is applied even if the file
+        // already existed (O_CREAT only sets mode for newly-created files).
+        f.set_permissions(std::fs::Permissions::from_mode(mode)).await
+    }
+
+    #[cfg(not(unix))]
+    {
+        tokio::fs::write(path, data).await
+    }
+}
+
 // -- Tests ---------------------------------------------------------
 
 #[cfg(test)]
@@ -705,6 +755,7 @@ mod tests {
                 server: None,
                 state_dir: dir.to_owned(),
                 retry_interval: Duration::from_secs(3600),
+                cert_key_mode: 0o600,
             },
             Arc::new(Mutex::new(HashMap::new())),
             TlsOptions::default(),
@@ -724,6 +775,7 @@ mod tests {
             server: None,
             state_dir: PathBuf::from("/tmp"),
             retry_interval: Duration::from_secs(3600),
+            cert_key_mode: 0o600,
         };
         assert_eq!(cfg.cert_name(), "example.com");
     }
@@ -738,6 +790,7 @@ mod tests {
             server: None,
             state_dir: PathBuf::from("/tmp"),
             retry_interval: Duration::from_secs(3600),
+            cert_key_mode: 0o600,
         };
         assert_eq!(cfg.cert_name(), "my-cert");
     }
@@ -752,6 +805,7 @@ mod tests {
             server: None,
             state_dir: PathBuf::from("/tmp"),
             retry_interval: Duration::from_secs(3600),
+            cert_key_mode: 0o600,
         };
         assert_eq!(cfg.acme_server_url(), LetsEncrypt::Production.url());
     }
@@ -766,6 +820,7 @@ mod tests {
             server: None,
             state_dir: PathBuf::from("/tmp"),
             retry_interval: Duration::from_secs(3600),
+            cert_key_mode: 0o600,
         };
         assert_eq!(cfg.acme_server_url(), LetsEncrypt::Staging.url());
     }
@@ -780,6 +835,7 @@ mod tests {
             server: Some("https://acme.example.com/dir".into()),
             state_dir: PathBuf::from("/tmp"),
             retry_interval: Duration::from_secs(3600),
+            cert_key_mode: 0o600,
         };
         assert_eq!(cfg.acme_server_url(), "https://acme.example.com/dir");
     }
@@ -877,6 +933,47 @@ mod tests {
         let cert_dir = dir.path().join("certs").join("example.com");
         assert!(cert_dir.join("cert.pem").exists());
         assert!(cert_dir.join("key.pem").exists());
+
+        // Private key must not be world-readable
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(cert_dir.join("key.pem"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "key.pem mode should be 0o600");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ensure_valid_cert_respects_cert_key_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        install_provider();
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = AcmeManager::with_provisioner(
+            AcmeConfig {
+                domains: vec!["example.com".into()],
+                name: None,
+                email: None,
+                staging: false,
+                server: None,
+                state_dir: dir.path().to_owned(),
+                retry_interval: Duration::from_secs(3600),
+                cert_key_mode: 0o640,
+            },
+            Arc::new(Mutex::new(HashMap::new())),
+            TlsOptions::default(),
+            Arc::new(MockProvisioner::new()),
+        );
+        mgr.ensure_valid_cert().await.unwrap();
+        let cert_dir = dir.path().join("certs").join("example.com");
+        let mode = std::fs::metadata(cert_dir.join("key.pem"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o640, "key.pem mode should be 0o640");
     }
 
     #[tokio::test]
@@ -949,7 +1046,7 @@ mod tests {
         let base = tempfile::tempdir().unwrap();
         let cert_dir = base.path().join("certs").join("example.com");
 
-        atomic_write_cert_dir(&cert_dir, b"CERT", b"KEY")
+        atomic_write_cert_dir(&cert_dir, b"CERT", b"KEY", 0o600)
             .await
             .unwrap();
 
@@ -963,12 +1060,12 @@ mod tests {
         let cert_dir = base.path().join("certs").join("example.com");
 
         // First write
-        atomic_write_cert_dir(&cert_dir, b"CERT1", b"KEY1")
+        atomic_write_cert_dir(&cert_dir, b"CERT1", b"KEY1", 0o600)
             .await
             .unwrap();
 
         // Second write -- should replace atomically
-        atomic_write_cert_dir(&cert_dir, b"CERT2", b"KEY2")
+        atomic_write_cert_dir(&cert_dir, b"CERT2", b"KEY2", 0o600)
             .await
             .unwrap();
 
@@ -987,7 +1084,7 @@ mod tests {
         std::fs::create_dir_all(&staging).unwrap();
         std::fs::write(staging.join("stale"), b"x").unwrap();
 
-        atomic_write_cert_dir(&cert_dir, b"CERT", b"KEY")
+        atomic_write_cert_dir(&cert_dir, b"CERT", b"KEY", 0o600)
             .await
             .unwrap();
 
@@ -1034,6 +1131,7 @@ mod tests {
                 server: None,
                 state_dir: dir.path().to_owned(),
                 retry_interval: Duration::from_secs(3600),
+                cert_key_mode: 0o600,
             },
             challenges.clone(),
             TlsOptions::default(),

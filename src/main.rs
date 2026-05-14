@@ -29,7 +29,9 @@ use acme::{AcmeConfig, AcmeManager, ChallengeMap};
 use anyhow::Context;
 use arc_swap::ArcSwap;
 use clap::Parser;
-use config::{ErrorPageDef, StreamMode, TlsConfig, TlsListenerConfig};
+use config::{
+    CertificateDef, ErrorPageDef, StreamMode, TlsConfig, TlsListenerConfig,
+};
 use error::{ErrorPageEntry, ErrorPages};
 use listener::{AppState, BoundSocket};
 use router::Router;
@@ -39,6 +41,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
+
+/// Registry of named certificate sources, populated before any TLS
+/// listener spawns.  Each entry's `tls::CertSource` is shared (via
+/// `Clone`) among all listeners that reference the cert by name; for
+/// ACME, renewal swaps the inner `TlsAcceptor` and publishes a fresh
+/// `CertPair` on the watch channel, so both TCP and QUIC listeners
+/// observe the rotation atomically.
+type CertRegistry = HashMap<String, tls::CertSource>;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -272,6 +282,24 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Build the named-certificate registry before any TLS listener
+    // spawns: one AcmeManager and one acceptor per top-level
+    // `certificate` definition, regardless of how many listeners refer
+    // to it.  This is the single change that turns "each listener
+    // races on its own ACME directory" into "one shared renewal loop".
+    let cert_key_mode = config.server.cert_key_mode.unwrap_or(0o600);
+
+    let cert_registry = build_cert_registry(
+        &config.certificates,
+        &tls_defaults,
+        state_dir.as_ref(),
+        &challenges,
+        &cert_state,
+        cert_key_mode,
+    )
+    .await
+    .context("building certificate registry")?;
+
     // Phase 2a: plain stream listeners (no TLS, no ACME dependency).
     for (cfg, socket) in plain_stream {
         let stream_mode = cfg.stream.as_ref().unwrap();
@@ -327,6 +355,8 @@ async fn main() -> anyhow::Result<()> {
             state_dir.as_ref(),
             &challenges,
             &cert_state,
+            &cert_registry,
+            cert_key_mode,
             cfg.alpn.as_deref(),
         )
         .await?;
@@ -415,6 +445,8 @@ async fn main() -> anyhow::Result<()> {
             state_dir.as_ref(),
             &challenges,
             &cert_state,
+            &cert_registry,
+            cert_key_mode,
             // Listener.alpn overrides the default ["h3"] when set so a
             // QUIC listener can advertise additional draft ALPNs (e.g.
             // "h3-29") alongside the standardised one.
@@ -451,6 +483,8 @@ async fn main() -> anyhow::Result<()> {
             state_dir.as_ref(),
             &challenges,
             &cert_state,
+            &cert_registry,
+            cert_key_mode,
             cfg.alpn.as_deref(),
         )
         .await?;
@@ -568,18 +602,58 @@ fn build_authenticator(
 /// cert+key pair so QUIC listeners can rebuild their own
 /// `quinn::ServerConfig` on every renewal.
 ///
-/// ACME mode falls back to a self-signed cert if the initial issuance
-/// fails; renewal continues in the background regardless.  Static cert
-/// paths seed the watch channel once and never update it.
+/// - `TlsConfig::Ref` is resolved by cloning the shared entry from
+///   `registry`, so every listener that names the same cert observes
+///   the same renewals on both TCP and QUIC paths.
+/// - Inline ACME builds its own AcmeManager and spawns a per-listener
+///   renewal loop (deduplication of inline blocks across listeners is
+///   rejected at validation time).  Falls back to self-signed on
+///   initial issuance failure and keeps retrying in the background.
+/// - Inline files/self-signed seed the watch channel once and never
+///   update it.
 async fn build_cert_source(
     tls_cfg: &TlsListenerConfig,
     tls_defaults: &config::TlsOptions,
     state_dir: Option<&PathBuf>,
     challenges: &ChallengeMap,
     cert_state: &cert_state::SharedCertState,
+    registry: &CertRegistry,
+    cert_key_mode: u32,
     alpn: Option<&[String]>,
 ) -> anyhow::Result<tls::CertSource> {
-    match &tls_cfg.cert {
+    if let TlsConfig::Ref(name) = &tls_cfg.cert {
+        return registry
+            .get(name)
+            .cloned()
+            .with_context(|| format!("unknown certificate '{name}'"));
+    }
+    build_cert_source_from_source(
+        &tls_cfg.cert,
+        &tls_cfg.options,
+        tls_defaults,
+        state_dir,
+        challenges,
+        cert_state,
+        cert_key_mode,
+        alpn,
+    )
+    .await
+}
+
+/// Build a `CertSource` for a single concrete certificate source
+/// (`Files`, `SelfSigned`, or `Acme`).  Shared by the named-cert
+/// registry and the inline path in `build_cert_source`.
+async fn build_cert_source_from_source(
+    cert: &TlsConfig,
+    options: &config::TlsOptions,
+    tls_defaults: &config::TlsOptions,
+    state_dir: Option<&PathBuf>,
+    challenges: &ChallengeMap,
+    cert_state: &cert_state::SharedCertState,
+    cert_key_mode: u32,
+    alpn: Option<&[String]>,
+) -> anyhow::Result<tls::CertSource> {
+    match cert {
         TlsConfig::Acme {
             domains,
             name,
@@ -590,7 +664,7 @@ async fn build_cert_source(
         } => {
             let sd = state_dir
                 .expect("state_dir required for ACME (validated earlier)");
-            let resolved = tls_cfg.options.resolve(tls_defaults);
+            let resolved = options.resolve(tls_defaults);
             let mgr = Arc::new(
                 AcmeManager::new(
                     AcmeConfig {
@@ -603,6 +677,7 @@ async fn build_cert_source(
                         retry_interval: Duration::from_secs(
                             *retry_interval_secs,
                         ),
+                        cert_key_mode,
                     },
                     challenges.clone(),
                     resolved,
@@ -635,7 +710,7 @@ async fn build_cert_source(
                         let (acc, pair) = tls::build_acceptor_with_pair_alpn(
                             &TlsListenerConfig {
                                 cert: TlsConfig::SelfSigned,
-                                options: tls_cfg.options.clone(),
+                                options: options.clone(),
                             },
                             tls_defaults,
                             alpn,
@@ -656,9 +731,20 @@ async fn build_cert_source(
             });
             Ok(tls::CertSource { tls: acc, cert_rx })
         }
-        _ => {
-            let (initial, pair) =
-                tls::build_acceptor_with_pair_alpn(tls_cfg, tls_defaults, alpn)?;
+        TlsConfig::Files { .. } | TlsConfig::SelfSigned => {
+            // Static cert sources: build once, seed the watch channel
+            // with the resulting pair, and never update it.  Listeners
+            // (TCP and QUIC) subscribing to this CertSource will see
+            // the seed value and no further updates.
+            let inline = TlsListenerConfig {
+                cert: cert.clone(),
+                options: options.clone(),
+            };
+            let (initial, pair) = tls::build_acceptor_with_pair_alpn(
+                &inline,
+                tls_defaults,
+                alpn,
+            )?;
             let (_, cert_rx) =
                 tokio::sync::watch::channel(Arc::new(pair));
             Ok(tls::CertSource {
@@ -666,7 +752,52 @@ async fn build_cert_source(
                 cert_rx,
             })
         }
+        TlsConfig::Ref(_) => {
+            unreachable!("Ref resolved by caller before this point")
+        }
     }
+}
+
+/// Build the registry of named certificate acceptors.  Each top-level
+/// `certificate` definition yields one entry, regardless of how many
+/// listeners later reference it.
+///
+/// Per-cert TLS options (cipher/version) fall back to the global
+/// `tls-defaults` block here.  Listener-level overrides apply only to
+/// the inline path; named certs intentionally do not carry their own
+/// options because the same cert may be terminated by listeners with
+/// differing TLS profiles.
+async fn build_cert_registry(
+    defs: &[CertificateDef],
+    tls_defaults: &config::TlsOptions,
+    state_dir: Option<&PathBuf>,
+    challenges: &ChallengeMap,
+    cert_state: &cert_state::SharedCertState,
+    cert_key_mode: u32,
+) -> anyhow::Result<CertRegistry> {
+    let mut registry = HashMap::new();
+    for def in defs {
+        // Named certs are listener-agnostic, so there is no listener
+        // ALPN to forward into a self-signed fallback.  The fallback
+        // path only fires when ACME issuance fails at startup; on
+        // success real cert delivery happens via the watch channel.
+        let cert_source = build_cert_source_from_source(
+            &def.source,
+            &Default::default(),
+            tls_defaults,
+            state_dir,
+            challenges,
+            cert_state,
+            cert_key_mode,
+            None,
+        )
+        .await
+        .with_context(|| {
+            format!("building certificate '{}'", def.name)
+        })?;
+        registry.insert(def.name.clone(), cert_source);
+    }
+    Ok(registry)
 }
 
 /// Build a rustls `ClientConfig` for upstream TLS connections in stream
