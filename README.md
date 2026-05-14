@@ -17,8 +17,8 @@ and access control — all from a single readable `aloha.kdl` file.
 - Automatic certificates via Let's Encrypt (ACME HTTP-01)
 - Self-signed for development; PEM file for managed certificates
 - HTTP/1.1 and HTTP/2 (ALPN negotiation) on all TLS listeners
-- HTTP/3 over QUIC (opt-in `http3` cargo feature; `udp:` bind prefix)
-  with automatic Alt-Svc advertisement on the matching TCP listener
+- HTTP/3 over QUIC (`udp:` bind prefix) with automatic Alt-Svc
+  advertisement on the matching TCP listener
 - Static file serving: streaming, Range requests, ETag caching
 
 **Routing & backends**
@@ -106,15 +106,10 @@ Requires `cargo-deb` and `cargo-generate-rpm`
 
 ## HTTP/3
 
-HTTP/3 over QUIC is available behind the `http3` cargo feature:
-
-```
-cargo build --release --features http3
-```
-
-A QUIC listener is just a `listener` block whose bind address carries
-the `udp:` prefix; it shares the same TLS configuration syntax (and
-the same ACME hot-swap plumbing) as a TCP listener:
+HTTP/3 over QUIC is built into every release.  A QUIC listener is
+just a `listener` block whose bind address carries the `udp:` prefix;
+it shares the same TLS configuration syntax (and the same ACME
+hot-swap plumbing) as a TCP listener:
 
 ```kdl
 listener { bind "[::]:443";     tls-acme { domain "example.com" } }
@@ -142,6 +137,89 @@ matching `ListenDatagram=` socket and aloha will adopt the inherited
 fd instead of binding a fresh one, preserving the UDP socket across
 restarts (in-flight QUIC connections still rely on the operator's
 seamless-upgrade strategy).
+
+Per-listener tuning is available via a `quic-transport { ... }` child
+block: `max-concurrent-bidi-streams`, `max-idle-timeout`,
+`keep-alive-interval`, `zero-rtt` (off by default — 0-RTT data is
+replayable, so only enable for fully idempotent endpoints), and
+`retry-tokens` (on by default — forces source-address validation
+via QUIC Retry packets to mitigate spoofed-source connection floods).
+
+### Reverse proxy upstreams
+
+For `proxy` blocks the default scheme `"auto"` uses hyper-util's
+HTTP client, which negotiates HTTP/2 or HTTP/1.1 via ALPN against
+`https://` upstreams.  When the upstream advertises HTTP/3 via an
+`Alt-Svc: h3=":<port>"; ma=N` response header, subsequent requests
+transparently upgrade to QUIC for the advertised `ma` window (capped
+at 24 h).  Set `scheme "h3"` to force HTTP/3 from the first request
+(only valid for `https://` upstreams).  Both request and response
+bodies stream end-to-end for all three protocols — no buffering.
+
+For internal upstreams with self-signed certs, opt into the relaxed
+verifier with a `tls { skip-verify }` child.  Cap the connect
+handshake with `connect-timeout N` (seconds).  Tune the connection
+pool with `pool-idle-timeout N` (applies to all three protocols)
+and `pool-max-idle N` (h1/h2 only — the h3 pool holds at most one
+connection per handler today).
+
+```kdl
+location "/api/" {
+    proxy "https://api.internal:443/" {
+        scheme "h3"                // optional; default is "auto"
+        pool-idle-timeout 60       // seconds; 0 disables idle reaping
+    }
+}
+```
+
+`pool-idle-timeout` applies to both pooling layers:
+
+- For h1/h2 it's forwarded to hyper-util's `pool_idle_timeout`.
+- For h3 it drives a per-handler reaper that closes the cached
+  QUIC connection after the configured idle period, so an idle
+  upstream doesn't keep state on either side.
+
+Default is 90 seconds (matches hyper-util's default).
+
+### HAProxy PROXY protocol over QUIC — out of scope
+
+Aloha supports HAProxy PROXY protocol v1/v2 on TCP listeners and
+TCP proxy upstreams (set `accept-proxy-protocol` or `proxy-protocol`
+on the relevant block).  PROXY protocol over QUIC remains an IETF
+draft and only HAProxy 2.9+ ships an implementation today — nginx,
+Caddy, Envoy and Traefik don't.  Aloha will revisit once the draft
+stabilises and there's interop pressure.
+
+For setups that need source-IP preservation on HTTP/3 traffic, the
+recommended topology is to terminate QUIC at HAProxy and forward
+the decrypted HTTP/1.1 or HTTP/2 stream to aloha with PROXY
+protocol v2 over TCP.
+
+### Per-vhost ALPN
+
+A vhost can override the listener's advertised ALPN list with its
+own `alpn` child node.  aloha uses the ClientHello SNI to pick the
+matching vhost's `rustls::ServerConfig` before completing the TLS
+handshake, so a connection to vhost A and a connection to vhost B
+on the same listener can negotiate different protocols (for example
+disable h2 on one host without losing it for the rest).
+
+```kdl
+listener {
+    bind "[::]:443"
+    tls-acme { domain "example.com"; domain "legacy.example.com" }
+}
+vhost "example.com" { /* default ALPN: h2 + http/1.1 */ }
+vhost "legacy.example.com" {
+    alpn "http/1.1"           // force HTTP/1.1 for legacy clients
+    location "/" { static { root "/srv/legacy"; } }
+}
+```
+
+Only literal vhost names participate in per-SNI selection; regex
+vhosts fall back to the listener's default ALPN.  QUIC listeners
+also fall back to the listener default — quinn doesn't expose the
+ClientHello before handshake, so per-vhost ALPN is TCP-only.
 
 ## Contributing
 

@@ -2338,6 +2338,29 @@
                   Unix socket backends receive
                   <code>Host:&nbsp;localhost</code>.</td>
             </tr>
+            <tr id="handler-proxy-scheme">
+              <td>scheme</td>
+              <td><code>auto</code> | <code>h3</code></td>
+              <td><code>auto</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Wire protocol used to reach the upstream.
+                  <code>auto</code> (the default) lets hyper-util
+                  negotiate HTTP/2 or HTTP/1.1 via ALPN against
+                  <code>https://</code> upstreams.
+                  <code>h3</code> forces HTTP/3 over QUIC; the
+                  upstream URL must be <code>https://</code> since
+                  QUIC mandates TLS.</td>
+            </tr>
+            <tr id="handler-proxy-pool-idle-timeout">
+              <td>pool-idle-timeout</td>
+              <td>integer (seconds)</td>
+              <td><code>90</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  How long a cached upstream connection sits unused
+                  before it is closed. Applied to hyper-util's pool
+                  for h1/h2 and to aloha's per-handler reaper for
+                  h3. <code>0</code> disables idle reaping.</td>
+            </tr>
           </tbody>
         </table>
       </div>
@@ -2347,6 +2370,16 @@
         and overrides <code>Host</code> with the upstream authority.
         Hop-by-hop headers are stripped from both the forwarded
         request and the backend response.
+      </p>
+      <p>
+        <strong>HAProxy PROXY protocol over QUIC</strong> is not
+        supported. The wire format is an IETF draft and only
+        HAProxy 2.9+ ships an implementation today &mdash; other
+        major proxies (nginx, Caddy, Envoy, Traefik) don&rsquo;t.
+        For setups that need source-IP preservation on HTTP/3
+        traffic, terminate QUIC at HAProxy and forward decrypted
+        HTTP/1.1 or HTTP/2 to aloha with PROXY protocol v2 over
+        TCP.
       </p>
 
       <!-- redirect -->

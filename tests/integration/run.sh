@@ -50,6 +50,12 @@ source "$TESTS_DIR/suite_jwt.sh"
 source "$TESTS_DIR/suite_subrequest_auth.sh"
 # shellcheck source=suite_auth_request.sh
 source "$TESTS_DIR/suite_auth_request.sh"
+# shellcheck source=suite_http3.sh
+source "$TESTS_DIR/suite_http3.sh"
+# shellcheck source=suite_proxy_h3.sh
+source "$TESTS_DIR/suite_proxy_h3.sh"
+# shellcheck source=suite_proxy_trust.sh
+source "$TESTS_DIR/suite_proxy_trust.sh"
 
 # --- main -----------------------------------------------------------
 
@@ -85,6 +91,14 @@ suite_proxy_strip_prefix
 suite_jwt
 suite_subrequest_auth
 suite_auth_request
+suite_http3_basic
+suite_http3_alt_svc
+suite_http3_middleware
+suite_proxy_h3_forced
+suite_proxy_h3_autoupgrade
+suite_proxy_h3_altsvc_expires
+suite_proxy_skip_verify
+suite_proxy_connect_timeout
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

@@ -40,6 +40,82 @@ pub struct CertSource {
     pub cert_rx: watch::Receiver<Arc<CertPair>>,
 }
 
+/// SNI-keyed map of `rustls::ServerConfig`s for one TCP/TLS listener.
+/// `default` carries the listener-level ALPN; `by_sni` only contains
+/// entries for vhosts that override ALPN.  Used by `run_tls`'s
+/// `LazyConfigAcceptor` flow to pick the right ServerConfig once the
+/// ClientHello's `server_name` is known.
+pub struct VhostAlpnMap {
+    pub default: Arc<rustls::ServerConfig>,
+    pub by_sni: std::collections::HashMap<String, Arc<rustls::ServerConfig>>,
+}
+
+impl VhostAlpnMap {
+    /// Look up the ServerConfig for a given SNI.  Falls back to the
+    /// listener default when the SNI is missing or unmatched (e.g.
+    /// regex vhosts, or a client that didn't send SNI).
+    pub fn pick(&self, sni: Option<&str>) -> Arc<rustls::ServerConfig> {
+        if let Some(name) = sni
+            && let Some(cfg) = self.by_sni.get(name)
+        {
+            return cfg.clone();
+        }
+        self.default.clone()
+    }
+
+    /// Build a `VhostAlpnMap` from a cert pair, the listener's default
+    /// ALPN, and a list of (literal SNI name, ALPN override) entries.
+    /// Each entry produces one rustls ServerConfig that shares the
+    /// cert/key but advertises the per-vhost ALPN.
+    pub fn build(
+        pair: &CertPair,
+        opts: &TlsOptions,
+        listener_alpn: Option<&[String]>,
+        vhost_overrides: &[(String, Vec<String>)],
+    ) -> anyhow::Result<Self> {
+        let default = Arc::new(make_rustls_server_config(
+            pair,
+            opts,
+            listener_alpn,
+        )?);
+        let mut by_sni = std::collections::HashMap::new();
+        for (sni, alpn) in vhost_overrides {
+            let cfg = Arc::new(make_rustls_server_config(
+                pair,
+                opts,
+                Some(alpn),
+            )?);
+            by_sni.insert(sni.clone(), cfg);
+        }
+        Ok(VhostAlpnMap { default, by_sni })
+    }
+}
+
+/// Build a single `rustls::ServerConfig` with the given ALPN list.
+/// Shared by `VhostAlpnMap::build` and the existing `make_acceptor`
+/// path so cipher / protocol-version handling stays in one place.
+pub fn make_rustls_server_config(
+    pair: &CertPair,
+    opts: &TlsOptions,
+    alpn: Option<&[String]>,
+) -> anyhow::Result<rustls::ServerConfig> {
+    let mut provider = rustls::crypto::aws_lc_rs::default_provider();
+    if !opts.ciphers.is_empty() {
+        provider.cipher_suites = resolve_ciphers(&opts.ciphers)?;
+    }
+    let versions = protocol_versions(opts.min_version);
+    let mut config = ServerConfig::builder_with_provider(Arc::new(provider))
+        .with_protocol_versions(&versions)
+        .context("invalid TLS protocol version configuration")?
+        .with_no_client_auth()
+        .with_single_cert(pair.chain.clone(), clone_key(&pair.key))
+        .context("building TLS ServerConfig")?;
+    config.alpn_protocols = alpn
+        .map(|list| list.iter().map(|s| s.as_bytes().to_vec()).collect())
+        .unwrap_or_else(|| vec![b"h2".to_vec(), b"http/1.1".to_vec()]);
+    Ok(config)
+}
+
 // Build a TlsAcceptor for the given listener config.
 // `defaults` supplies global options; per-listener options win where set.
 // ALPN is advertised for both h2 and http/1.1 so that
@@ -50,16 +126,22 @@ pub struct CertSource {
 /// Only valid for the `Files` and `SelfSigned` variants; the `Acme`
 /// variant is acquired via `AcmeManager` and panics here, matching
 /// the long-standing invariant on `build_acceptor`.
-pub fn build_acceptor_with_pair(
+/// `build_acceptor_with_pair_alpn` accepts an ALPN override so the
+/// resulting acceptor advertises a per-listener protocol set; pass
+/// `None` for the default `["h2", "http/1.1"]` set.
+pub fn build_acceptor_with_pair_alpn(
     tls: &TlsListenerConfig,
     defaults: &TlsOptions,
+    alpn: Option<&[String]>,
 ) -> anyhow::Result<(TlsAcceptor, CertPair)> {
     let opts = tls.options.resolve(defaults);
     match &tls.cert {
         TlsConfig::Files { cert, key } => {
             let (chain, key) =
                 load_cert_and_key(Path::new(cert), Path::new(key))?;
-            let acc = make_acceptor_from_refs(&chain, &key, &opts)?;
+            let acc = make_acceptor_from_refs_with_alpn(
+                &chain, &key, &opts, alpn,
+            )?;
             Ok((acc, CertPair { chain, key }))
         }
         TlsConfig::SelfSigned => {
@@ -68,8 +150,9 @@ pub fn build_acceptor_with_pair(
                  not suitable for production"
             );
             let pair = build_self_signed_pair()?;
-            let acc =
-                make_acceptor_from_refs(&pair.chain, &pair.key, &opts)?;
+            let acc = make_acceptor_from_refs_with_alpn(
+                &pair.chain, &pair.key, &opts, alpn,
+            )?;
             Ok((acc, pair))
         }
         TlsConfig::Acme { .. } => {
@@ -104,7 +187,19 @@ pub fn make_acceptor_from_refs(
     key: &PrivateKeyDer<'static>,
     opts: &TlsOptions,
 ) -> anyhow::Result<TlsAcceptor> {
-    make_acceptor(chain.to_vec(), clone_key(key), opts)
+    make_acceptor_with_alpn(chain.to_vec(), clone_key(key), opts, None)
+}
+
+/// `make_acceptor_from_refs` plus an explicit ALPN override.  Used by
+/// the cert-source plumbing in main.rs to pick up the listener's
+/// `alpn` config when (re-)building the TLS acceptor.
+pub fn make_acceptor_from_refs_with_alpn(
+    chain: &[CertificateDer<'static>],
+    key: &PrivateKeyDer<'static>,
+    opts: &TlsOptions,
+    alpn: Option<&[String]>,
+) -> anyhow::Result<TlsAcceptor> {
+    make_acceptor_with_alpn(chain.to_vec(), clone_key(key), opts, alpn)
 }
 
 /// Clone a `PrivateKeyDer` by round-tripping its raw DER bytes, working
@@ -140,6 +235,20 @@ pub fn make_acceptor(
     key: PrivateKeyDer<'static>,
     opts: &TlsOptions,
 ) -> anyhow::Result<TlsAcceptor> {
+    make_acceptor_with_alpn(chain, key, opts, None)
+}
+
+/// Like `make_acceptor`, but accepts an optional ALPN override.  When
+/// `alpn` is `None` the listener advertises the standard TCP ALPN
+/// set (`["h2", "http/1.1"]`); when `Some(list)` is provided those
+/// protocols are used verbatim.  Empty lists must be rejected upstream
+/// at parse time.
+pub fn make_acceptor_with_alpn(
+    chain: Vec<CertificateDer<'static>>,
+    key: PrivateKeyDer<'static>,
+    opts: &TlsOptions,
+    alpn: Option<&[String]>,
+) -> anyhow::Result<TlsAcceptor> {
     // Build a provider, optionally restricting the cipher suite list.
     let mut provider = rustls::crypto::aws_lc_rs::default_provider();
     if !opts.ciphers.is_empty() {
@@ -154,7 +263,9 @@ pub fn make_acceptor(
         .with_single_cert(chain, key)
         .context("building TLS ServerConfig")?;
 
-    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    config.alpn_protocols = alpn
+        .map(|list| list.iter().map(|s| s.as_bytes().to_vec()).collect())
+        .unwrap_or_else(|| vec![b"h2".to_vec(), b"http/1.1".to_vec()]);
     Ok(TlsAcceptor::from(Arc::new(config)))
 }
 
@@ -163,14 +274,11 @@ pub fn make_acceptor(
 /// clients negotiate HTTP/3 against this endpoint; cipher and minimum
 /// protocol-version options are honoured identically to the TCP path
 /// to keep operator expectations consistent.
-///
-/// Only available when the `http3` cargo feature is enabled -- the
-/// `quinn` and `h3` crates are pulled in conditionally to keep the
-/// default build slim.
-#[cfg(feature = "http3")]
 pub fn build_quic_server_config(
     pair: &CertPair,
     opts: &TlsOptions,
+    alpn: Option<&[String]>,
+    transport: Option<&crate::config::QuicTransport>,
 ) -> anyhow::Result<quinn::ServerConfig> {
     let mut provider = rustls::crypto::aws_lc_rs::default_provider();
     if !opts.ciphers.is_empty() {
@@ -183,12 +291,56 @@ pub fn build_quic_server_config(
         .with_no_client_auth()
         .with_single_cert(pair.chain.clone(), clone_key(&pair.key))
         .context("building rustls ServerConfig for QUIC")?;
-    // QUIC advertises only h3; HTTP/1.1 and h2 are TCP-only ALPNs and
-    // would only confuse a client that ended up here.
-    rustls_cfg.alpn_protocols = vec![b"h3".to_vec()];
+    // QUIC defaults to advertising only `h3`; HTTP/1.1 and h2 are
+    // TCP-only ALPNs.  An explicit override on the listener (e.g.
+    // `alpn "h3" "h3-29"` for legacy clients) wins when provided.
+    rustls_cfg.alpn_protocols = alpn
+        .map(|list| list.iter().map(|s| s.as_bytes().to_vec()).collect())
+        .unwrap_or_else(|| vec![b"h3".to_vec()]);
+    // 0-RTT (early data): opt-in via quic-transport.zero-rtt.  Replays
+    // are possible at the application layer, so this is unsafe for any
+    // non-idempotent endpoint.  Operators take responsibility when they
+    // set the flag.
+    if let Some(t) = transport
+        && let Some(size) = t.zero_rtt_max_data
+    {
+        rustls_cfg.max_early_data_size = size;
+    }
     let quic = quinn::crypto::rustls::QuicServerConfig::try_from(rustls_cfg)
         .context("wrapping rustls config as QuicServerConfig")?;
-    Ok(quinn::ServerConfig::with_crypto(Arc::new(quic)))
+    let mut server = quinn::ServerConfig::with_crypto(Arc::new(quic));
+
+    // Apply the QUIC transport knobs.  Each is optional; unset fields
+    // leave quinn's defaults in place.
+    if let Some(t) = transport {
+        let mut tc = quinn::TransportConfig::default();
+        if let Some(n) = t.max_concurrent_bidi_streams {
+            tc.max_concurrent_bidi_streams(quinn::VarInt::from_u64(n)
+                .context("max-concurrent-bidi-streams out of range")?);
+        }
+        if let Some(secs) = t.max_idle_timeout_secs {
+            // 0 disables; quinn rejects > 2^62 so clamp via VarInt.
+            let dur = std::time::Duration::from_secs(secs);
+            let it: quinn::IdleTimeout = dur
+                .try_into()
+                .context("max-idle-timeout out of range")?;
+            tc.max_idle_timeout(Some(it));
+        }
+        if let Some(secs) = t.keep_alive_interval_secs {
+            tc.keep_alive_interval(if secs == 0 {
+                None
+            } else {
+                Some(std::time::Duration::from_secs(secs))
+            });
+        }
+        server.transport_config(Arc::new(tc));
+        if let Some(secs) = t.retry_token_lifetime_secs {
+            server.retry_token_lifetime(std::time::Duration::from_secs(
+                secs,
+            ));
+        }
+    }
+    Ok(server)
 }
 
 // Map min_version to the set of enabled rustls protocol versions.
@@ -363,5 +515,44 @@ mod tests {
         let result =
             make_acceptor_from_refs(&pair.chain, &pair.key, &opts);
         assert!(result.is_ok());
+    }
+
+    // -- VhostAlpnMap ---------------------------------------------
+
+    /// A vhost override must produce a `ServerConfig` whose
+    /// `alpn_protocols` matches the override list, while the default
+    /// entry advertises the listener-level ALPN (or rustls defaults
+    /// when none).
+    #[tokio::test]
+    async fn vhost_alpn_map_picks_per_sni() {
+        install_provider();
+        let pair = build_self_signed_pair().unwrap();
+        let opts = TlsOptions::default();
+        let overrides = vec![(
+            "alpha.example.com".to_string(),
+            vec!["http/1.1".to_string()],
+        )];
+        let map = VhostAlpnMap::build(
+            &pair,
+            &opts,
+            Some(&["h2".to_string(), "http/1.1".to_string()]),
+            &overrides,
+        )
+        .unwrap();
+        // SNI hit -> per-vhost ALPN (h1 only).
+        let picked = map.pick(Some("alpha.example.com"));
+        assert_eq!(picked.alpn_protocols, vec![b"http/1.1".to_vec()]);
+        // SNI miss -> listener default (h2 + h1).
+        let fallback = map.pick(Some("beta.example.com"));
+        assert_eq!(
+            fallback.alpn_protocols,
+            vec![b"h2".to_vec(), b"http/1.1".to_vec()]
+        );
+        // No SNI -> listener default.
+        let no_sni = map.pick(None);
+        assert_eq!(
+            no_sni.alpn_protocols,
+            vec![b"h2".to_vec(), b"http/1.1".to_vec()]
+        );
     }
 }

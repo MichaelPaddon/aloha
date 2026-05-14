@@ -56,11 +56,29 @@ impl Handler {
                 upstream,
                 strip_prefix,
                 proxy_protocol,
-            } => Ok(Handler::Proxy(Box::new(proxy::ProxyHandler::new(
-                upstream,
-                *strip_prefix,
-                *proxy_protocol,
-            )?))),
+                scheme,
+                pool_idle_timeout_secs,
+                pool_max_idle,
+                upstream_tls,
+                connect_timeout_secs,
+            } => {
+                let skip_verify = upstream_tls
+                    .as_ref()
+                    .map(|t| t.skip_verify)
+                    .unwrap_or(false);
+                let mut h = proxy::ProxyHandler::new(
+                    upstream,
+                    *strip_prefix,
+                    *proxy_protocol,
+                    *scheme,
+                    *pool_idle_timeout_secs,
+                    *pool_max_idle,
+                    skip_verify,
+                    *connect_timeout_secs,
+                )?;
+                h.set_metrics(metrics.clone());
+                Ok(Handler::Proxy(Box::new(h)))
+            }
             HandlerConfig::Redirect { to, code } => Ok(Handler::Redirect {
                 to: Template::parse(to),
                 code: *code,

@@ -136,6 +136,8 @@ impl TestServer {
             max_connections: None,
             max_request_body: None,
             auto_alt_svc,
+            alpn: None,
+            quic_transport: None,
         };
         tokio::spawn(run_plain(
             cfg,

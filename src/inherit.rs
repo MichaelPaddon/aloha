@@ -60,6 +60,21 @@ impl InheritedSockets {
         self.unix.remove(path)
     }
 
+    /// Test-only constructor that lets a test pre-populate the UDP map
+    /// without going through the `/proc/self/fd` scan.  Used by the
+    /// socket-activation end-to-end test so we can simulate systemd
+    /// handing us a SOCK_DGRAM fd at startup.
+    #[cfg(test)]
+    pub(crate) fn from_udp_for_test(
+        entries: HashMap<SocketAddr, RawFd>,
+    ) -> Self {
+        InheritedSockets {
+            tcp: HashMap::new(),
+            udp: entries,
+            unix: HashMap::new(),
+        }
+    }
+
     /// Log a warning for each inherited socket that was never matched.
     /// These fds remain open, so bind() on the same address will fail
     /// with EADDRINUSE — alerting the operator to a config mismatch.

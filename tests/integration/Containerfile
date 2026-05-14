@@ -11,7 +11,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY target/release/aloha /usr/bin/aloha
+# h3get is built as `cargo build --release --example h3get`.  It is
+# required for the HTTP/3 integration suites because the packaged
+# `curl` doesn't include --http3 support on Debian.
+COPY target/release/examples/h3get /usr/bin/h3get
 COPY tests/integration/ /opt/tests/
-RUN chmod +x /opt/tests/run.sh /usr/bin/aloha
+RUN chmod +x /opt/tests/run.sh /usr/bin/aloha /usr/bin/h3get
 
 CMD ["/opt/tests/run.sh"]

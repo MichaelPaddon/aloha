@@ -327,14 +327,77 @@ async fn main() -> anyhow::Result<()> {
             state_dir.as_ref(),
             &challenges,
             &cert_state,
+            cfg.alpn.as_deref(),
         )
         .await?;
-        let acceptor = cert_source.tls;
+        // Build the SNI-keyed ALPN map from vhosts that override
+        // ALPN.  Regex vhosts are skipped -- SNI is always a literal
+        // string, so they can't participate in pre-handshake
+        // selection.  An empty `by_sni` map means every connection
+        // sees the listener default.
+        let opts = tls_cfg.options.resolve(&tls_defaults);
+        let listener_alpn = cfg.alpn.clone();
+        let vhost_overrides: Vec<(String, Vec<String>)> = config
+            .vhosts
+            .iter()
+            .filter(|v| !v.name.regex)
+            .filter_map(|v| {
+                v.alpn.as_ref().map(|a| (v.name.value.clone(), a.clone()))
+            })
+            // Aliases share their vhost's ALPN override.
+            .chain(config.vhosts.iter().flat_map(|v| {
+                let alpn = v.alpn.as_ref();
+                v.aliases.iter().filter(|a| !a.regex).filter_map(
+                    move |alias| {
+                        alpn.map(|a| (alias.value.clone(), a.clone()))
+                    },
+                )
+            }))
+            .collect();
+        let initial_map = tls::VhostAlpnMap::build(
+            &cert_source.cert_rx.borrow(),
+            &opts,
+            listener_alpn.as_deref(),
+            &vhost_overrides,
+        )?;
+        let alpn_swap = Arc::new(ArcSwap::new(Arc::new(initial_map)));
+        // Renewal watcher: rebuild the map on every cert rotation
+        // (TCP + QUIC share the same cert_rx so this triggers in
+        // lockstep with the QUIC cert hot-swap task in run_quic).
+        {
+            let alpn_swap = alpn_swap.clone();
+            let opts = opts.clone();
+            let listener_alpn = listener_alpn.clone();
+            let vhost_overrides = vhost_overrides.clone();
+            let mut cert_rx = cert_source.cert_rx.clone();
+            tokio::spawn(async move {
+                cert_rx.mark_changed();
+                while cert_rx.changed().await.is_ok() {
+                    let pair = cert_rx.borrow().clone();
+                    match tls::VhostAlpnMap::build(
+                        &pair,
+                        &opts,
+                        listener_alpn.as_deref(),
+                        &vhost_overrides,
+                    ) {
+                        Ok(new_map) => {
+                            alpn_swap.store(Arc::new(new_map));
+                            tracing::info!(
+                                "TLS vhost ALPN map rotated after cert renewal"
+                            );
+                        }
+                        Err(e) => tracing::error!(
+                            "failed to rebuild vhost ALPN map: {e:#}"
+                        ),
+                    }
+                }
+            });
+        }
         let rx = shutdown_rx.clone();
         let state = state.clone();
         handles.spawn(async move {
             if let Err(e) =
-                listener::run_tls(cfg, socket, state, acceptor, rx).await
+                listener::run_tls(cfg, socket, state, alpn_swap, rx).await
             {
                 tracing::error!("TLS listener error: {e:#}");
             }
@@ -352,11 +415,16 @@ async fn main() -> anyhow::Result<()> {
             state_dir.as_ref(),
             &challenges,
             &cert_state,
+            // Listener.alpn overrides the default ["h3"] when set so a
+            // QUIC listener can advertise additional draft ALPNs (e.g.
+            // "h3-29") alongside the standardised one.
+            cfg.alpn.as_deref(),
         )
         .await?;
         let rx = shutdown_rx.clone();
         let state = state.clone();
         let opts = tls_cfg.options.resolve(&tls_defaults);
+        let alpn = cfg.alpn.clone();
         handles.spawn(async move {
             if let Err(e) = listener::run_quic(
                 cfg,
@@ -364,6 +432,7 @@ async fn main() -> anyhow::Result<()> {
                 state,
                 cert_source.cert_rx,
                 opts,
+                alpn,
                 rx,
             )
             .await
@@ -382,6 +451,7 @@ async fn main() -> anyhow::Result<()> {
             state_dir.as_ref(),
             &challenges,
             &cert_state,
+            cfg.alpn.as_deref(),
         )
         .await?;
         let acceptor = cert_source.tls;
@@ -507,6 +577,7 @@ async fn build_cert_source(
     state_dir: Option<&PathBuf>,
     challenges: &ChallengeMap,
     cert_state: &cert_state::SharedCertState,
+    alpn: Option<&[String]>,
 ) -> anyhow::Result<tls::CertSource> {
     match &tls_cfg.cert {
         TlsConfig::Acme {
@@ -561,12 +632,13 @@ async fn build_cert_source(
                              serving self-signed certificate while \
                              retrying"
                         );
-                        let (acc, pair) = tls::build_acceptor_with_pair(
+                        let (acc, pair) = tls::build_acceptor_with_pair_alpn(
                             &TlsListenerConfig {
                                 cert: TlsConfig::SelfSigned,
                                 options: tls_cfg.options.clone(),
                             },
                             tls_defaults,
+                            alpn,
                         )
                         .context("building self-signed fallback")?;
                         (acc, pair, true)
@@ -586,7 +658,7 @@ async fn build_cert_source(
         }
         _ => {
             let (initial, pair) =
-                tls::build_acceptor_with_pair(tls_cfg, tls_defaults)?;
+                tls::build_acceptor_with_pair_alpn(tls_cfg, tls_defaults, alpn)?;
             let (_, cert_rx) =
                 tokio::sync::watch::channel(Arc::new(pair));
             Ok(tls::CertSource {
