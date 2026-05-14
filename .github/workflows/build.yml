@@ -38,6 +38,11 @@ jobs:
     - name: Build release binary
       run: cargo build --release
 
+    - name: Build h3get HTTP/3 test client
+      # Used by the integration container to exercise the QUIC
+      # listener; Debian's packaged curl lacks --http3 support.
+      run: cargo build --release --example h3get
+
     - name: Build test container
       run: >
         podman build
