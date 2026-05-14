@@ -274,12 +274,16 @@ pub fn make_acceptor_with_alpn(
 /// clients negotiate HTTP/3 against this endpoint; cipher and minimum
 /// protocol-version options are honoured identically to the TCP path
 /// to keep operator expectations consistent.
-pub fn build_quic_server_config(
+/// Build the rustls `ServerConfig` used to back the QUIC endpoint.
+/// Split out from [`build_quic_server_config`] so unit tests can pin
+/// invariants on the rustls layer (notably the RFC 9001 §4.6.1 rule
+/// that `max_early_data_size` for QUIC must be `0xFFFFFFFF`).
+fn build_quic_rustls_config(
     pair: &CertPair,
     opts: &TlsOptions,
     alpn: Option<&[String]>,
     transport: Option<&crate::config::QuicTransport>,
-) -> anyhow::Result<quinn::ServerConfig> {
+) -> anyhow::Result<ServerConfig> {
     let mut provider = rustls::crypto::aws_lc_rs::default_provider();
     if !opts.ciphers.is_empty() {
         provider.cipher_suites = resolve_ciphers(&opts.ciphers)?;
@@ -301,11 +305,26 @@ pub fn build_quic_server_config(
     // are possible at the application layer, so this is unsafe for any
     // non-idempotent endpoint.  Operators take responsibility when they
     // set the flag.
+    //
+    // RFC 9001 §4.6.1 requires the NewSessionTicket `max_early_data_size`
+    // for QUIC to be exactly `0xFFFFFFFF`; any other value is a
+    // PROTOCOL_VIOLATION on conformant clients.  Real flow control of
+    // 0-RTT bytes happens at the QUIC layer via `initial_max_data`.
     if let Some(t) = transport
-        && let Some(size) = t.zero_rtt_max_data
+        && t.zero_rtt_enabled
     {
-        rustls_cfg.max_early_data_size = size;
+        rustls_cfg.max_early_data_size = u32::MAX;
     }
+    Ok(rustls_cfg)
+}
+
+pub fn build_quic_server_config(
+    pair: &CertPair,
+    opts: &TlsOptions,
+    alpn: Option<&[String]>,
+    transport: Option<&crate::config::QuicTransport>,
+) -> anyhow::Result<quinn::ServerConfig> {
+    let rustls_cfg = build_quic_rustls_config(pair, opts, alpn, transport)?;
     let quic = quinn::crypto::rustls::QuicServerConfig::try_from(rustls_cfg)
         .context("wrapping rustls config as QuicServerConfig")?;
     let mut server = quinn::ServerConfig::with_crypto(Arc::new(quic));
@@ -515,6 +534,46 @@ mod tests {
         let result =
             make_acceptor_from_refs(&pair.chain, &pair.key, &opts);
         assert!(result.is_ok());
+    }
+
+    // -- QUIC 0-RTT (RFC 9001 §4.6.1) -----------------------------
+
+    /// When 0-RTT is enabled on the QUIC listener, the rustls
+    /// NewSessionTicket `max_early_data_size` MUST be `0xFFFFFFFF`.
+    /// Any other value is a PROTOCOL_VIOLATION on conformant clients
+    /// per RFC 9001 §4.6.1; flow control of 0-RTT bytes happens at
+    /// the QUIC layer (`initial_max_data`), not at the TLS layer.
+    #[tokio::test]
+    async fn quic_zero_rtt_uses_rfc9001_sentinel_value() {
+        install_provider();
+        let pair = build_self_signed_pair().unwrap();
+        let opts = TlsOptions::default();
+        let transport = crate::config::QuicTransport {
+            zero_rtt_enabled: true,
+            ..Default::default()
+        };
+        let cfg =
+            build_quic_rustls_config(&pair, &opts, None, Some(&transport))
+                .unwrap();
+        assert_eq!(cfg.max_early_data_size, u32::MAX);
+    }
+
+    /// With 0-RTT disabled (the default), the rustls
+    /// `max_early_data_size` stays at its default of 0 — the TLS
+    /// stack will reject any early_data extension from the client.
+    #[tokio::test]
+    async fn quic_zero_rtt_disabled_leaves_default_zero() {
+        install_provider();
+        let pair = build_self_signed_pair().unwrap();
+        let opts = TlsOptions::default();
+        let transport = crate::config::QuicTransport::default();
+        let cfg =
+            build_quic_rustls_config(&pair, &opts, None, Some(&transport))
+                .unwrap();
+        assert_eq!(cfg.max_early_data_size, 0);
+        let cfg_none =
+            build_quic_rustls_config(&pair, &opts, None, None).unwrap();
+        assert_eq!(cfg_none.max_early_data_size, 0);
     }
 
     // -- VhostAlpnMap ---------------------------------------------

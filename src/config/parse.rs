@@ -350,14 +350,7 @@ pub(super) fn parse_listener(
                     .map(|v| v as u64),
                 keep_alive_interval_secs: child_i64(n, "keep-alive-interval")
                     .map(|v| v as u64),
-                zero_rtt_max_data: if zero_rtt {
-                    // 16 KiB matches the typical max early-data size
-                    // recommended for QUIC; large enough for most JSON
-                    // request bodies and small POSTs.
-                    Some(16 * 1024)
-                } else {
-                    None
-                },
+                zero_rtt_enabled: zero_rtt,
                 retry_tokens,
                 retry_token_lifetime_secs: child_i64(
                     n, "retry-token-lifetime",

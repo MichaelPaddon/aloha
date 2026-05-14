@@ -319,11 +319,13 @@ pub struct QuicTransport {
     /// Send a keep-alive PING every N seconds when otherwise idle.
     /// `Some(0)` disables.  Quinn default is no keep-alive.
     pub keep_alive_interval_secs: Option<u64>,
-    /// Maximum 0-RTT early-data size in bytes.  `Some(0)` (the default
-    /// when the knob is unset) disables 0-RTT.  Non-zero enables it on
-    /// the rustls TLS layer; the application is responsible for
-    /// idempotency since 0-RTT data is replayable.
-    pub zero_rtt_max_data: Option<u32>,
+    /// Enable 0-RTT (early data) on the TLS layer.  Per RFC 9001
+    /// §4.6.1 the NewSessionTicket `max_early_data_size` for QUIC is
+    /// fixed at `0xFFFFFFFF`; actual byte-level bounding of replayed
+    /// data is performed by the QUIC `initial_max_data` transport
+    /// parameter, not by the TLS layer.  The application is
+    /// responsible for idempotency since 0-RTT data is replayable.
+    pub zero_rtt_enabled: bool,
     /// Require source-address validation via Retry tokens.  When `true`
     /// quinn issues a Retry packet to every new client whose address
     /// hasn't been validated, making spoofed-source connection floods

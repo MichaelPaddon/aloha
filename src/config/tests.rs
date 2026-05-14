@@ -3826,7 +3826,7 @@ fn quic_transport_block_parses() {
     assert_eq!(qt.max_concurrent_bidi_streams, Some(256));
     assert_eq!(qt.max_idle_timeout_secs, Some(60));
     assert_eq!(qt.keep_alive_interval_secs, Some(10));
-    assert_eq!(qt.zero_rtt_max_data, Some(16 * 1024));
+    assert!(qt.zero_rtt_enabled);
     assert!(!qt.retry_tokens);
     assert_eq!(qt.retry_token_lifetime_secs, Some(30));
 }
@@ -3847,7 +3847,7 @@ fn quic_transport_defaults() {
     )
     .unwrap();
     let qt = cfg.listeners[0].quic_transport.as_ref().unwrap();
-    assert_eq!(qt.zero_rtt_max_data, None);
+    assert!(!qt.zero_rtt_enabled);
     assert!(qt.retry_tokens);
     assert_eq!(qt.max_concurrent_bidi_streams, None);
 }
