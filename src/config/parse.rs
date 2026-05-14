@@ -312,8 +312,92 @@ pub(super) fn parse_listener(
     let bind = arg_str(node, 0)
         .or_else(|| child_str(node, "bind"))
         .ok_or_else(|| anyhow!("{name}:{line}: listener requires 'bind'"))?;
+    // `udp:` prefix selects QUIC/HTTP/3.  The remainder is the same
+    // "host:port" string that a TCP bind would carry, so downstream
+    // socket-binding code parses it identically once the prefix has
+    // been consumed.
+    let transport = if bind.starts_with("udp:") {
+        crate::config::Transport::Udp
+    } else {
+        crate::config::Transport::Tcp
+    };
     let children = node.children().map(|d| d.nodes()).unwrap_or_default();
     let tls = parse_listener_tls(children.iter(), src, name)?;
+    // Optional `alpn "h2" "http/1.1"` child overrides the listener's
+    // default ALPN list.  Empty values are rejected so a misconfigured
+    // listener fails fast at parse time rather than at handshake time.
+    let alpn: Option<Vec<String>> = children
+        .iter()
+        .find(|n| n.name().value() == "alpn")
+        .map(|n| {
+            let vals: Vec<String> = positional_strs(n);
+            if vals.is_empty() {
+                let ln = node_line(src, n);
+                bail!(
+                    "{name}:{ln}: 'alpn' requires at least one \
+                     protocol identifier"
+                );
+            }
+            Ok::<_, anyhow::Error>(vals)
+        })
+        .transpose()?;
+    // Optional `quic-transport { ... }` block.  Each knob is read as a
+    // child node; absent knobs fall back to quinn defaults.  Only
+    // meaningful for udp: listeners but parsed unconditionally so
+    // misplaced config produces a clear error rather than being
+    // silently ignored.
+    let quic_transport: Option<crate::config::QuicTransport> = children
+        .iter()
+        .find(|n| n.name().value() == "quic-transport")
+        .map(|n| -> anyhow::Result<crate::config::QuicTransport> {
+            let line = node_line(src, n);
+            if transport != crate::config::Transport::Udp {
+                bail!(
+                    "{name}:{line}: 'quic-transport' is only valid on \
+                     udp: listeners"
+                );
+            }
+            let zero_rtt = child_bool(n, "zero-rtt").unwrap_or(false);
+            let retry_tokens = child_bool(n, "retry-tokens").unwrap_or(true);
+            Ok(crate::config::QuicTransport {
+                max_concurrent_bidi_streams: child_i64(
+                    n, "max-concurrent-bidi-streams",
+                )
+                .map(|v| v as u64),
+                max_idle_timeout_secs: child_i64(n, "max-idle-timeout")
+                    .map(|v| v as u64),
+                keep_alive_interval_secs: child_i64(n, "keep-alive-interval")
+                    .map(|v| v as u64),
+                zero_rtt_enabled: zero_rtt,
+                retry_tokens,
+                retry_token_lifetime_secs: child_i64(
+                    n, "retry-token-lifetime",
+                )
+                .map(|v| v as u64),
+            })
+        })
+        .transpose()?;
+    // QUIC mandates TLS at the transport level -- there is no
+    // plaintext mode -- and stream-proxy mode requires byte-oriented
+    // semantics that UDP doesn't provide.  Catch both at parse time
+    // so the user gets a clear error rather than a startup panic.
+    if transport == crate::config::Transport::Udp {
+        if tls.is_none() {
+            bail!(
+                "{name}:{line}: udp: listeners require a tls block \
+                 (QUIC mandates TLS)"
+            );
+        }
+        if let Some(bad) =
+            children.iter().find(|n| n.name().value() == "proxy")
+        {
+            let bad_line = node_line(src, bad);
+            bail!(
+                "{name}:{bad_line}: 'proxy' (stream mode) is not \
+                 supported on udp: listeners"
+            );
+        }
+    }
 
     // A 'proxy' child activates stream mode: raw bytes forwarded to upstream.
     let proxy_node = children.iter().find(|n| n.name().value() == "proxy");
@@ -380,6 +464,7 @@ pub(super) fn parse_listener(
         return Ok((
             ListenerConfig {
                 bind,
+                transport,
                 tls,
                 stream,
                 accept_proxy_protocol,
@@ -387,6 +472,9 @@ pub(super) fn parse_listener(
                 timeouts: Timeouts::default(),
                 max_connections,
                 max_request_body: None,
+                auto_alt_svc: None,
+            alpn: alpn.clone(),
+            quic_transport: quic_transport.clone(),
             },
             // No raw default-vhost for stream listeners.
             Some(None),
@@ -421,6 +509,7 @@ pub(super) fn parse_listener(
     Ok((
         ListenerConfig {
             bind,
+            transport,
             tls,
             stream: None,
             accept_proxy_protocol,
@@ -428,6 +517,9 @@ pub(super) fn parse_listener(
             timeouts,
             max_connections,
             max_request_body,
+            auto_alt_svc: None,
+            alpn: alpn.clone(),
+            quic_transport: quic_transport.clone(),
         },
         raw_default_vhost,
     ))
@@ -711,11 +803,22 @@ pub(super) fn parse_vhost(
     let children = node.children().map(|d| d.nodes()).unwrap_or_default();
     let mut aliases = Vec::new();
     let mut locations = Vec::new();
+    let mut alpn: Option<Vec<String>> = None;
     for child in children {
         let child_line = node_line(src, child);
         match child.name().value() {
             "alias" => aliases.push(parse_vhost_name(child)?),
             "location" => locations.push(parse_location(child, src, name)?),
+            "alpn" => {
+                let vals: Vec<String> = positional_strs(child);
+                if vals.is_empty() {
+                    bail!(
+                        "{name}:{child_line}: 'alpn' requires at least \
+                         one protocol identifier"
+                    );
+                }
+                alpn = Some(vals);
+            }
             other => bail!(
                 "{name}:{child_line}: unknown node '{other}' \
                  in vhost '{}'",
@@ -727,6 +830,7 @@ pub(super) fn parse_vhost(
         name: vhost_name,
         aliases,
         locations,
+        alpn,
     })
 }
 
@@ -1243,10 +1347,77 @@ fn parse_handler(
             let proxy_protocol = prop_or_child_str(node, "proxy-protocol")
                 .map(|v| parse_proxy_protocol(&v, name, line))
                 .transpose()?;
+            // Optional `scheme "h3"` selects HTTP/3 over QUIC for the
+            // upstream leg.  Unset / "auto" / "" all preserve the
+            // existing h1/h2 ALPN-negotiated behaviour.
+            let scheme = match prop_or_child_str(node, "scheme")
+                .as_deref()
+            {
+                None | Some("") | Some("auto") => {
+                    crate::config::ProxyUpstreamScheme::Auto
+                }
+                Some("h3") | Some("http3") => {
+                    if !upstream.starts_with("https://") {
+                        bail!(
+                            "{name}:{line}: proxy scheme=h3 requires \
+                             an https:// upstream (got {upstream:?})"
+                        );
+                    }
+                    crate::config::ProxyUpstreamScheme::H3
+                }
+                Some(other) => bail!(
+                    "{name}:{line}: unknown proxy scheme {other:?}; \
+                     expected 'auto' or 'h3'"
+                ),
+            };
+            let pool_idle_timeout_secs =
+                prop_or_child_i64(node, "pool-idle-timeout")
+                    .map(|n| n as u64);
+            let pool_max_idle = prop_or_child_i64(node, "pool-max-idle")
+                .map(|n| n as u32);
+            // Same `tls { skip-verify }` shape as stream-proxy.
+            let upstream_tls: Option<UpstreamTlsConfig> = node
+                .children()
+                .and_then(|doc| {
+                    doc.nodes()
+                        .iter()
+                        .find(|n| n.name().value() == "tls")
+                })
+                .map(|tls_node| -> anyhow::Result<UpstreamTlsConfig> {
+                    let skip_verify = tls_node
+                        .children()
+                        .map(|d| {
+                            d.nodes()
+                                .iter()
+                                .any(|n| {
+                                    n.name().value() == "skip-verify"
+                                })
+                        })
+                        .unwrap_or(false);
+                    if skip_verify
+                        && !upstream.starts_with("https://")
+                    {
+                        bail!(
+                            "{name}:{line}: proxy 'tls' is only \
+                             meaningful for https:// upstreams \
+                             (got {upstream:?})"
+                        );
+                    }
+                    Ok(UpstreamTlsConfig { skip_verify })
+                })
+                .transpose()?;
+            let connect_timeout_secs =
+                prop_or_child_i64(node, "connect-timeout")
+                    .map(|n| n as u64);
             Ok(HandlerConfig::Proxy {
                 upstream,
                 strip_prefix,
                 proxy_protocol,
+                scheme,
+                pool_idle_timeout_secs,
+                pool_max_idle,
+                upstream_tls,
+                connect_timeout_secs,
             })
         }
         "redirect" => {

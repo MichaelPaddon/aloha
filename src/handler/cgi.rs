@@ -4,9 +4,9 @@
 
 use super::cgi_util::{build_cgi_env, parse_cgi_response};
 use crate::error::{HttpResponse, response_404, response_502};
+use crate::error::ReqBody;
 use http_body_util::BodyExt;
 use hyper::Request;
-use hyper::body::Incoming;
 use std::path::PathBuf;
 use std::process::Stdio;
 use tokio::io::AsyncWriteExt;
@@ -25,7 +25,7 @@ impl CgiHandler {
 
     pub async fn serve(
         &self,
-        req: Request<Incoming>,
+        req: Request<ReqBody>,
         matched_prefix: &str,
     ) -> HttpResponse {
         let (parts, body) = req.into_parts();
@@ -166,5 +166,27 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("hello.cgi"), b"").unwrap();
         assert!(resolve_script(dir.path(), "/hello.cgi").is_some());
+    }
+
+    /// A subdirectory path is resolved against root + the URI
+    /// segments; verifies that safe_join doesn't reject ordinary
+    /// nested CGI scripts.
+    #[test]
+    fn resolve_script_resolves_subdir() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("api")).unwrap();
+        std::fs::write(dir.path().join("api/v1.cgi"), b"").unwrap();
+        let r = resolve_script(dir.path(), "/api/v1.cgi");
+        assert!(r.is_some(), "expected /api/v1.cgi to resolve");
+        assert!(r.unwrap().ends_with("api/v1.cgi"));
+    }
+
+    /// A URI with an absolute-style component (`//etc/passwd`) is
+    /// still rejected -- safe_join treats it as a traversal because
+    /// the joined path would escape `root`.
+    #[test]
+    fn resolve_script_rejects_absolute_escape() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(resolve_script(dir.path(), "//etc/passwd").is_none());
     }
 }

@@ -127,10 +127,48 @@ listener {
 //     }
 // }
 
+// HTTP/3 over QUIC.
+// The bind address uses a `udp:` prefix; the rest of the listener block
+// (tls, default-vhost, timeouts) is identical to a TCP listener.  ACME
+// renewals roll over the QUIC endpoint alongside the TCP TLS acceptor
+// without restarting aloha.
+//
+// When a TCP/TLS listener and a UDP listener share the same port number,
+// aloha auto-injects `Alt-Svc: h3=":<port>"; ma=86400` on the TCP
+// listener's HTTP/1.1 and HTTP/2 responses so browsers can discover the
+// HTTP/3 endpoint.  Use `response-headers { set "Alt-Svc" "..." }` to
+// override, or `remove "Alt-Svc"` to suppress.
+// listener {
+//     bind "udp:[::]:443"
+//     tls-acme {
+//         domain "example.com"
+//     }
+//     // Optional QUIC transport tuning.  Unset knobs use quinn defaults.
+//     // quic-transport {
+//     //     max-concurrent-bidi-streams 100
+//     //     max-idle-timeout 30          // seconds
+//     //     keep-alive-interval 10       // seconds; 0 disables
+//     //     zero-rtt #false              // off by default (replay risk)
+//     //     retry-tokens #true           // on by default (anti-DoS)
+//     //     retry-token-lifetime 15      // seconds
+//     // }
+//     // Optional ALPN override.  Defaults to ["h3"]; add legacy draft
+//     // versions like "h3-29" here if you need them.
+//     // alpn "h3"
+// }
+
 
 // --- Virtual hosts ---
 //
 // Vhost names are matched against the Host request header.
+//
+// A vhost may override the listener's advertised ALPN list via an
+// `alpn` child node.  aloha looks at the ClientHello SNI before the
+// TLS handshake completes and picks the matching vhost's config, so
+// `vhost "legacy.example" { alpn "http/1.1"; ... }` truly disables
+// HTTP/2 for that one host while leaving it enabled for the others
+// on the same listener.  Regex vhosts and QUIC connections fall back
+// to the listener default.
 //
 // Plain string: exact match.
 //   vhost example.com { ... }

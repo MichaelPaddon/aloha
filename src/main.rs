@@ -42,13 +42,13 @@ use std::time::Duration;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 
-/// Registry of named certificate acceptors, populated before any TLS
-/// listener spawns.  Each entry's `Arc<ArcSwap<TlsAcceptor>>` is shared
-/// among all listeners that reference the cert by name; for ACME,
-/// renewal swaps the inner `TlsAcceptor` and all listeners observe it
-/// atomically.
-type CertRegistry =
-    HashMap<String, Arc<ArcSwap<tokio_rustls::TlsAcceptor>>>;
+/// Registry of named certificate sources, populated before any TLS
+/// listener spawns.  Each entry's `tls::CertSource` is shared (via
+/// `Clone`) among all listeners that reference the cert by name; for
+/// ACME, renewal swaps the inner `TlsAcceptor` and publishes a fresh
+/// `CertPair` on the watch channel, so both TCP and QUIC listeners
+/// observe the rotation atomically.
+type CertRegistry = HashMap<String, tls::CertSource>;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -266,7 +266,14 @@ async fn main() -> anyhow::Result<()> {
     let mut tls_http = Vec::new();
     let mut plain_stream = Vec::new();
     let mut tls_stream = Vec::new();
+    // QUIC/HTTP/3 listeners.  Parser guarantees they always have TLS
+    // and never have a `stream` block, so a single bucket suffices.
+    let mut quic_http: Vec<(config::ListenerConfig, _)> = Vec::new();
     for (cfg, socket) in bound {
+        if cfg.transport == config::Transport::Udp {
+            quic_http.push((cfg, socket));
+            continue;
+        }
         match (cfg.tls.is_some(), cfg.stream.is_some()) {
             (false, false) => plain_http.push((cfg, socket)),
             (true, false) => tls_http.push((cfg, socket)),
@@ -342,7 +349,7 @@ async fn main() -> anyhow::Result<()> {
     // then spawn TLS HTTP listeners.
     for (cfg, socket) in tls_http {
         let tls_cfg = cfg.tls.as_ref().unwrap();
-        let acceptor = build_tls_acceptor(
+        let cert_source = build_cert_source(
             tls_cfg,
             &tls_defaults,
             state_dir.as_ref(),
@@ -350,15 +357,119 @@ async fn main() -> anyhow::Result<()> {
             &cert_state,
             &cert_registry,
             cert_key_mode,
+            cfg.alpn.as_deref(),
         )
         .await?;
+        // Build the SNI-keyed ALPN map from vhosts that override
+        // ALPN.  Regex vhosts are skipped -- SNI is always a literal
+        // string, so they can't participate in pre-handshake
+        // selection.  An empty `by_sni` map means every connection
+        // sees the listener default.
+        let opts = tls_cfg.options.resolve(&tls_defaults);
+        let listener_alpn = cfg.alpn.clone();
+        let vhost_overrides: Vec<(String, Vec<String>)> = config
+            .vhosts
+            .iter()
+            .filter(|v| !v.name.regex)
+            .filter_map(|v| {
+                v.alpn.as_ref().map(|a| (v.name.value.clone(), a.clone()))
+            })
+            // Aliases share their vhost's ALPN override.
+            .chain(config.vhosts.iter().flat_map(|v| {
+                let alpn = v.alpn.as_ref();
+                v.aliases.iter().filter(|a| !a.regex).filter_map(
+                    move |alias| {
+                        alpn.map(|a| (alias.value.clone(), a.clone()))
+                    },
+                )
+            }))
+            .collect();
+        let initial_map = tls::VhostAlpnMap::build(
+            &cert_source.cert_rx.borrow(),
+            &opts,
+            listener_alpn.as_deref(),
+            &vhost_overrides,
+        )?;
+        let alpn_swap = Arc::new(ArcSwap::new(Arc::new(initial_map)));
+        // Renewal watcher: rebuild the map on every cert rotation
+        // (TCP + QUIC share the same cert_rx so this triggers in
+        // lockstep with the QUIC cert hot-swap task in run_quic).
+        {
+            let alpn_swap = alpn_swap.clone();
+            let opts = opts.clone();
+            let listener_alpn = listener_alpn.clone();
+            let vhost_overrides = vhost_overrides.clone();
+            let mut cert_rx = cert_source.cert_rx.clone();
+            tokio::spawn(async move {
+                cert_rx.mark_changed();
+                while cert_rx.changed().await.is_ok() {
+                    let pair = cert_rx.borrow().clone();
+                    match tls::VhostAlpnMap::build(
+                        &pair,
+                        &opts,
+                        listener_alpn.as_deref(),
+                        &vhost_overrides,
+                    ) {
+                        Ok(new_map) => {
+                            alpn_swap.store(Arc::new(new_map));
+                            tracing::info!(
+                                "TLS vhost ALPN map rotated after cert renewal"
+                            );
+                        }
+                        Err(e) => tracing::error!(
+                            "failed to rebuild vhost ALPN map: {e:#}"
+                        ),
+                    }
+                }
+            });
+        }
         let rx = shutdown_rx.clone();
         let state = state.clone();
         handles.spawn(async move {
             if let Err(e) =
-                listener::run_tls(cfg, socket, state, acceptor, rx).await
+                listener::run_tls(cfg, socket, state, alpn_swap, rx).await
             {
                 tracing::error!("TLS listener error: {e:#}");
+            }
+        });
+    }
+
+    // Phase 3c: QUIC/HTTP/3 listeners.  Each subscribes to the same
+    // CertSource flow as the TCP path so ACME renewals hot-swap both
+    // transports in lock-step via quinn::Endpoint::set_server_config.
+    for (cfg, socket) in quic_http {
+        let tls_cfg = cfg.tls.as_ref().unwrap();
+        let cert_source = build_cert_source(
+            tls_cfg,
+            &tls_defaults,
+            state_dir.as_ref(),
+            &challenges,
+            &cert_state,
+            &cert_registry,
+            cert_key_mode,
+            // Listener.alpn overrides the default ["h3"] when set so a
+            // QUIC listener can advertise additional draft ALPNs (e.g.
+            // "h3-29") alongside the standardised one.
+            cfg.alpn.as_deref(),
+        )
+        .await?;
+        let rx = shutdown_rx.clone();
+        let state = state.clone();
+        let opts = tls_cfg.options.resolve(&tls_defaults);
+        let alpn = cfg.alpn.clone();
+        handles.spawn(async move {
+            if let Err(e) = listener::run_quic(
+                cfg,
+                socket,
+                state,
+                cert_source.cert_rx,
+                opts,
+                alpn,
+                rx,
+            )
+            .await
+            {
+                tracing::error!("QUIC listener error: {e:#}");
             }
         });
     }
@@ -366,7 +477,7 @@ async fn main() -> anyhow::Result<()> {
     // Phase 3b: TLS-terminating stream listeners.
     for (cfg, socket) in tls_stream {
         let tls_cfg = cfg.tls.as_ref().unwrap();
-        let acceptor = build_tls_acceptor(
+        let cert_source = build_cert_source(
             tls_cfg,
             &tls_defaults,
             state_dir.as_ref(),
@@ -374,8 +485,10 @@ async fn main() -> anyhow::Result<()> {
             &cert_state,
             &cert_registry,
             cert_key_mode,
+            cfg.alpn.as_deref(),
         )
         .await?;
+        let acceptor = cert_source.tls;
         let stream_mode = cfg.stream.as_ref().unwrap();
         let access = stream_mode
             .policy
@@ -484,16 +597,21 @@ fn build_authenticator(
     }
 }
 
-/// Build a TLS acceptor for a listener or stream-proxy.
+/// Build a `CertSource` for a listener: the hot-swappable TLS acceptor
+/// for the TCP path, plus a watch channel publishing the underlying
+/// cert+key pair so QUIC listeners can rebuild their own
+/// `quinn::ServerConfig` on every renewal.
 ///
-/// - `TlsConfig::Ref` is resolved by looking up the named entry in
-///   `registry` and cloning the shared `Arc<ArcSwap<...>>` so multiple
-///   listeners terminate with the same cert.
+/// - `TlsConfig::Ref` is resolved by cloning the shared entry from
+///   `registry`, so every listener that names the same cert observes
+///   the same renewals on both TCP and QUIC paths.
 /// - Inline ACME builds its own AcmeManager and spawns a per-listener
-///   renewal loop (the historical behavior; deduplication of inline
-///   blocks across listeners is rejected at validation time).
-/// - Inline files/self-signed are built once and wrapped in ArcSwap.
-async fn build_tls_acceptor(
+///   renewal loop (deduplication of inline blocks across listeners is
+///   rejected at validation time).  Falls back to self-signed on
+///   initial issuance failure and keeps retrying in the background.
+/// - Inline files/self-signed seed the watch channel once and never
+///   update it.
+async fn build_cert_source(
     tls_cfg: &TlsListenerConfig,
     tls_defaults: &config::TlsOptions,
     state_dir: Option<&PathBuf>,
@@ -501,14 +619,15 @@ async fn build_tls_acceptor(
     cert_state: &cert_state::SharedCertState,
     registry: &CertRegistry,
     cert_key_mode: u32,
-) -> anyhow::Result<Arc<ArcSwap<tokio_rustls::TlsAcceptor>>> {
+    alpn: Option<&[String]>,
+) -> anyhow::Result<tls::CertSource> {
     if let TlsConfig::Ref(name) = &tls_cfg.cert {
         return registry
             .get(name)
             .cloned()
             .with_context(|| format!("unknown certificate '{name}'"));
     }
-    build_acceptor_from_source(
+    build_cert_source_from_source(
         &tls_cfg.cert,
         &tls_cfg.options,
         tls_defaults,
@@ -516,14 +635,15 @@ async fn build_tls_acceptor(
         challenges,
         cert_state,
         cert_key_mode,
+        alpn,
     )
     .await
 }
 
-/// Build an acceptor for a single concrete certificate source
+/// Build a `CertSource` for a single concrete certificate source
 /// (`Files`, `SelfSigned`, or `Acme`).  Shared by the named-cert
-/// registry and the inline path in `build_tls_acceptor`.
-async fn build_acceptor_from_source(
+/// registry and the inline path in `build_cert_source`.
+async fn build_cert_source_from_source(
     cert: &TlsConfig,
     options: &config::TlsOptions,
     tls_defaults: &config::TlsOptions,
@@ -531,7 +651,8 @@ async fn build_acceptor_from_source(
     challenges: &ChallengeMap,
     cert_state: &cert_state::SharedCertState,
     cert_key_mode: u32,
-) -> anyhow::Result<Arc<ArcSwap<tokio_rustls::TlsAcceptor>>> {
+    alpn: Option<&[String]>,
+) -> anyhow::Result<tls::CertSource> {
     match cert {
         TlsConfig::Acme {
             domains,
@@ -564,46 +685,72 @@ async fn build_acceptor_from_source(
                 .with_cert_state(cert_state.clone()),
             );
             // Try to get an initial cert.  If ACME fails, fall back to
-            // self-signed and keep retrying in the background --
-            // crashing here causes systemd to restart us rapidly,
-            // exhausting Let's Encrypt rate limits.
-            let (initial, initial_failed) = match mgr.ensure_valid_cert().await
-            {
-                Ok(acc) => (acc, false),
-                Err(e) => {
-                    tracing::warn!(
-                        domains = ?domains,
-                        retry_secs = retry_interval_secs,
-                        "ACME initial acquisition failed: {e:#}; \
-                         serving self-signed certificate while \
-                         retrying"
-                    );
-                    let fallback = tls::build_acceptor(
-                        &TlsListenerConfig {
-                            cert: TlsConfig::SelfSigned,
-                            options: options.clone(),
-                        },
-                        tls_defaults,
-                    )
-                    .context("building self-signed fallback")?;
-                    (fallback, true)
-                }
-            };
-            let acc = Arc::new(ArcSwap::new(Arc::new(initial)));
+            // self-signed and keep retrying in the background -- crashing
+            // here causes systemd to restart us rapidly, exhausting Let's
+            // Encrypt rate limits.  The seed CertPair reflects whatever
+            // we actually serve (real cert or fallback) so QUIC listeners
+            // always start with a working endpoint.
+            let (initial_acc, initial_pair, initial_failed) =
+                match mgr.ensure_valid_cert().await {
+                    Ok(acc) => {
+                        // On success the cert is on disk; load the pair.
+                        let pair = mgr
+                            .load_cert_pair()
+                            .context("loading initial ACME cert pair")?;
+                        (acc, pair, false)
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            domains = ?domains,
+                            retry_secs = retry_interval_secs,
+                            "ACME initial acquisition failed: {e:#}; \
+                             serving self-signed certificate while \
+                             retrying"
+                        );
+                        let (acc, pair) = tls::build_acceptor_with_pair_alpn(
+                            &TlsListenerConfig {
+                                cert: TlsConfig::SelfSigned,
+                                options: options.clone(),
+                            },
+                            tls_defaults,
+                            alpn,
+                        )
+                        .context("building self-signed fallback")?;
+                        (acc, pair, true)
+                    }
+                };
+            let acc = Arc::new(ArcSwap::new(Arc::new(initial_acc)));
+            let (cert_tx, cert_rx) =
+                tokio::sync::watch::channel(Arc::new(initial_pair));
             tokio::spawn({
                 let mgr = mgr.clone();
                 let acc = acc.clone();
-                async move { mgr.renewal_loop(acc, initial_failed).await }
+                async move {
+                    mgr.renewal_loop(acc, cert_tx, initial_failed).await
+                }
             });
-            Ok(acc)
+            Ok(tls::CertSource { tls: acc, cert_rx })
         }
         TlsConfig::Files { .. } | TlsConfig::SelfSigned => {
-            let tls_cfg = TlsListenerConfig {
+            // Static cert sources: build once, seed the watch channel
+            // with the resulting pair, and never update it.  Listeners
+            // (TCP and QUIC) subscribing to this CertSource will see
+            // the seed value and no further updates.
+            let inline = TlsListenerConfig {
                 cert: cert.clone(),
                 options: options.clone(),
             };
-            let initial = tls::build_acceptor(&tls_cfg, tls_defaults)?;
-            Ok(Arc::new(ArcSwap::new(Arc::new(initial))))
+            let (initial, pair) = tls::build_acceptor_with_pair_alpn(
+                &inline,
+                tls_defaults,
+                alpn,
+            )?;
+            let (_, cert_rx) =
+                tokio::sync::watch::channel(Arc::new(pair));
+            Ok(tls::CertSource {
+                tls: Arc::new(ArcSwap::new(Arc::new(initial))),
+                cert_rx,
+            })
         }
         TlsConfig::Ref(_) => {
             unreachable!("Ref resolved by caller before this point")
@@ -630,7 +777,11 @@ async fn build_cert_registry(
 ) -> anyhow::Result<CertRegistry> {
     let mut registry = HashMap::new();
     for def in defs {
-        let acceptor = build_acceptor_from_source(
+        // Named certs are listener-agnostic, so there is no listener
+        // ALPN to forward into a self-signed fallback.  The fallback
+        // path only fires when ACME issuance fails at startup; on
+        // success real cert delivery happens via the watch channel.
+        let cert_source = build_cert_source_from_source(
             &def.source,
             &Default::default(),
             tls_defaults,
@@ -638,12 +789,13 @@ async fn build_cert_registry(
             challenges,
             cert_state,
             cert_key_mode,
+            None,
         )
         .await
         .with_context(|| {
             format!("building certificate '{}'", def.name)
         })?;
-        registry.insert(def.name.clone(), acceptor);
+        registry.insert(def.name.clone(), cert_source);
     }
     Ok(registry)
 }

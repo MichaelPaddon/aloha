@@ -256,10 +256,32 @@ pub struct UpstreamTlsConfig {
     pub skip_verify: bool,
 }
 
+/// Transport layer for a listener.  TCP is the default; UDP is selected
+/// by the `udp:` bind prefix and indicates that the listener serves
+/// HTTP/3 over QUIC.  Validation guarantees `Udp` listeners always have
+/// a `tls` block and never have a `stream` block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Transport {
+    Tcp,
+    Udp,
+}
+
+impl Default for Transport {
+    fn default() -> Self {
+        Transport::Tcp
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ListenerConfig {
     // Bind address: "host:port" for TCP or "unix:/path" for Unix sockets.
+    // The `udp:` prefix selects QUIC/HTTP/3; the suffix follows the same
+    // "host:port" syntax as a TCP bind.
     pub bind: String,
+    // Tcp for plain TCP/TLS HTTP listeners and Unix sockets; Udp for
+    // QUIC/HTTP/3 listeners.  Determined by the bind-address prefix at
+    // parse time.
+    pub transport: Transport,
     pub tls: Option<TlsListenerConfig>,
     // When Some: stream proxy mode (forward raw bytes to upstream).
     // When None: HTTP routing mode (vhost/location dispatch).
@@ -279,6 +301,63 @@ pub struct ListenerConfig {
     // Reject requests whose Content-Length exceeds this (bytes).
     // None = unlimited.  Checked before any handler runs.
     pub max_request_body: Option<u64>,
+    // Pre-computed `Alt-Svc` header value to auto-inject on responses
+    // from this TCP/TLS listener.  Populated by `Config::parse` when a
+    // matching UDP listener (same port) is defined so that h1/h2 clients
+    // can discover the HTTP/3 endpoint without any extra config.  Only
+    // applied when the response does not already carry an `Alt-Svc`
+    // header, so user header rules always win.
+    pub auto_alt_svc: Option<String>,
+    // Optional ALPN override.  When None the listener uses the protocol
+    // defaults (`["h2", "http/1.1"]` for TCP/TLS, `["h3"]` for UDP/QUIC).
+    // Empty Vec is rejected at parse time.  Per-vhost ALPN selection
+    // (via SNI) is a follow-up; today this is per-listener.
+    pub alpn: Option<Vec<String>>,
+    // QUIC transport tuning -- only meaningful for udp: listeners.  None
+    // means "use quinn defaults".  See `QuicTransport` for the knobs.
+    pub quic_transport: Option<QuicTransport>,
+}
+
+/// Wire protocol used by the reverse proxy to reach its upstream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProxyUpstreamScheme {
+    /// Use the existing hyper-util Client (h1/h2 via ALPN).  Default.
+    #[default]
+    Auto,
+    /// Force HTTP/3 over QUIC.  Requires an `https://` upstream URL.
+    H3,
+}
+
+/// QUIC transport-layer tuning, applied to the `quinn::Endpoint` for
+/// `udp:` listeners.  All fields are optional; unset fields fall back
+/// to quinn defaults.
+#[derive(Debug, Clone, Default)]
+pub struct QuicTransport {
+    /// Maximum concurrent bidirectional streams a client may open on
+    /// one QUIC connection.  Quinn default is 100.
+    pub max_concurrent_bidi_streams: Option<u64>,
+    /// Idle timeout in seconds.  A connection with no activity past
+    /// this is silently dropped.  Quinn default is 30 s.
+    pub max_idle_timeout_secs: Option<u64>,
+    /// Send a keep-alive PING every N seconds when otherwise idle.
+    /// `Some(0)` disables.  Quinn default is no keep-alive.
+    pub keep_alive_interval_secs: Option<u64>,
+    /// Enable 0-RTT (early data) on the TLS layer.  Per RFC 9001
+    /// §4.6.1 the NewSessionTicket `max_early_data_size` for QUIC is
+    /// fixed at `0xFFFFFFFF`; actual byte-level bounding of replayed
+    /// data is performed by the QUIC `initial_max_data` transport
+    /// parameter, not by the TLS layer.  The application is
+    /// responsible for idempotency since 0-RTT data is replayable.
+    pub zero_rtt_enabled: bool,
+    /// Require source-address validation via Retry tokens.  When `true`
+    /// quinn issues a Retry packet to every new client whose address
+    /// hasn't been validated, making spoofed-source connection floods
+    /// expensive.  Defaults to `true`; set `#false` only if the
+    /// listener sits behind a trusted load balancer that has already
+    /// validated source addresses.
+    pub retry_tokens: bool,
+    /// Lifetime of a Retry token in seconds.  Quinn default is 15 s.
+    pub retry_token_lifetime_secs: Option<u64>,
 }
 
 impl ListenerConfig {
@@ -373,6 +452,15 @@ pub struct VHostConfig {
     pub name: VHostName,
     pub aliases: Vec<VHostName>,
     pub locations: Vec<LocationConfig>,
+    // Optional ALPN override for connections whose SNI matches this
+    // vhost (or one of its literal aliases).  When set, the TCP/TLS
+    // listener picks this list at handshake time via
+    // `LazyConfigAcceptor`.  Empty Vec is rejected at parse time.
+    // Regex vhosts cannot participate in SNI-keyed ALPN selection;
+    // configurations that mix `alpn` with `regex=#true` fall back to
+    // the listener's default ALPN.  Has no effect on QUIC listeners
+    // (quinn 0.11 doesn't expose ClientHello before handshake).
+    pub alpn: Option<Vec<String>>,
 }
 
 /// Config-level header operation: raw strings before name validation.
@@ -420,6 +508,36 @@ pub enum HandlerConfig {
         upstream: String,
         strip_prefix: bool,
         proxy_protocol: Option<ProxyProtocolVersion>,
+        // Wire protocol used to talk to the upstream.  `Auto` (default)
+        // lets the existing hyper-util Client negotiate h1/h2 via ALPN.
+        // `H3` forces HTTP/3 over QUIC -- only valid for `https://`
+        // upstreams (QUIC mandates TLS).
+        scheme: ProxyUpstreamScheme,
+        // Idle timeout (seconds) for cached upstream connections.
+        // For h3: how long a QUIC connection sits unused before the
+        // reaper closes it.  For h1/h2: forwarded to hyper-util's
+        // built-in `pool_idle_timeout`.  `None` = use defaults (90 s);
+        // `Some(0)` disables reaping entirely.
+        pool_idle_timeout_secs: Option<u64>,
+        // Cap on idle upstream connections per host.  Only meaningful
+        // for h1/h2 (hyper-util's `pool_max_idle_per_host`).  `None`
+        // leaves hyper-util's effectively-unbounded default in place.
+        // h3 holds at most one connection per handler today, so the
+        // knob is silently ignored there.
+        pool_max_idle: Option<u32>,
+        // Upstream TLS options.  Mirrors the existing stream-proxy
+        // `tls { skip-verify }` syntax.  When `skip_verify` is true,
+        // the rustls client config used for h1/h2/h3 upstream
+        // connections accepts any certificate.  Only intended for
+        // internal upstreams with self-signed certs.
+        upstream_tls: Option<UpstreamTlsConfig>,
+        // Maximum seconds to wait for the upstream connect step.
+        // For h1/h2: passed to hyper-util's
+        // `HttpConnector::set_connect_timeout`.  For h3: bounds the
+        // `endpoint.connect(...).await` future via tokio::time::timeout.
+        // `None` keeps the underlying defaults (effectively unbounded
+        // for h1/h2; quinn's idle/handshake defaults for h3).
+        connect_timeout_secs: Option<u64>,
     },
     Redirect {
         to: String,
@@ -524,6 +642,35 @@ impl Config {
                     Some(None) => None,
                     Some(Some(name)) => Some(name),
                 };
+            }
+        }
+        // Auto-Alt-Svc: for every TCP/TLS listener whose port matches a
+        // UDP listener's port, pre-build an `Alt-Svc: h3=":<port>"; ma=...`
+        // header value.  The listener service injects it on responses that
+        // don't already carry an Alt-Svc header so user header rules can
+        // still override.  Cross-listener inference is intentionally scoped
+        // to "same port number" -- topology beyond that (h3 on a different
+        // port, multi-endpoint advertisements) is handled by the existing
+        // `headers { response { set "Alt-Svc" "..." } }` mechanism.
+        let udp_ports: std::collections::HashSet<u16> = config
+            .listeners
+            .iter()
+            .filter(|l| l.transport == Transport::Udp)
+            .filter_map(|l| port_of_bind(&l.bind))
+            .collect();
+        if !udp_ports.is_empty() {
+            for listener in config.listeners.iter_mut() {
+                if listener.transport != Transport::Tcp
+                    || listener.tls.is_none()
+                {
+                    continue;
+                }
+                if let Some(port) = port_of_bind(&listener.bind)
+                    && udp_ports.contains(&port)
+                {
+                    listener.auto_alt_svc =
+                        Some(format!("h3=\":{port}\"; ma=86400"));
+                }
             }
         }
         config.validate()?;
@@ -783,6 +930,21 @@ impl Config {
             })
             .collect()
     }
+}
+
+/// Extract the port number from a listener bind string.  Returns None
+/// for Unix sockets (which carry no port) and for malformed addresses
+/// (which `bind_socket` will reject later anyway).  Strips both `udp:`
+/// and -- for safety -- any other future protocol prefix that follows
+/// the same `<scheme>:<addr>` shape used for `unix:`.
+fn port_of_bind(bind: &str) -> Option<u16> {
+    let s = bind.strip_prefix("udp:").unwrap_or(bind);
+    if s.starts_with("unix:") {
+        return None;
+    }
+    // Bracketed IPv6 ("[::]:443") and bare host:port ("0.0.0.0:443")
+    // both put the port after the last ':'.
+    s.rsplit_once(':').and_then(|(_, p)| p.parse::<u16>().ok())
 }
 
 // Returns true iff any rule in `stmts` (recursively through Apply

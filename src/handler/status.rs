@@ -11,9 +11,9 @@
 use crate::cert_state::{CertState, SharedCertState};
 use crate::config::{AuthBackend, Config, HandlerConfig, TlsConfig};
 use crate::error::{HttpResponse, bytes_body};
+use crate::error::ReqBody;
 use crate::metrics::{Metrics, Snapshot, SparklineData, TimePeriod};
 use bytes::Bytes;
-use hyper::body::Incoming;
 use hyper::{Request, Response, StatusCode};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -143,6 +143,15 @@ fn listener_protocol(
     l: &crate::config::ListenerConfig,
     config: &Config,
 ) -> (String, Vec<String>) {
+    // UDP listeners always serve HTTP/3.  Surface the cert source the
+    // same way the TCP path does so operators see "HTTP/3-ACME" etc.
+    if l.transport == crate::config::Transport::Udp {
+        if let Some(tls) = &l.tls {
+            return tls_protocol_name(tls, "HTTP/3", config);
+        }
+        // Parser guarantees udp: => tls, but fall back gracefully.
+        return ("HTTP/3".into(), Vec::new());
+    }
     if l.stream.is_some() {
         match &l.tls {
             None => ("stream".into(), Vec::new()),
@@ -218,7 +227,7 @@ impl StatusHandler {
 
     pub async fn serve(
         &self,
-        req: Request<Incoming>,
+        req: Request<ReqBody>,
         _matched_prefix: &str,
     ) -> HttpResponse {
         let period = query_period(req.uri());
@@ -407,6 +416,16 @@ fn render_json(
         "jwt_fail_1h":           s.jwt_fail_1h,
         "jwt_expiry_1h":         s.jwt_expiry_1h,
         "jwt_issued_1h":         s.jwt_issued_1h,
+        // HTTP/3 protocol counters.  All four are zero when no `udp:`
+        // listener is configured, so a TCP-only deployment sees them
+        // and ignores them.
+        "http3": {
+            "handshakes_total":         s.quic_handshakes_total,
+            "handshake_failures_total": s.quic_handshake_failures_total,
+            "connections_active":       s.quic_connections_active,
+            "requests_total":           s.quic_requests_total,
+            "outbound_handshakes_total": s.quic_outbound_handshakes_total,
+        },
         "period": period.as_str(),
         "sparkline": {
             "step_secs":  sp.step_secs,
@@ -1490,6 +1509,11 @@ mod tests {
             jwt_fail_1h: 0,
             jwt_expiry_1h: 0,
             jwt_issued_1h: 3,
+            quic_handshakes_total: 0,
+            quic_handshake_failures_total: 0,
+            quic_connections_active: 0,
+            quic_requests_total: 0,
+            quic_outbound_handshakes_total: 0,
         }
     }
 

@@ -13,9 +13,10 @@ use crate::auth::{Authenticator, Principal};
 use crate::compress;
 use crate::config::{ListenerConfig, Timeouts};
 use crate::error::{
-    BoxBody, ErrorPages, bytes_body, response_404, response_413,
+    BoxBody, ErrorPages, ReqBody, bytes_body, response_404, response_413,
     response_redirect, response_status, response_www_auth,
 };
+use http_body_util::BodyExt;
 use crate::geoip;
 use crate::headers::principal_strings;
 use crate::headers::{self, RequestContext};
@@ -24,6 +25,7 @@ use crate::inherit::InheritedSockets;
 use crate::metrics::Metrics;
 use crate::proxy_proto;
 use crate::router::Router;
+use anyhow::{Context as _, anyhow, bail};
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -155,17 +157,22 @@ impl tokio::io::AsyncWrite for IncomingStream {
     }
 }
 
-/// Bound listener socket: TCP or (on Unix) a Unix domain socket.
-/// Returned by `bind_socket`; passed to the run_* accept loops.
+/// Bound listener socket: TCP, UDP (for QUIC), or (on Unix) a Unix
+/// domain socket.  Returned by `bind_socket`; passed to the run_*
+/// accept loops.  UDP sockets are only meaningful when the `http3`
+/// feature is enabled; the variant exists unconditionally so that
+/// build configurations match across feature flags.
 #[cfg(unix)]
 pub enum BoundSocket {
     Tcp(TcpListener),
+    Udp(std::net::UdpSocket),
     Unix(tokio::net::UnixListener),
 }
 
 #[cfg(not(unix))]
 pub enum BoundSocket {
     Tcp(TcpListener),
+    Udp(std::net::UdpSocket),
 }
 
 impl BoundSocket {
@@ -177,6 +184,14 @@ impl BoundSocket {
             BoundSocket::Tcp(l) => {
                 let (s, a) = l.accept().await?;
                 Ok((IncomingStream::Tcp(s), PeerAddr::Tcp(a)))
+            }
+            BoundSocket::Udp(_) => {
+                // UDP sockets are not accept-driven; the QUIC listener
+                // owns the socket directly via quinn::Endpoint.  Reaching
+                // here would indicate a bug in the listener wiring.
+                Err(std::io::Error::other(
+                    "BoundSocket::accept called on a UDP socket",
+                ))
             }
             #[cfg(unix)]
             BoundSocket::Unix(l) => {
@@ -191,6 +206,7 @@ impl BoundSocket {
     fn tcp_local_addr(&self) -> Option<SocketAddr> {
         match self {
             BoundSocket::Tcp(l) => l.local_addr().ok(),
+            BoundSocket::Udp(_) => None,
             #[cfg(unix)]
             BoundSocket::Unix(_) => None,
         }
@@ -266,6 +282,11 @@ struct AlohaService {
     is_tls: bool,
     // Reject requests whose Content-Length exceeds this; None = unlimited.
     max_body_bytes: Option<u64>,
+    // Pre-built `Alt-Svc` value for HTTP/3 auto-advertisement.  Set when
+    // the config has a UDP/QUIC listener on the same port; injected on
+    // responses that don't already carry an Alt-Svc header.  Stored as
+    // an Arc<str> so cloning the service per-connection is cheap.
+    auto_alt_svc: Option<Arc<str>>,
 }
 
 impl hyper::service::Service<Request<Incoming>> for AlohaService {
@@ -276,7 +297,25 @@ impl hyper::service::Service<Request<Incoming>> for AlohaService {
         Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>,
     >;
 
-    fn call(&self, mut req: Request<Incoming>) -> Self::Future {
+    fn call(&self, req: Request<Incoming>) -> Self::Future {
+        // Convert hyper's Incoming to our protocol-agnostic ReqBody
+        // so the dispatch path is identical for h1/h2 and HTTP/3.
+        let req = req.map(|b| BodyExt::boxed_unsync(b));
+        let svc = self.clone();
+        Box::pin(svc.dispatch(req))
+    }
+}
+
+impl AlohaService {
+    /// Run the full request pipeline (interception, vhost routing,
+    /// access policy, auth, handler dispatch, post-processing) on a
+    /// request whose body has already been adapted to `ReqBody`.
+    /// Shared by the hyper TCP path and the QUIC/h3 path so both
+    /// transports see identical semantics.
+    async fn dispatch(
+        self,
+        mut req: Request<ReqBody>,
+    ) -> Result<Response<BoxBody>, anyhow::Error> {
         let state = self.state.clone();
         let bind = self.bind.clone();
         let peer = self.peer_addr;
@@ -286,7 +325,8 @@ impl hyper::service::Service<Request<Incoming>> for AlohaService {
         let handler_timeout =
             self.timeouts.handler_secs.map(Duration::from_secs);
         let max_body_bytes = self.max_body_bytes;
-        Box::pin(async move {
+        let auto_alt_svc = self.auto_alt_svc.clone();
+        {
             let start = Instant::now();
             let method = req.method().clone();
             let path = req.uri().path().to_owned();
@@ -697,7 +737,20 @@ impl hyper::service::Service<Request<Incoming>> for AlohaService {
 
             let encoding =
                 accept_encoding.as_deref().and_then(compress::negotiate);
-            let resp = compress::maybe_compress(resp, encoding).await;
+            let mut resp = compress::maybe_compress(resp, encoding).await;
+
+            // Auto-advertise HTTP/3 via Alt-Svc when a sibling UDP
+            // listener exists on the same port.  Only inject when the
+            // response doesn't already carry an Alt-Svc header so that
+            // user-supplied `headers { response { set "Alt-Svc" ... } }`
+            // rules always win (the headers pass runs inside the handler
+            // pipeline before reaching here).
+            if let Some(ref v) = auto_alt_svc
+                && !resp.headers().contains_key(hyper::header::ALT_SVC)
+                && let Ok(hv) = hyper::header::HeaderValue::from_str(v)
+            {
+                resp.headers_mut().insert(hyper::header::ALT_SVC, hv);
+            }
 
             let status = resp.status().as_u16();
             let ms = start.elapsed().as_millis();
@@ -706,7 +759,7 @@ impl hyper::service::Service<Request<Incoming>> for AlohaService {
             state.metrics.record_path(&path);
             log_access(&method, &path, status, ms, peer, &host, &log_user);
             Ok(resp)
-        })
+        }
     }
 }
 
@@ -740,18 +793,39 @@ fn make_builder(timeouts: &Timeouts) -> auto::Builder<TokioExecutor> {
     {
         let mut h1 = builder.http1();
         h1.timer(TokioTimer::new());
-        // Default to 30 s to protect against Slowloris.  Config can
-        // override with any positive value; 0 explicitly disables.
-        let header_secs = timeouts
-            .request_header_secs
-            .unwrap_or(DEFAULT_HEADER_TIMEOUT_SECS);
-        if header_secs > 0 {
-            h1.header_read_timeout(Duration::from_secs(header_secs));
-        }
-        // keepalive_secs=0 disables HTTP/1.1 keep-alive entirely.
-        // Non-zero values are parsed for future idle-timeout support.
-        if timeouts.keepalive_secs == Some(0) {
+
+        // hyper 1.x arms `header_read_timeout` on *every* request,
+        // including the next-request read on a kept-alive connection
+        // (see `proto/h1/conn.rs::read_head`).  So a single timer is
+        // doing double duty: it bounds slow header transmission AND
+        // it caps the idle window between requests.  We pick the
+        // most restrictive value the operator gave us:
+        //
+        //   keepalive=0  -> keep-alive disabled entirely.
+        //   keepalive=N  -> at most N seconds of idle between requests
+        //                   (and at most N seconds to send headers).
+        //   request-header=M -> at most M seconds to send headers
+        //                       (also caps the idle).
+        //   neither set  -> DEFAULT_HEADER_TIMEOUT_SECS (30 s).
+        //
+        // When both are set, take the minimum.  This unifies the two
+        // knobs under a single timer instead of silently ignoring
+        // non-zero keepalive values like prior versions did.
+        let keepalive = timeouts.keepalive_secs;
+        if keepalive == Some(0) {
             h1.keep_alive(false);
+        } else {
+            let candidates = [
+                timeouts.request_header_secs,
+                keepalive,
+            ];
+            let configured: Option<u64> =
+                candidates.iter().filter_map(|x| *x).min();
+            let header_secs = configured
+                .unwrap_or(DEFAULT_HEADER_TIMEOUT_SECS);
+            if header_secs > 0 {
+                h1.header_read_timeout(Duration::from_secs(header_secs));
+            }
         }
     }
     builder
@@ -768,6 +842,36 @@ pub fn bind_socket(
     cfg: &ListenerConfig,
     #[cfg(unix)] inherited: &mut InheritedSockets,
 ) -> anyhow::Result<BoundSocket> {
+    // QUIC/HTTP/3 listeners: bind a UDP socket on the host:port portion
+    // of the bind string.  quinn::Endpoint::new wants a std::net::UdpSocket,
+    // so we keep it as std rather than wrapping in tokio; non-blocking is
+    // set explicitly.  Inherited UDP fds (from systemd socket activation
+    // or a seamless-upgrade parent) are adopted via take_udp.
+    if let Some(rest) = cfg.bind.strip_prefix("udp:") {
+        use std::net::ToSocketAddrs;
+        let addr = rest
+            .to_socket_addrs()
+            .with_context(|| format!("resolving udp bind '{rest}'"))?
+            .next()
+            .ok_or_else(|| {
+                anyhow!("udp bind '{}' resolved to zero addresses", rest)
+            })?;
+        #[cfg(unix)]
+        let sock = if let Some(fd) = inherited.take_udp(addr) {
+            use std::os::unix::io::FromRawFd;
+            // SAFETY: fd is a bound UDP socket from our inherited scan.
+            unsafe { std::net::UdpSocket::from_raw_fd(fd) }
+        } else {
+            std::net::UdpSocket::bind(addr)
+                .with_context(|| format!("binding udp socket {addr}"))?
+        };
+        #[cfg(not(unix))]
+        let sock = std::net::UdpSocket::bind(addr)
+            .with_context(|| format!("binding udp socket {addr}"))?;
+        sock.set_nonblocking(true)?;
+        return Ok(BoundSocket::Udp(sock));
+    }
+
     #[cfg(unix)]
     if let Some(path) = cfg.bind.strip_prefix("unix:") {
         let listener = if let Some(fd) = inherited.take_unix(path.as_ref()) {
@@ -863,6 +967,8 @@ pub async fn run_plain(
         .max_connections
         .map(|n| Arc::new(Semaphore::new(n as usize)));
     let max_body = cfg.max_request_body;
+    let alt_svc: Option<Arc<str>> =
+        cfg.auto_alt_svc.as_deref().map(Arc::from);
     tracing::info!(bind = %name, "listening (HTTP)");
     let mut connections: JoinSet<()> = JoinSet::new();
 
@@ -877,6 +983,7 @@ pub async fn run_plain(
                         let conn_shutdown = shutdown.clone();
                         let proxy_ver   = cfg.accept_proxy_protocol;
                         let lux         = local_unix.clone();
+                        let alt_svc     = alt_svc.clone();
                         // Acquire a permit before spawning; released
                         // when the task drops it.  Awaiting here is
                         // safe: accept already returned so the socket
@@ -906,6 +1013,7 @@ pub async fn run_plain(
                                 local_addr, local_unix: lux,
                                 timeouts, is_tls: false,
                                 max_body_bytes: max_body,
+                                auto_alt_svc: alt_svc,
                             };
                             serve_connection(
                                 io, svc, conn_shutdown, peer_addr,
@@ -932,13 +1040,20 @@ pub async fn run_plain(
 
 // Acceptor is pre-built by main (possibly via AcmeManager) and passed
 // in as an ArcSwap so that live cert rotation works without restart.
+/// Per-connection TLS handshake driver for HTTP listeners.  Uses
+/// `LazyConfigAcceptor` so SNI is known *before* the handshake
+/// completes, letting us pick a per-vhost rustls ServerConfig (and
+/// therefore per-vhost ALPN).  Stream-proxy TLS still uses the
+/// simpler `TlsAcceptor` path via `run_tls_acceptor` since stream
+/// listeners have no vhost concept.
 pub async fn run_tls(
     cfg: ListenerConfig,
     listener: BoundSocket,
     state: Arc<AppState>,
-    acceptor: Arc<ArcSwap<TlsAcceptor>>,
+    alpn_map: Arc<ArcSwap<crate::tls::VhostAlpnMap>>,
     mut shutdown: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
+    use tokio_rustls::LazyConfigAcceptor;
     let name = cfg.local_name();
     let local_addr = listener.tcp_local_addr();
     let local_unix: Option<std::path::PathBuf> =
@@ -947,6 +1062,8 @@ pub async fn run_tls(
         .max_connections
         .map(|n| Arc::new(Semaphore::new(n as usize)));
     let max_body = cfg.max_request_body;
+    let alt_svc: Option<Arc<str>> =
+        cfg.auto_alt_svc.as_deref().map(Arc::from);
     tracing::info!(bind = %name, "listening (HTTPS)");
     let mut connections: JoinSet<()> = JoinSet::new();
 
@@ -957,13 +1074,14 @@ pub async fn run_tls(
                     Ok((mut stream, peer_addr)) => {
                         // load_full() cheaply clones the inner Arc,
                         // picking up any cert hot-swapped since last accept.
-                        let acc = acceptor.load_full();
+                        let map = alpn_map.load_full();
                         let state = state.clone();
                         let bind = name.clone();
                         let svc_timeouts = cfg.timeouts.clone();
                         let conn_shutdown = shutdown.clone();
                         let proxy_ver = cfg.accept_proxy_protocol;
                         let lux = local_unix.clone();
+                        let alt_svc = alt_svc.clone();
                         let permit: Option<OwnedSemaphorePermit> =
                             if let Some(ref s) = sem {
                                 Some(s.clone()
@@ -985,13 +1103,26 @@ pub async fn run_tls(
                                 },
                                 None => peer_addr,
                             };
-                            // TLS handshake inside the task so a slow
-                            // client doesn't block the accept loop.
-                            // Timeout guards against partial-ClientHello
-                            // floods that park tasks indefinitely.
+                            // SNI-aware handshake: read just enough to
+                            // see the ClientHello, pick the matching
+                            // per-vhost ServerConfig, then complete the
+                            // handshake.  Wrapped in the same timeout
+                            // guard as the legacy TlsAcceptor path.
                             let tls_stream = match tokio::time::timeout(
                                 TLS_HANDSHAKE_TIMEOUT,
-                                acc.accept(stream),
+                                async {
+                                    let start = LazyConfigAcceptor::new(
+                                        rustls::server::Acceptor::default(),
+                                        stream,
+                                    )
+                                    .await?;
+                                    let sni = start
+                                        .client_hello()
+                                        .server_name()
+                                        .map(str::to_owned);
+                                    let cfg = map.pick(sni.as_deref());
+                                    start.into_stream(cfg).await
+                                },
                             ).await {
                                 Ok(Ok(s)) => s,
                                 Ok(Err(e)) => {
@@ -1016,6 +1147,7 @@ pub async fn run_tls(
                                 timeouts: svc_timeouts,
                                 is_tls: true,
                                 max_body_bytes: max_body,
+                                auto_alt_svc: alt_svc,
                             };
                             serve_connection(io, svc, conn_shutdown, peer_addr)
                                 .await;
@@ -1470,6 +1602,538 @@ async fn drain_connections(name: &str, mut connections: JoinSet<()>) {
             connections.len(),
         );
     }
+}
+
+// -- QUIC / HTTP/3 listener ----------------------------------------
+//
+// run_quic owns a bound UDP socket and serves HTTP/3 over QUIC.  The
+// actual quinn::Endpoint + h3::server accept loop is gated on the
+// `http3` cargo feature; with the feature off the function is a stub
+// that logs and exits so that build configurations without the QUIC
+// stack still link.  This split mirrors the structure of run_tls and
+// run_plain so wiring in main.rs can stay symmetrical.
+
+/// Serve QUIC/HTTP/3 on a bound UDP socket.  Drives a `quinn::Endpoint`
+/// and dispatches each h3 request through the same handler pipeline
+/// (`AlohaService::dispatch`) as the TCP path so all aloha features
+/// (vhost routing, access policy, JWT, proxy/CGI/FastCGI/SCGI, etc.)
+/// work identically over HTTP/3.
+pub async fn run_quic(
+    cfg: ListenerConfig,
+    socket: BoundSocket,
+    state: Arc<AppState>,
+    cert_rx: watch::Receiver<Arc<crate::tls::CertPair>>,
+    opts: crate::config::TlsOptions,
+    alpn: Option<Vec<String>>,
+    shutdown: watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    let name = cfg.local_name();
+    let udp = match socket {
+        BoundSocket::Udp(s) => s,
+        _ => bail!(
+            "run_quic called with a non-UDP BoundSocket for bind '{name}'"
+        ),
+    };
+    run_quic_inner(cfg, name, udp, state, cert_rx, opts, alpn, shutdown).await
+}
+
+/// RAII guard that decrements the `quic_connections_active` gauge when
+/// dropped.  Used to keep the gauge consistent even when a connection
+/// task panics mid-flight.
+struct QuicConnGuard(Arc<Metrics>);
+
+impl Drop for QuicConnGuard {
+    fn drop(&mut self) {
+        self.0
+            .quic_connections_active
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+async fn run_quic_inner(
+    cfg: ListenerConfig,
+    name: String,
+    udp: std::net::UdpSocket,
+    state: Arc<AppState>,
+    cert_rx: watch::Receiver<Arc<crate::tls::CertPair>>,
+    opts: crate::config::TlsOptions,
+    alpn: Option<Vec<String>>,
+    mut shutdown: watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    use crate::tls::build_quic_server_config;
+
+    // Seed the endpoint with the current cert.  cert_rx is always
+    // populated (CertSource invariant), so borrow().clone() yields the
+    // initial pair without blocking.
+    let transport = cfg.quic_transport.clone();
+    let initial = build_quic_server_config(
+        &cert_rx.borrow().clone(),
+        &opts,
+        alpn.as_deref(),
+        transport.as_ref(),
+    )
+    .context("building initial QUIC server config")?;
+    let runtime = quinn::default_runtime()
+        .ok_or_else(|| anyhow!("no tokio runtime for quinn endpoint"))?;
+    let endpoint = quinn::Endpoint::new(
+        quinn::EndpointConfig::default(),
+        Some(initial),
+        udp,
+        runtime,
+    )
+    .context("quinn::Endpoint::new")?;
+
+    tracing::info!(bind = %name, "listening (HTTP/3)");
+
+    // Per-listener connection cap.  Mirrors the TCP path's behaviour:
+    // when the cap is reached, the accept loop awaits a permit so new
+    // connections are *deferred* rather than dropped.  quinn's accept
+    // ring buffers Initial packets in the meantime; clients see normal
+    // QUIC retry / loss recovery behaviour.
+    let sem: Option<Arc<Semaphore>> = cfg
+        .max_connections
+        .map(|n| Arc::new(Semaphore::new(n as usize)));
+
+    // Cert-rotation task: rebuild the QuicServerConfig on every
+    // renewal published by the CertSource watch channel and atomically
+    // swap it into the live endpoint via set_server_config().  Static
+    // cert paths simply never tick this branch.
+    {
+        let endpoint = endpoint.clone();
+        let opts = opts.clone();
+        let alpn = alpn.clone();
+        let transport = transport.clone();
+        let mut cert_rx = cert_rx.clone();
+        tokio::spawn(async move {
+            // Skip the seed value (already used to build the endpoint).
+            cert_rx.mark_changed();
+            while cert_rx.changed().await.is_ok() {
+                let pair = cert_rx.borrow().clone();
+                match build_quic_server_config(
+                    &pair,
+                    &opts,
+                    alpn.as_deref(),
+                    transport.as_ref(),
+                ) {
+                    Ok(new_cfg) => {
+                        endpoint.set_server_config(Some(new_cfg));
+                        tracing::info!(
+                            "QUIC server config rotated after cert renewal"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "failed to rebuild QUIC config on renewal: {e:#}"
+                        );
+                    }
+                }
+            }
+        });
+    }
+
+    let mut connections: JoinSet<()> = JoinSet::new();
+    loop {
+        tokio::select! {
+            _ = shutdown.changed() => {
+                tracing::info!(bind = %name, "QUIC listener draining");
+                break;
+            }
+            inc = endpoint.accept() => {
+                let Some(inc) = inc else { break };
+                // Source-address validation via Retry tokens.  When
+                // enabled, force a Retry on any client whose address
+                // hasn't already been validated -- defends against
+                // spoofed-source connection floods.  Default is on;
+                // set retry-tokens=#false on a listener that sits
+                // behind a trusted load balancer.
+                let retry_on = transport
+                    .as_ref()
+                    .map(|t| t.retry_tokens)
+                    .unwrap_or(true);
+                let inc = if retry_on
+                    && !inc.remote_address_validated()
+                    && inc.may_retry()
+                {
+                    if let Err(e) = inc.retry() {
+                        tracing::debug!(
+                            "QUIC retry token send failed: {e}"
+                        );
+                    }
+                    continue;
+                } else {
+                    inc
+                };
+                // Acquire a permit before spawning so the cap actually
+                // limits in-flight connections.  Permit is moved into
+                // the per-connection task and dropped when it exits.
+                let permit: Option<OwnedSemaphorePermit> =
+                    if let Some(ref s) = sem {
+                        match s.clone().acquire_owned().await {
+                            Ok(p) => Some(p),
+                            Err(_) => break, // semaphore closed: shutting down
+                        }
+                    } else {
+                        None
+                    };
+                let state = state.clone();
+                let bind = name.clone();
+                let timeouts = cfg.timeouts.clone();
+                let max_body = cfg.max_request_body;
+                let auto_alt_svc: Option<Arc<str>> =
+                    cfg.auto_alt_svc.as_deref().map(Arc::from);
+                connections.spawn(async move {
+                    let _permit = permit;
+                    let conn = match inc.await {
+                        Ok(c) => {
+                            state.metrics.quic_handshakes_total
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            c
+                        }
+                        Err(e) => {
+                            state.metrics.quic_handshake_failures_total
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            tracing::debug!("QUIC handshake failed: {e}");
+                            return;
+                        }
+                    };
+                    // Connection-active gauge: tracks live QUIC
+                    // connections so the status page can show real-time
+                    // load.  Decremented when the per-connection task
+                    // exits (the JoinSet awaits it before drain).
+                    state.metrics.quic_connections_active
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let _conn_guard =
+                        QuicConnGuard(state.metrics.clone());
+                    let peer = PeerAddr::Tcp(conn.remote_address());
+                    let h3q = h3_quinn::Connection::new(conn);
+                    let mut h3 = match h3::server::Connection::<_, Bytes>::new(h3q).await {
+                        Ok(c) => c,
+                        Err(e) => {
+                            tracing::debug!("h3 setup failed: {e}");
+                            return;
+                        }
+                    };
+                    while let Ok(Some(resolver)) = h3.accept().await {
+                        // Spawn per request so a slow handler doesn't
+                        // head-of-line block other streams on the same
+                        // QUIC connection.
+                        let state = state.clone();
+                        let bind = bind.clone();
+                        let timeouts = timeouts.clone();
+                        let auto_alt_svc = auto_alt_svc.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = handle_h3_request(
+                                state, bind, peer, timeouts,
+                                max_body, auto_alt_svc, resolver,
+                            ).await {
+                                tracing::debug!("h3 request error: {e:#}");
+                            }
+                        });
+                    }
+                });
+            }
+        }
+        // Reap completed per-connection tasks so the JoinSet doesn't
+        // grow without bound on long-lived listeners.
+        while connections.try_join_next().is_some() {}
+    }
+
+    // Graceful drain.  Stop accepting new handshakes by dropping the
+    // server config (quinn responds with VERSION_NEGOTIATION / nothing
+    // to subsequent Initial packets), then wait up to DRAIN_TIMEOUT for
+    // in-flight connections to finish.  On timeout, force-close so a
+    // stuck h3 driver can't keep the process alive past systemd's
+    // TimeoutStopSec.
+    endpoint.set_server_config(None);
+    tracing::info!(bind = %name, "QUIC listener: rejecting new handshakes");
+    let idle = tokio::time::timeout(DRAIN_TIMEOUT, endpoint.wait_idle()).await;
+    if idle.is_err() {
+        tracing::warn!(
+            bind = %name,
+            "QUIC drain timed out after {}s; force-closing endpoint",
+            DRAIN_TIMEOUT.as_secs()
+        );
+        endpoint.close(quinn::VarInt::from_u32(0), b"shutdown");
+    }
+    // Bound the JoinSet drain by the same timeout so a runaway task
+    // doesn't leak past the listener's lifetime.
+    let _ = tokio::time::timeout(DRAIN_TIMEOUT, async {
+        while connections.join_next().await.is_some() {}
+    })
+    .await;
+    Ok(())
+}
+
+/// Streaming request-body adapter for HTTP/3.  Wraps the receive half
+/// of an h3 request stream and exposes it as a `hyper::body::Body` so
+/// the existing handler pipeline (which already speaks Body) can read
+/// the body lazily, without buffering the whole upload into memory.
+///
+/// Enforces an optional max-body cap by terminating the stream early
+/// once the cap is exceeded.  Matches the TCP path's behaviour where
+/// Content-Length-based 413 is the strong guarantee; mid-stream caps
+/// are best-effort (the handler sees a short body and decides how to
+/// respond).
+struct H3RequestBody {
+    state: H3BodyState,
+    max_body: Option<u64>,
+    seen: u64,
+}
+
+type H3RecvHalf = h3::server::RequestStream<h3_quinn::RecvStream, Bytes>;
+type H3RecvFuture = Pin<
+    Box<
+        dyn Future<
+                Output = (
+                    H3RecvHalf,
+                    Result<Option<Bytes>, h3::error::StreamError>,
+                ),
+            > + Send,
+    >,
+>;
+
+enum H3BodyState {
+    Idle(Box<H3RecvHalf>),
+    Reading(H3RecvFuture),
+    Done,
+}
+
+impl hyper::body::Body for H3RequestBody {
+    type Data = Bytes;
+    type Error = hyper::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<
+        Option<Result<hyper::body::Frame<Bytes>, hyper::Error>>,
+    > {
+        use std::task::Poll;
+        loop {
+            match std::mem::replace(&mut self.state, H3BodyState::Done) {
+                H3BodyState::Done => return Poll::Ready(None),
+                H3BodyState::Idle(half) => {
+                    // Start a new recv_data call that owns the half so
+                    // the future is 'static.
+                    let fut: H3RecvFuture = Box::pin(async move {
+                        let mut half = *half;
+                        let r = half.recv_data().await;
+                        let bytes = match r {
+                            Ok(Some(mut chunk)) => {
+                                use bytes::Buf;
+                                let n = chunk.remaining();
+                                Ok(Some(chunk.copy_to_bytes(n)))
+                            }
+                            Ok(None) => Ok(None),
+                            Err(e) => Err(e),
+                        };
+                        (half, bytes)
+                    });
+                    self.state = H3BodyState::Reading(fut);
+                }
+                H3BodyState::Reading(mut fut) => {
+                    match fut.as_mut().poll(cx) {
+                        Poll::Pending => {
+                            self.state = H3BodyState::Reading(fut);
+                            return Poll::Pending;
+                        }
+                        Poll::Ready((half, Ok(Some(bytes)))) => {
+                            // Enforce max_body by truncating the stream
+                            // once the cap is exceeded.  The handler
+                            // sees the truncated body; on TCP an over-
+                            // length Content-Length is already caught
+                            // earlier in dispatch_request.
+                            self.seen += bytes.len() as u64;
+                            if let Some(max) = self.max_body
+                                && self.seen > max
+                            {
+                                tracing::debug!(
+                                    seen = self.seen,
+                                    max,
+                                    "h3 request body exceeded max_body; \
+                                     truncating stream"
+                                );
+                                // Drop the half (signals end of body to
+                                // the producer of this stream).
+                                drop(half);
+                                self.state = H3BodyState::Done;
+                                return Poll::Ready(None);
+                            }
+                            self.state = H3BodyState::Idle(Box::new(half));
+                            return Poll::Ready(Some(Ok(
+                                hyper::body::Frame::data(bytes),
+                            )));
+                        }
+                        Poll::Ready((_, Ok(None))) => {
+                            self.state = H3BodyState::Done;
+                            return Poll::Ready(None);
+                        }
+                        Poll::Ready((_, Err(e))) => {
+                            tracing::debug!("h3 recv_data error: {e}");
+                            self.state = H3BodyState::Done;
+                            // Can't construct a hyper::Error externally;
+                            // terminate the stream cleanly and let the
+                            // handler decide based on the short body.
+                            return Poll::Ready(None);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Per-request handler for HTTP/3.  Streams the request body lazily
+/// through `H3RequestBody`, dispatches via the shared
+/// `AlohaService::dispatch` pipeline, then streams the response back
+/// over the send half of the same h3 request stream.
+async fn handle_h3_request(
+    state: Arc<AppState>,
+    bind: String,
+    peer: PeerAddr,
+    timeouts: Timeouts,
+    max_body: Option<u64>,
+    auto_alt_svc: Option<Arc<str>>,
+    resolver: h3::server::RequestResolver<h3_quinn::Connection, Bytes>,
+) -> anyhow::Result<()> {
+    use http_body_util::BodyExt;
+
+    state
+        .metrics
+        .quic_requests_total
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    let (req_head, req_stream) = resolver
+        .resolve_request()
+        .await
+        .map_err(|e| anyhow!("h3 resolve: {e}"))?;
+
+    // Split the bidi stream so the body adapter owns the recv half and
+    // `send_h3_response` owns the send half.  This lets the handler
+    // pipeline stream the request body while the response is being
+    // composed -- proxy/CGI/FastCGI uploads no longer need to be
+    // buffered into memory.
+    let (mut send_half, recv_half) = req_stream.split();
+
+    // If Content-Length on the request head already exceeds max_body,
+    // short-circuit with 413 before invoking the body adapter.  Matches
+    // dispatch_request's behaviour for the TCP path.
+    if let Some(max) = max_body
+        && let Some(cl) = req_head
+            .headers()
+            .get(hyper::header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok())
+        && cl > max
+    {
+        send_h3_response(&mut send_half, response_413()).await?;
+        return Ok(());
+    }
+
+    // Rebuild a hyper::Request<ReqBody>.  h3 stores the request head
+    // as Request<()> so we transplant the streaming body and copy
+    // extensions.
+    let (parts, ()) = req_head.into_parts();
+    let body: ReqBody = H3RequestBody {
+        state: H3BodyState::Idle(Box::new(recv_half)),
+        max_body,
+        seen: 0,
+    }
+    .boxed_unsync();
+    let mut req: Request<ReqBody> = Request::from_parts(parts, body);
+    // HTTP/3 carries the target host in the `:authority` pseudo-header,
+    // not in `Host:`.  The dispatch pipeline (and the vhost router)
+    // reads from `Host:`, so synthesize one from the URI authority when
+    // missing -- matching how HTTP/2 servers typically present the
+    // request to downstream code.
+    if !req.headers().contains_key(hyper::header::HOST)
+        && let Some(authority) = req.uri().authority().cloned()
+        && let Ok(hv) = hyper::header::HeaderValue::from_str(authority.as_str())
+    {
+        req.headers_mut().insert(hyper::header::HOST, hv);
+    }
+    if let PeerAddr::Tcp(addr) = peer {
+        req.extensions_mut().insert(addr);
+    }
+
+    let svc = AlohaService {
+        state,
+        bind,
+        peer_addr: peer,
+        local_addr: None,
+        local_unix: None,
+        timeouts,
+        // HTTP/3 always runs over TLS so the {scheme} template variable
+        // resolves to "https".
+        is_tls: true,
+        max_body_bytes: max_body,
+        auto_alt_svc,
+    };
+    let resp = svc.dispatch(req).await?;
+    send_h3_response(&mut send_half, resp).await
+}
+
+/// Stream a hyper `Response<BoxBody>` back through an h3 RequestStream.
+/// Sends the head, forwards each data frame as a `send_data` call,
+/// accumulates any trailer frames and emits them via `send_trailers`,
+/// then `finish()` closes the response stream.
+async fn send_h3_response(
+    stream: &mut h3::server::RequestStream<h3_quinn::SendStream<Bytes>, Bytes>,
+    resp: Response<BoxBody>,
+) -> anyhow::Result<()> {
+    use http_body_util::BodyExt;
+
+    let (parts, body) = resp.into_parts();
+    let head = Response::from_parts(parts, ());
+    stream
+        .send_response(head)
+        .await
+        .map_err(|e| anyhow!("h3 send_response: {e}"))?;
+
+    // Hyper's framed body can interleave data and trailer frames.
+    // h3 requires data first, then a single trailer block before finish.
+    // Collect trailers as we go and emit them once the body ends.
+    let mut body = body;
+    let mut trailers: Option<hyper::HeaderMap> = None;
+    loop {
+        match body.frame().await {
+            Some(Ok(frame)) => {
+                if frame.is_data() {
+                    let data = frame
+                        .into_data()
+                        .map_err(|_| anyhow!("frame::into_data race"))?;
+                    stream
+                        .send_data(data)
+                        .await
+                        .map_err(|e| anyhow!("h3 send_data: {e}"))?;
+                } else if frame.is_trailers() {
+                    let map = frame
+                        .into_trailers()
+                        .map_err(|_| anyhow!("frame::into_trailers race"))?;
+                    // Merge if a handler produces multiple trailer frames.
+                    match &mut trailers {
+                        Some(acc) => acc.extend(map),
+                        None => trailers = Some(map),
+                    }
+                }
+            }
+            Some(Err(e)) => {
+                return Err(anyhow!("response body read error: {e}"));
+            }
+            None => break,
+        }
+    }
+    if let Some(map) = trailers {
+        stream
+            .send_trailers(map)
+            .await
+            .map_err(|e| anyhow!("h3 send_trailers: {e}"))?;
+    }
+    stream
+        .finish()
+        .await
+        .map_err(|e| anyhow!("h3 finish: {e}"))?;
+    Ok(())
 }
 
 // -- Tests ---------------------------------------------------------
@@ -2356,5 +3020,1394 @@ mod tests {
             .request_header_secs
             .unwrap_or(DEFAULT_HEADER_TIMEOUT_SECS);
         assert_eq!(secs, 0, "request-header=0 must disable the timeout");
+    }
+
+    /// keepalive=N>0 now folds into header_read_timeout, taking the
+    /// minimum if request-header is also set.  Verifies the
+    /// unification logic in make_builder by computing the same
+    /// candidate-minimum the function uses.
+    #[test]
+    fn keepalive_unifies_with_header_read_timeout() {
+        // keepalive alone: that's the cap.
+        let t = Timeouts {
+            keepalive_secs: Some(7),
+            request_header_secs: None,
+            ..Default::default()
+        };
+        let cap: Option<u64> = [t.request_header_secs, t.keepalive_secs]
+            .iter()
+            .filter_map(|x| *x)
+            .min();
+        assert_eq!(cap, Some(7));
+
+        // Both set: minimum wins.
+        let t = Timeouts {
+            keepalive_secs: Some(7),
+            request_header_secs: Some(20),
+            ..Default::default()
+        };
+        let cap: Option<u64> = [t.request_header_secs, t.keepalive_secs]
+            .iter()
+            .filter_map(|x| *x)
+            .min();
+        assert_eq!(cap, Some(7));
+
+        // Only request-header set: that wins.
+        let t = Timeouts {
+            keepalive_secs: None,
+            request_header_secs: Some(20),
+            ..Default::default()
+        };
+        let cap: Option<u64> = [t.request_header_secs, t.keepalive_secs]
+            .iter()
+            .filter_map(|x| *x)
+            .min();
+        assert_eq!(cap, Some(20));
+    }
+
+    // -- Alt-Svc auto-injection ---------------------------------------
+
+    /// State helper for Alt-Svc tests: serves a static response on
+    /// `/` so the response goes through the full handler pipeline.
+    fn static_state(extra: &str) -> Arc<AppState> {
+        let kdl = format!(
+            r#"
+            listener {{ bind "127.0.0.1:1" }}
+            vhost "example.com" {{
+                location "/" {{
+                    redirect {{ to "/here"; code 302 }}
+                    {extra}
+                }}
+            }}
+            "#
+        );
+        let config = Config::parse(&kdl).unwrap();
+        let metrics = Arc::new(Metrics::new());
+        let summary = Arc::new(
+            crate::handler::status::ServerSummary::from_config(&config),
+        );
+        let router = Router::new(&config, &metrics, &summary, None).unwrap();
+        Arc::new(AppState {
+            router: Arc::new(router),
+            acme_challenges: Default::default(),
+            authenticator: Arc::new(AnonymousAuthenticator),
+            metrics,
+            geoip: None,
+            health_enabled: false,
+            error_pages: Arc::new(ErrorPages::new(HashMap::new())),
+            jwt_manager: None,
+        })
+    }
+
+    /// auto_alt_svc adds an Alt-Svc header on responses that don't
+    /// already carry one.
+    #[tokio::test]
+    async fn alt_svc_auto_injected_when_absent() {
+        let srv = TestServer::start_with_state_and_alt_svc(
+            static_state(""),
+            Some("h3=\":443\"; ma=86400".to_string()),
+        )
+        .await;
+        let (_status, headers, _) =
+            http_get(srv.addr, "example.com", "/").await;
+        assert_eq!(
+            headers.get("alt-svc").and_then(|v| v.to_str().ok()),
+            Some("h3=\":443\"; ma=86400")
+        );
+    }
+
+    /// Without auto_alt_svc the header is not added on its own.
+    #[tokio::test]
+    async fn alt_svc_absent_when_not_configured() {
+        let srv = TestServer::start_with_state(static_state("")).await;
+        let (_status, headers, _) =
+            http_get(srv.addr, "example.com", "/").await;
+        assert!(headers.get("alt-svc").is_none());
+    }
+
+    /// A user `response { set "Alt-Svc" "..." }` rule wins over the
+    /// auto-injected value -- the location header op runs inside the
+    /// handler pipeline and the injector only fills the gap when the
+    /// response doesn't already advertise Alt-Svc.
+    #[tokio::test]
+    async fn alt_svc_user_set_overrides_auto() {
+        let srv = TestServer::start_with_state_and_alt_svc(
+            static_state(r#"response-headers { set "Alt-Svc" "h3=\":8443\"" }"#),
+            Some("h3=\":443\"; ma=86400".to_string()),
+        )
+        .await;
+        let (_status, headers, _) =
+            http_get(srv.addr, "example.com", "/").await;
+        assert_eq!(
+            headers.get("alt-svc").and_then(|v| v.to_str().ok()),
+            Some("h3=\":8443\"")
+        );
+    }
+
+    // -- End-to-end HTTP/3 round-trip --------------------------------
+    //
+    // Boots a real run_quic() listener on an ephemeral UDP port with a
+    // self-signed cert, then drives a real h3-quinn client against it
+    // to verify that h3 requests reach the dispatch pipeline and that
+    // responses come back over the QUIC stream.
+
+    #[tokio::test]
+    async fn http3_get_round_trips_through_run_quic() {
+        use crate::tls::CertPair;
+        use h3::client;
+        use http_body_util::BodyExt;
+        use std::time::Duration;
+
+        // Self-signed cert + matching server config.  Use the same
+        // helpers run_quic itself uses so the test cert path is the
+        // production path.
+        let pair = {
+            let (_acc, pair) = crate::tls::build_acceptor_with_pair_alpn(
+                &crate::config::TlsListenerConfig {
+                    cert: crate::config::TlsConfig::SelfSigned,
+                    options: crate::config::TlsOptions::default(),
+                },
+                &crate::config::TlsOptions::default(),
+                None,
+            )
+            .unwrap();
+            pair
+        };
+        let opts = crate::config::TlsOptions::default();
+        let (cert_tx, cert_rx) = tokio::sync::watch::channel(
+            Arc::new(CertPair {
+                chain: pair.chain.clone(),
+                key: crate::tls::clone_key(&pair.key),
+            }),
+        );
+        // Keep the sender alive for the duration of the test.
+        let _cert_tx_guard = cert_tx;
+
+        // Listener config: a single static-handler vhost so we have a
+        // deterministic response to assert against.
+        let config = Config::parse(
+            r#"
+            listener { bind "udp:127.0.0.1:0"; tls-self-signed }
+            vhost "localhost" {
+                location "/" {
+                    redirect { to "/here"; code 302 }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        let metrics = Arc::new(Metrics::new());
+        let summary = Arc::new(
+            crate::handler::status::ServerSummary::from_config(&config),
+        );
+        let router = Router::new(&config, &metrics, &summary, None).unwrap();
+        let state = Arc::new(AppState {
+            router: Arc::new(router),
+            acme_challenges: Default::default(),
+            authenticator: Arc::new(AnonymousAuthenticator),
+            metrics,
+            geoip: None,
+            health_enabled: false,
+            error_pages: Arc::new(ErrorPages::new(HashMap::new())),
+            jwt_manager: None,
+        });
+
+        // Bind UDP socket on an ephemeral loopback port; record the
+        // address before handing the socket to quinn so we know where
+        // to point the client.
+        let server_sock =
+            std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        server_sock.set_nonblocking(true).unwrap();
+        let server_addr = server_sock.local_addr().unwrap();
+        let mut cfg = config.listeners.into_iter().next().unwrap();
+        cfg.bind = format!("udp:{server_addr}");
+
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let server_state = state.clone();
+        let server_opts = opts.clone();
+        let server_rx = cert_rx.clone();
+        let server_task = tokio::spawn(async move {
+            let _ = super::run_quic(
+                cfg,
+                BoundSocket::Udp(server_sock),
+                server_state,
+                server_rx,
+                server_opts,
+                None,
+                shutdown_rx,
+            )
+            .await;
+        });
+
+        // Build the h3 client side.  Self-signed cert => skip verify.
+        // ALPN must advertise h3 or the server will reject the handshake.
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let mut client_crypto = rustls::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(
+                test_skip_verify::SkipServerVerification::new(),
+            ))
+            .with_no_client_auth();
+        client_crypto.alpn_protocols = vec![b"h3".to_vec()];
+        let client_cfg = quinn::ClientConfig::new(Arc::new(
+            quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)
+                .unwrap(),
+        ));
+
+        let mut endpoint =
+            quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+        endpoint.set_default_client_config(client_cfg);
+
+        // Retry the connect briefly -- run_quic spawns asynchronously
+        // so there's a small window before the endpoint is actually
+        // accepting.
+        let conn = {
+            let mut last_err = None;
+            let mut conn = None;
+            for _ in 0..20 {
+                match endpoint
+                    .connect(server_addr, "localhost")
+                    .unwrap()
+                    .await
+                {
+                    Ok(c) => {
+                        conn = Some(c);
+                        break;
+                    }
+                    Err(e) => {
+                        last_err = Some(e);
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                }
+            }
+            conn.unwrap_or_else(|| {
+                panic!("quinn connect failed: {:?}", last_err)
+            })
+        };
+
+        let quic = h3_quinn::Connection::new(conn);
+        let (mut driver, mut send_request) =
+            client::new(quic).await.unwrap();
+        let drive = tokio::spawn(async move {
+            let _ = std::future::poll_fn(|cx| driver.poll_close(cx)).await;
+        });
+
+        let req = hyper::Request::builder()
+            .method("GET")
+            .uri("https://localhost/")
+            .body(())
+            .unwrap();
+        let mut stream = send_request.send_request(req).await.unwrap();
+        stream.finish().await.unwrap();
+        let resp = stream.recv_response().await.unwrap();
+        assert_eq!(resp.status(), 302);
+        assert_eq!(
+            resp.headers()
+                .get("location")
+                .and_then(|v| v.to_str().ok()),
+            Some("/here")
+        );
+
+        // Shut everything down so the test process exits cleanly.
+        drop(send_request);
+        let _ = drive.await;
+        endpoint.close(0u32.into(), b"bye");
+        let _ = shutdown_tx.send(true);
+        let _ = tokio::time::timeout(
+            Duration::from_secs(2),
+            server_task,
+        )
+        .await;
+    }
+
+    /// Pool reuse: two sequential h3 requests through a single
+    /// `H3Client` share one upstream connection, so the upstream's
+    /// `quic_handshakes_total` counter only increments once.
+    #[tokio::test]
+    async fn h3_outbound_pool_reuses_connection() {
+        use crate::handler::proxy::H3Client;
+        use crate::tls::CertPair;
+        use std::time::Duration;
+
+        // 1. Spin up an aloha h3 server identical to the e2e test.
+        let pair = {
+            let (_acc, pair) = crate::tls::build_acceptor_with_pair_alpn(
+                &crate::config::TlsListenerConfig {
+                    cert: crate::config::TlsConfig::SelfSigned,
+                    options: crate::config::TlsOptions::default(),
+                },
+                &crate::config::TlsOptions::default(),
+                None,
+            )
+            .unwrap();
+            pair
+        };
+        let opts = crate::config::TlsOptions::default();
+        let (cert_tx, cert_rx) = tokio::sync::watch::channel(
+            Arc::new(CertPair {
+                chain: pair.chain.clone(),
+                key: crate::tls::clone_key(&pair.key),
+            }),
+        );
+        let _cert_tx_guard = cert_tx;
+
+        let config = Config::parse(
+            r#"
+            listener { bind "udp:127.0.0.1:0"; tls-self-signed }
+            vhost "localhost" {
+                location "/" {
+                    redirect { to "/ok"; code 200 }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        let metrics = Arc::new(Metrics::new());
+        let summary = Arc::new(
+            crate::handler::status::ServerSummary::from_config(&config),
+        );
+        let router =
+            Router::new(&config, &metrics, &summary, None).unwrap();
+        let server_metrics = metrics.clone();
+        let state = Arc::new(AppState {
+            router: Arc::new(router),
+            acme_challenges: Default::default(),
+            authenticator: Arc::new(AnonymousAuthenticator),
+            metrics: server_metrics.clone(),
+            geoip: None,
+            health_enabled: false,
+            error_pages: Arc::new(ErrorPages::new(HashMap::new())),
+            jwt_manager: None,
+        });
+
+        // Bind the server on IPv4 loopback and use a literal-IP URL
+        // so the client doesn't go through name resolution -- avoids
+        // dual-stack / "localhost" ambiguity inside test environments
+        // where lookup_host may return ::1 ahead of 127.0.0.1.
+        let server_sock =
+            std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        server_sock.set_nonblocking(true).unwrap();
+        let server_addr = server_sock.local_addr().unwrap();
+        let mut cfg = config.listeners.into_iter().next().unwrap();
+        cfg.bind = format!("udp:{server_addr}");
+
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let server_state = state.clone();
+        let server_opts = opts.clone();
+        let server_rx = cert_rx.clone();
+        let server_task = tokio::spawn(async move {
+            let _ = super::run_quic(
+                cfg,
+                BoundSocket::Udp(server_sock),
+                server_state,
+                server_rx,
+                server_opts,
+                None,
+                shutdown_rx,
+            )
+            .await;
+        });
+
+        let _ = rustls::crypto::aws_lc_rs::default_provider()
+            .install_default();
+
+        // 2. Build an H3Client pointing at the upstream by literal IP
+        // (no DNS lookup needed at request time).
+        let upstream: hyper::Uri =
+            format!("https://127.0.0.1:{}/", server_addr.port())
+                .parse()
+                .unwrap();
+        let h3 = H3Client::new_for_test(&upstream, None).unwrap();
+
+        // 3. Issue two sequential requests.  Use a permissive helper
+        // that builds a minimal request with an empty body.
+        for _ in 0..2 {
+            let req = hyper::Request::builder()
+                .method("GET")
+                .uri("/")
+                .header("host", "localhost")
+                .body(
+                    http_body_util::Empty::<bytes::Bytes>::new()
+                        .map_err(|never| match never {})
+                        .boxed_unsync(),
+                )
+                .unwrap();
+            // Retry the first connect briefly (the server's accept
+            // loop may not be live yet).  Subsequent requests should
+            // reuse the cached connection.
+            let mut last_err: Option<anyhow::Error> = None;
+            let mut ok = false;
+            for _ in 0..20 {
+                match h3.request(req_clone(&req)).await {
+                    Ok(resp) => {
+                        assert_eq!(resp.status(), 200);
+                        ok = true;
+                        break;
+                    }
+                    Err(e) => {
+                        last_err = Some(e);
+                        tokio::time::sleep(Duration::from_millis(50))
+                            .await;
+                    }
+                }
+            }
+            assert!(
+                ok,
+                "h3 request failed after retries: {:?}",
+                last_err
+            );
+        }
+
+        // 4. Exactly one server-side handshake means the pool reused
+        //    the same connection across both requests.
+        let n = server_metrics
+            .quic_handshakes_total
+            .load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            n, 1,
+            "expected pool reuse (1 handshake), got {n}"
+        );
+
+        // Regression: H3Client::request returned responses with
+        // version=HTTP_3, which then panicked hyper's h1 codec when
+        // the proxy forwarded them downstream over HTTP/1.1.  Verify
+        // we now strip the upstream version to the default before
+        // returning, so any consumer can safely serialise on h1/h2.
+        let probe = h3
+            .request(req_clone(&hyper::Request::builder()
+                .method("GET")
+                .uri("/")
+                .header("host", "localhost")
+                .body(
+                    http_body_util::Empty::<bytes::Bytes>::new()
+                        .map_err(|never| match never {})
+                        .boxed_unsync(),
+                )
+                .unwrap()))
+            .await
+            .unwrap();
+        assert_eq!(
+            probe.version(),
+            hyper::Version::default(),
+            "H3Client must reset response version to the protocol \
+             default so downstream h1/h2 codecs can serialise it"
+        );
+
+        let _ = shutdown_tx.send(true);
+        let _ = tokio::time::timeout(
+            Duration::from_secs(2),
+            server_task,
+        )
+        .await;
+    }
+
+    /// Pool reaper: a connection that sits idle past the configured
+    /// timeout gets closed by the reaper, so the next request must
+    /// reconnect.  Verified by counting upstream handshakes across
+    /// requests separated by `idle_timeout + buffer`.
+    #[tokio::test]
+    async fn h3_outbound_pool_reaps_idle_connection() {
+        use crate::handler::proxy::H3Client;
+        use crate::tls::CertPair;
+        use std::time::Duration;
+
+        // Identical h3 server setup to the reuse test.
+        let pair = {
+            let (_acc, pair) = crate::tls::build_acceptor_with_pair_alpn(
+                &crate::config::TlsListenerConfig {
+                    cert: crate::config::TlsConfig::SelfSigned,
+                    options: crate::config::TlsOptions::default(),
+                },
+                &crate::config::TlsOptions::default(),
+                None,
+            )
+            .unwrap();
+            pair
+        };
+        let opts = crate::config::TlsOptions::default();
+        let (cert_tx, cert_rx) = tokio::sync::watch::channel(
+            Arc::new(CertPair {
+                chain: pair.chain.clone(),
+                key: crate::tls::clone_key(&pair.key),
+            }),
+        );
+        let _cert_tx_guard = cert_tx;
+
+        let config = Config::parse(
+            r#"
+            listener { bind "udp:127.0.0.1:0"; tls-self-signed }
+            vhost "localhost" {
+                location "/" {
+                    redirect { to "/ok"; code 200 }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        let metrics = Arc::new(Metrics::new());
+        let summary = Arc::new(
+            crate::handler::status::ServerSummary::from_config(&config),
+        );
+        let router =
+            Router::new(&config, &metrics, &summary, None).unwrap();
+        let server_metrics = metrics.clone();
+        let state = Arc::new(AppState {
+            router: Arc::new(router),
+            acme_challenges: Default::default(),
+            authenticator: Arc::new(AnonymousAuthenticator),
+            metrics: server_metrics.clone(),
+            geoip: None,
+            health_enabled: false,
+            error_pages: Arc::new(ErrorPages::new(HashMap::new())),
+            jwt_manager: None,
+        });
+        let server_sock =
+            std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        server_sock.set_nonblocking(true).unwrap();
+        let server_addr = server_sock.local_addr().unwrap();
+        let mut cfg = config.listeners.into_iter().next().unwrap();
+        cfg.bind = format!("udp:{server_addr}");
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let server_state = state.clone();
+        let server_opts = opts.clone();
+        let server_rx = cert_rx.clone();
+        let server_task = tokio::spawn(async move {
+            let _ = super::run_quic(
+                cfg,
+                BoundSocket::Udp(server_sock),
+                server_state,
+                server_rx,
+                server_opts,
+                None,
+                shutdown_rx,
+            )
+            .await;
+        });
+        let _ = rustls::crypto::aws_lc_rs::default_provider()
+            .install_default();
+
+        let upstream: hyper::Uri =
+            format!("https://127.0.0.1:{}/", server_addr.port())
+                .parse()
+                .unwrap();
+        // 500 ms idle timeout: short enough for the test to finish
+        // quickly, long enough to be reliable on slow CI.
+        let h3 = H3Client::new_for_test(
+            &upstream,
+            Some(Duration::from_millis(500)),
+        )
+        .unwrap();
+
+        // First request: opens connection #1.
+        let mut ok = false;
+        for _ in 0..20 {
+            if let Ok(resp) = h3.request(make_empty_req()).await {
+                assert_eq!(resp.status(), 200);
+                ok = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(ok);
+        assert_eq!(
+            server_metrics
+                .quic_handshakes_total
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+
+        // Idle past the timeout, then issue a second request: the
+        // reaper should have closed connection #1, so we open #2.
+        // 1500 ms covers idle (500 ms) + the reaper's worst-case
+        // tick lag (idle / 4 = 125 ms) plus generous slack.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        let resp = h3.request(make_empty_req()).await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let n = server_metrics
+            .quic_handshakes_total
+            .load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            n, 2,
+            "expected reaper to force reconnect (2 handshakes), got {n}"
+        );
+
+        let _ = shutdown_tx.send(true);
+        let _ = tokio::time::timeout(
+            Duration::from_secs(2),
+            server_task,
+        )
+        .await;
+    }
+
+    /// `max-request-body` boundary check over h3.  When a request
+    /// arrives with `Content-Length` larger than the configured cap,
+    /// the listener must reject it with a 413 before any handler
+    /// (or upstream forwarding) runs.  This is the inbound side of
+    /// the cap; the mid-stream truncation path is covered by the
+    /// dispatch unit test in `H3RequestBody`.
+    #[tokio::test]
+    async fn h3_inbound_413_on_content_length_over_max() {
+        use crate::handler::proxy::H3Client;
+        use crate::tls::CertPair;
+        use std::time::Duration;
+
+        let pair = {
+            let (_acc, pair) = crate::tls::build_acceptor_with_pair_alpn(
+                &crate::config::TlsListenerConfig {
+                    cert: crate::config::TlsConfig::SelfSigned,
+                    options: crate::config::TlsOptions::default(),
+                },
+                &crate::config::TlsOptions::default(),
+                None,
+            )
+            .unwrap();
+            pair
+        };
+        let opts = crate::config::TlsOptions::default();
+        let (cert_tx, cert_rx) = tokio::sync::watch::channel(
+            Arc::new(CertPair {
+                chain: pair.chain.clone(),
+                key: crate::tls::clone_key(&pair.key),
+            }),
+        );
+        let _cert_tx_guard = cert_tx;
+
+        // Listener with a 1-KiB body cap.
+        let config = Config::parse(
+            r#"
+            listener {
+                bind "udp:127.0.0.1:0"
+                tls-self-signed
+                max-request-body 1024
+            }
+            vhost "localhost" {
+                location "/" {
+                    redirect { to "/ok"; code 200 }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        let metrics = Arc::new(Metrics::new());
+        let summary = Arc::new(
+            crate::handler::status::ServerSummary::from_config(&config),
+        );
+        let router =
+            Router::new(&config, &metrics, &summary, None).unwrap();
+        let state = Arc::new(AppState {
+            router: Arc::new(router),
+            acme_challenges: Default::default(),
+            authenticator: Arc::new(AnonymousAuthenticator),
+            metrics: metrics.clone(),
+            geoip: None,
+            health_enabled: false,
+            error_pages: Arc::new(ErrorPages::new(HashMap::new())),
+            jwt_manager: None,
+        });
+        let server_sock =
+            std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        server_sock.set_nonblocking(true).unwrap();
+        let server_addr = server_sock.local_addr().unwrap();
+        let mut cfg = config.listeners.into_iter().next().unwrap();
+        cfg.bind = format!("udp:{server_addr}");
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let server_state = state.clone();
+        let server_opts = opts.clone();
+        let server_rx = cert_rx.clone();
+        let server_task = tokio::spawn(async move {
+            let _ = super::run_quic(
+                cfg,
+                BoundSocket::Udp(server_sock),
+                server_state,
+                server_rx,
+                server_opts,
+                None,
+                shutdown_rx,
+            )
+            .await;
+        });
+
+        let _ = rustls::crypto::aws_lc_rs::default_provider()
+            .install_default();
+
+        // Client sends `Content-Length: 4096` (4 x the cap) with an
+        // empty body.  Per dispatch_request semantics, the listener
+        // must refuse based on the declared length alone, without
+        // waiting to read body bytes.
+        let upstream: hyper::Uri =
+            format!("https://127.0.0.1:{}/", server_addr.port())
+                .parse()
+                .unwrap();
+        let h3 = H3Client::new_for_test(&upstream, None).unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let req = hyper::Request::builder()
+            .method("POST")
+            .uri("/")
+            .header("host", "localhost")
+            .header("content-length", "4096")
+            .body(
+                http_body_util::Empty::<bytes::Bytes>::new()
+                    .map_err(|never| match never {})
+                    .boxed_unsync(),
+            )
+            .unwrap();
+        let resp = h3.request(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            413,
+            "expected 413 for declared length > max-request-body"
+        );
+
+        let _ = shutdown_tx.send(true);
+        let _ = tokio::time::timeout(
+            Duration::from_secs(2),
+            server_task,
+        )
+        .await;
+    }
+
+    /// Concurrent h3 requests through a single `H3Client`.  Phase 4
+    /// claimed the pool can serve arbitrary concurrency by cloning
+    /// `SendRequest` per request -- this test exercises that claim
+    /// directly: 10 parallel `request()` futures, all expected to
+    /// return 200, with the upstream observing exactly 1 QUIC
+    /// handshake.
+    #[tokio::test]
+    async fn h3_outbound_pool_serves_concurrent_requests() {
+        use crate::handler::proxy::H3Client;
+        use crate::tls::CertPair;
+        use std::time::Duration;
+
+        let pair = {
+            let (_acc, pair) = crate::tls::build_acceptor_with_pair_alpn(
+                &crate::config::TlsListenerConfig {
+                    cert: crate::config::TlsConfig::SelfSigned,
+                    options: crate::config::TlsOptions::default(),
+                },
+                &crate::config::TlsOptions::default(),
+                None,
+            )
+            .unwrap();
+            pair
+        };
+        let opts = crate::config::TlsOptions::default();
+        let (cert_tx, cert_rx) = tokio::sync::watch::channel(
+            Arc::new(CertPair {
+                chain: pair.chain.clone(),
+                key: crate::tls::clone_key(&pair.key),
+            }),
+        );
+        let _cert_tx_guard = cert_tx;
+
+        let config = Config::parse(
+            r#"
+            listener { bind "udp:127.0.0.1:0"; tls-self-signed }
+            vhost "localhost" {
+                location "/" {
+                    redirect { to "/ok"; code 200 }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        let metrics = Arc::new(Metrics::new());
+        let summary = Arc::new(
+            crate::handler::status::ServerSummary::from_config(&config),
+        );
+        let router =
+            Router::new(&config, &metrics, &summary, None).unwrap();
+        let server_metrics = metrics.clone();
+        let state = Arc::new(AppState {
+            router: Arc::new(router),
+            acme_challenges: Default::default(),
+            authenticator: Arc::new(AnonymousAuthenticator),
+            metrics: server_metrics.clone(),
+            geoip: None,
+            health_enabled: false,
+            error_pages: Arc::new(ErrorPages::new(HashMap::new())),
+            jwt_manager: None,
+        });
+        let server_sock =
+            std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        server_sock.set_nonblocking(true).unwrap();
+        let server_addr = server_sock.local_addr().unwrap();
+        let mut cfg = config.listeners.into_iter().next().unwrap();
+        cfg.bind = format!("udp:{server_addr}");
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let server_state = state.clone();
+        let server_opts = opts.clone();
+        let server_rx = cert_rx.clone();
+        let server_task = tokio::spawn(async move {
+            let _ = super::run_quic(
+                cfg,
+                BoundSocket::Udp(server_sock),
+                server_state,
+                server_rx,
+                server_opts,
+                None,
+                shutdown_rx,
+            )
+            .await;
+        });
+
+        let _ = rustls::crypto::aws_lc_rs::default_provider()
+            .install_default();
+
+        let upstream: hyper::Uri =
+            format!("https://127.0.0.1:{}/", server_addr.port())
+                .parse()
+                .unwrap();
+        let h3 = Arc::new(H3Client::new_for_test(&upstream, None).unwrap());
+
+        // Prime the connection with one request so the handshake is
+        // done before the parallel burst kicks off.  Without this,
+        // 10 simultaneous calls all see the cache empty and race to
+        // build it -- the Mutex serialises them but the first
+        // build_cached takes ~5-30 ms which throws off the
+        // "exactly 1 handshake" assertion only by chance.  Priming
+        // makes the test deterministic.
+        {
+            let mut prime_ok = false;
+            for _ in 0..20 {
+                if let Ok(r) = h3.request(make_empty_req()).await
+                    && r.status() == 200
+                {
+                    prime_ok = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            assert!(prime_ok, "priming request failed");
+        }
+        let prime_handshakes = server_metrics
+            .quic_handshakes_total
+            .load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            prime_handshakes, 1,
+            "expected priming to leave a single handshake"
+        );
+
+        // Fire 10 concurrent requests; await them all.  All must
+        // succeed and the handshake count must NOT have advanced
+        // beyond the one we just observed.
+        let mut handles = Vec::new();
+        for _ in 0..10 {
+            let h3 = h3.clone();
+            handles.push(tokio::spawn(async move {
+                h3.request(make_empty_req()).await
+            }));
+        }
+        let mut ok_count = 0usize;
+        for h in handles {
+            let resp = h.await.unwrap().unwrap();
+            if resp.status() == 200 {
+                ok_count += 1;
+            }
+        }
+        assert_eq!(
+            ok_count, 10,
+            "expected all 10 concurrent requests to return 200"
+        );
+        let final_handshakes = server_metrics
+            .quic_handshakes_total
+            .load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            final_handshakes, 1,
+            "concurrent requests must share one QUIC connection \
+             (got {final_handshakes} handshakes)"
+        );
+
+        let _ = shutdown_tx.send(true);
+        let _ = tokio::time::timeout(
+            Duration::from_secs(2),
+            server_task,
+        )
+        .await;
+    }
+
+    /// Pool reconnect after the upstream closes the connection.
+    /// Stands up a raw h3 upstream that accepts two QUIC connections
+    /// in sequence: serves one request on each and closes between
+    /// them.  The H3Client's cached entry from request 1 becomes
+    /// stale; the next user-issued request must succeed via a fresh
+    /// handshake without the caller having to manage the eviction
+    /// themselves.
+    ///
+    /// There's an inherent race after `conn.close()`: the client
+    /// sees `close_reason() == None` until the CONNECTION_CLOSE
+    /// frame propagates.  The pool handles this by evicting the
+    /// cached entry on any request-time error, so a third call
+    /// recovers when the second happens to land mid-race.  The test
+    /// issues up to three requests and asserts that the upstream
+    /// saw exactly two connections in total.
+    #[tokio::test]
+    async fn h3_outbound_pool_reconnects_after_close() {
+        use crate::handler::proxy::H3Client;
+        use crate::tls::CertPair;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        let _ = rustls::crypto::aws_lc_rs::default_provider()
+            .install_default();
+
+        let (_acc, pair) = crate::tls::build_acceptor_with_pair_alpn(
+            &crate::config::TlsListenerConfig {
+                cert: crate::config::TlsConfig::SelfSigned,
+                options: crate::config::TlsOptions::default(),
+            },
+            &crate::config::TlsOptions::default(),
+            None,
+        )
+        .unwrap();
+        let quic_cfg = crate::tls::build_quic_server_config(
+            &CertPair {
+                chain: pair.chain,
+                key: crate::tls::clone_key(&pair.key),
+            },
+            &crate::config::TlsOptions::default(),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let server_sock =
+            std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        server_sock.set_nonblocking(true).unwrap();
+        let server_addr = server_sock.local_addr().unwrap();
+        let accepts = Arc::new(AtomicUsize::new(0));
+        let accepts_srv = accepts.clone();
+
+        // Server task: accept two QUIC connections, serve one h3
+        // request on each, then close the connection in between.
+        // The explicit close is what makes this a reconnect test
+        // rather than the idle-reaper test: we don't wait for a
+        // timeout; the server actively tears the connection down.
+        let server_task = tokio::spawn(async move {
+            let endpoint = quinn::Endpoint::new(
+                quinn::EndpointConfig::default(),
+                Some(quic_cfg),
+                server_sock,
+                quinn::default_runtime().unwrap(),
+            )
+            .unwrap();
+            for _ in 0..2 {
+                let Some(incoming) = endpoint.accept().await else {
+                    break;
+                };
+                accepts_srv.fetch_add(1, Ordering::Relaxed);
+                let conn = match incoming.await {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+                let h3q = h3_quinn::Connection::new(conn.clone());
+                let mut h3 =
+                    h3::server::Connection::<_, bytes::Bytes>::new(h3q)
+                        .await
+                        .unwrap();
+                if let Ok(Some(resolver)) = h3.accept().await {
+                    let (_req, stream) =
+                        resolver.resolve_request().await.unwrap();
+                    let (mut send, _recv) = stream.split();
+                    let resp = hyper::Response::builder()
+                        .status(200)
+                        .body(())
+                        .unwrap();
+                    send.send_response(resp).await.unwrap();
+                    send.finish().await.unwrap();
+                }
+                // Give the response time to flush before tearing the
+                // connection down.  `send.finish()` completes once
+                // the local h3 stream is closed; the QUIC layer
+                // still has to flush packets to the wire.  Forcibly
+                // closing here without the pause aborts the response
+                // in flight and the client sees ApplicationClose
+                // instead of the 200.
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                conn.close(0u32.into(), b"bye");
+                // Second pause: let the CONNECTION_CLOSE reach the
+                // client before we accept the next handshake.
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            endpoint.close(0u32.into(), b"done");
+        });
+
+        let upstream: hyper::Uri =
+            format!("https://127.0.0.1:{}/", server_addr.port())
+                .parse()
+                .unwrap();
+        let h3 = H3Client::new_for_test(&upstream, None).unwrap();
+
+        // Request 1: opens the first connection.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let r1 = h3.request(make_empty_req()).await.unwrap();
+        assert_eq!(r1.status(), 200);
+
+        // Give the server's close + new-accept window time to land
+        // on the client side.  Even with this, the cached entry's
+        // close_reason() can lag, so the next request may fail
+        // mid-stream on the dying conn.  The pool evicts on any
+        // error, so a subsequent retry succeeds via conn 2.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // Send up to three requests; the second is allowed to fail
+        // because of the post-close race, but at least one of the
+        // post-r1 requests MUST succeed -- otherwise the reconnect
+        // path is broken.
+        let mut post_close_ok = false;
+        for _ in 0..3 {
+            match h3.request(make_empty_req()).await {
+                Ok(r) if r.status() == 200 => {
+                    post_close_ok = true;
+                    break;
+                }
+                _ => {
+                    tokio::time::sleep(
+                        Duration::from_millis(100),
+                    )
+                    .await;
+                }
+            }
+        }
+        assert!(
+            post_close_ok,
+            "no post-close request succeeded; pool didn't recover"
+        );
+
+        // Exactly two server-side accepts: one for r1, one for
+        // whichever post-close request triggered the fresh handshake.
+        let n = accepts.load(Ordering::Relaxed);
+        assert_eq!(
+            n, 2,
+            "expected exactly 2 upstream connections \
+             (reconnect after close); got {n}"
+        );
+
+        let _ = tokio::time::timeout(
+            Duration::from_secs(2),
+            server_task,
+        )
+        .await;
+    }
+
+    /// Multi-frame upload: drive a POST whose body is split across
+    /// several frames through the h3 outbound proxy client.  Stands
+    /// up a raw h3 upstream (no aloha layer in between) so the test
+    /// can directly observe how many `recv_data` calls the upstream
+    /// saw -- the real regression catch for any future change that
+    /// re-buffers request bodies before forwarding.
+    #[tokio::test]
+    async fn h3_outbound_streams_multi_frame_upload() {
+        use crate::handler::proxy::H3Client;
+        use bytes::Buf;
+        use http_body_util::BodyExt;
+        use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        let _ = rustls::crypto::aws_lc_rs::default_provider()
+            .install_default();
+
+        // 1. Self-signed cert for the upstream.
+        let (_acc, pair) = crate::tls::build_acceptor_with_pair_alpn(
+            &crate::config::TlsListenerConfig {
+                cert: crate::config::TlsConfig::SelfSigned,
+                options: crate::config::TlsOptions::default(),
+            },
+            &crate::config::TlsOptions::default(),
+            None,
+        )
+        .unwrap();
+        let quic_cfg = crate::tls::build_quic_server_config(
+            &crate::tls::CertPair {
+                chain: pair.chain,
+                key: crate::tls::clone_key(&pair.key),
+            },
+            &crate::config::TlsOptions::default(),
+            None,
+            None,
+        )
+        .unwrap();
+
+        // 2. Raw h3 upstream that counts bytes + recv_data() calls
+        //    and echoes them back as response headers.
+        let server_sock = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        server_sock.set_nonblocking(true).unwrap();
+        let server_addr = server_sock.local_addr().unwrap();
+        let bytes_seen = Arc::new(AtomicU64::new(0));
+        let frames_seen = Arc::new(AtomicUsize::new(0));
+        let bytes_seen_srv = bytes_seen.clone();
+        let frames_seen_srv = frames_seen.clone();
+        let server_task = tokio::spawn(async move {
+            let endpoint = quinn::Endpoint::new(
+                quinn::EndpointConfig::default(),
+                Some(quic_cfg),
+                server_sock,
+                quinn::default_runtime().unwrap(),
+            )
+            .unwrap();
+            // Single connection, single request is enough for the test.
+            let incoming = endpoint.accept().await.unwrap();
+            let conn = incoming.await.unwrap();
+            let h3q = h3_quinn::Connection::new(conn);
+            let mut h3 = h3::server::Connection::<_, bytes::Bytes>::new(h3q)
+                .await
+                .unwrap();
+            if let Ok(Some(resolver)) = h3.accept().await {
+                let (_req, req_stream) =
+                    resolver.resolve_request().await.unwrap();
+                let (mut send, mut recv) = req_stream.split();
+                let mut bytes = 0u64;
+                let mut frames = 0usize;
+                while let Some(mut chunk) =
+                    recv.recv_data().await.unwrap()
+                {
+                    frames += 1;
+                    bytes += chunk.remaining() as u64;
+                    // Consume the chunk so recv_data advances.
+                    let _ = chunk.copy_to_bytes(chunk.remaining());
+                }
+                bytes_seen_srv.store(bytes, Ordering::Relaxed);
+                frames_seen_srv.store(frames, Ordering::Relaxed);
+                let resp = hyper::Response::builder()
+                    .status(200)
+                    .header("x-body-length", bytes.to_string())
+                    .header("x-frame-count", frames.to_string())
+                    .body(())
+                    .unwrap();
+                send.send_response(resp).await.unwrap();
+                send.finish().await.unwrap();
+            }
+            // Drain the connection cleanly before drop.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            endpoint.close(0u32.into(), b"bye");
+        });
+
+        // 3. Build the H3 outbound client, with skip-verify against
+        //    our self-signed cert.
+        let upstream: hyper::Uri =
+            format!("https://127.0.0.1:{}/", server_addr.port())
+                .parse()
+                .unwrap();
+        let h3 = H3Client::new_for_test(&upstream, None).unwrap();
+
+        // 4. Build a multi-frame request body: 4 chunks of 32 KiB
+        //    each, fed through an mpsc-backed StreamBody so frames
+        //    really do flow in sequence rather than being collapsed.
+        let total_bytes = 4u64 * 32 * 1024;
+        let (tx, rx) = tokio::sync::mpsc::channel::<
+            Result<hyper::body::Frame<bytes::Bytes>, hyper::Error>,
+        >(2);
+        tokio::spawn(async move {
+            for _ in 0..4 {
+                let chunk = bytes::Bytes::from(vec![b'a'; 32 * 1024]);
+                let _ = tx
+                    .send(Ok(hyper::body::Frame::data(chunk)))
+                    .await;
+            }
+        });
+        let body = http_body_util::StreamBody::new(
+            tokio_stream::wrappers::ReceiverStream::new(rx),
+        )
+        .boxed_unsync();
+        let req = hyper::Request::builder()
+            .method("POST")
+            .uri("/")
+            .header("host", "localhost")
+            .body(body)
+            .unwrap();
+
+        // 5. Issue.  The raw server accepts exactly one request, so
+        // we can't safely retry; sleep briefly to let the server
+        // bind + start its accept loop first.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let resp = h3
+            .request(req)
+            .await
+            .expect("h3 request to raw upstream");
+        assert_eq!(resp.status(), 200);
+        let body_len = resp
+            .headers()
+            .get("x-body-length")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap();
+        let frame_count = resp
+            .headers()
+            .get("x-frame-count")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap();
+        assert_eq!(
+            body_len, total_bytes,
+            "upstream saw wrong byte count"
+        );
+        // Regression catch: re-buffering the body would collapse this
+        // to 1.  We sent 4 frames; allow 2+ to absorb any minor
+        // coalescing in the QUIC stack.
+        assert!(
+            frame_count >= 2,
+            "expected multiple frames (got {frame_count}); \
+             a regression to buffered uploads"
+        );
+
+        let _ = tokio::time::timeout(
+            Duration::from_secs(2),
+            server_task,
+        )
+        .await;
+    }
+
+    /// Helper: build a minimal GET / request with an empty ReqBody.
+    fn make_empty_req() -> hyper::Request<crate::error::ReqBody> {
+        use http_body_util::BodyExt;
+        hyper::Request::builder()
+            .method("GET")
+            .uri("/")
+            .header("host", "localhost")
+            .body(
+                http_body_util::Empty::<bytes::Bytes>::new()
+                    .map_err(|never| match never {})
+                    .boxed_unsync(),
+            )
+            .unwrap()
+    }
+
+    /// Helper: clone a `Request<ReqBody>` with an empty body.  Used by
+    /// the pool-reuse test to retry the first connect.  We can't clone
+    /// the body directly (UnsyncBoxBody is !Clone), so we rebuild it.
+    fn req_clone(
+        r: &hyper::Request<crate::error::ReqBody>,
+    ) -> hyper::Request<crate::error::ReqBody> {
+        use http_body_util::BodyExt;
+        let mut b = hyper::Request::builder()
+            .method(r.method().clone())
+            .uri(r.uri().clone())
+            .version(r.version());
+        for (k, v) in r.headers() {
+            b = b.header(k, v);
+        }
+        b.body(
+            http_body_util::Empty::<bytes::Bytes>::new()
+                .map_err(|never| match never {})
+                .boxed_unsync(),
+        )
+        .unwrap()
+    }
+
+    /// Simulates systemd socket activation: an `InheritedSockets`
+    /// pool already holds a bound UDP fd at the address we want to
+    /// listen on, and `bind_socket` should adopt that fd rather than
+    /// calling `bind(2)` afresh.  This mirrors what happens at startup
+    /// when LISTEN_FDS / a seamless-upgrade parent hands us a socket.
+    #[test]
+    fn bind_socket_adopts_inherited_udp_fd() {
+        use std::os::unix::io::{AsRawFd, IntoRawFd};
+
+        // 1. Create the "inherited" UDP socket.
+        let sock = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let addr = sock.local_addr().unwrap();
+        let fd = sock.as_raw_fd();
+        // Transfer ownership to a raw fd so the pool can hand it off
+        // exactly the way systemd would.  classify_fd uses ManuallyDrop
+        // to avoid closing the fd during the scan; our test bypasses
+        // the scan and goes straight to take_udp.
+        let fd_owned = sock.into_raw_fd();
+        assert_eq!(fd, fd_owned);
+
+        let mut inh = crate::inherit::InheritedSockets::from_udp_for_test(
+            std::collections::HashMap::from([(addr, fd_owned)]),
+        );
+
+        // 2. Build a ListenerConfig that targets exactly this address.
+        let cfg = ListenerConfig {
+            bind: format!("udp:{addr}"),
+            transport: crate::config::Transport::Udp,
+            tls: None,
+            stream: None,
+            accept_proxy_protocol: None,
+            default_vhost: None,
+            timeouts: Timeouts::default(),
+            max_connections: None,
+            max_request_body: None,
+            auto_alt_svc: None,
+            alpn: None,
+            quic_transport: None,
+        };
+
+        // 3. bind_socket must adopt the inherited fd (same fd number)
+        //    rather than open a fresh one.
+        let bound = super::bind_socket(&cfg, &mut inh).unwrap();
+        let adopted = match bound {
+            BoundSocket::Udp(s) => s,
+            _ => panic!("expected BoundSocket::Udp"),
+        };
+        assert_eq!(adopted.as_raw_fd(), fd_owned);
+        assert_eq!(adopted.local_addr().unwrap(), addr);
+
+        // 4. The pool must no longer contain the fd (take semantics).
+        assert!(inh.take_udp(addr).is_none());
+
+        drop(adopted);
+    }
+
+    // Helper module: a rustls verifier that accepts any cert.  Only
+    // used in the http3 round-trip test against our own self-signed
+    // listener; never compiled into the binary.
+    mod test_skip_verify {
+        use rustls::client::danger::{
+            HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
+        };
+        use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+        use rustls::{DigitallySignedStruct, SignatureScheme};
+
+        #[derive(Debug)]
+        pub(super) struct SkipServerVerification;
+        impl SkipServerVerification {
+            pub(super) fn new() -> Self {
+                Self
+            }
+        }
+        impl ServerCertVerifier for SkipServerVerification {
+            fn verify_server_cert(
+                &self,
+                _: &CertificateDer<'_>,
+                _: &[CertificateDer<'_>],
+                _: &ServerName<'_>,
+                _: &[u8],
+                _: UnixTime,
+            ) -> Result<ServerCertVerified, rustls::Error> {
+                Ok(ServerCertVerified::assertion())
+            }
+            fn verify_tls12_signature(
+                &self,
+                _: &[u8],
+                _: &CertificateDer<'_>,
+                _: &DigitallySignedStruct,
+            ) -> Result<HandshakeSignatureValid, rustls::Error> {
+                Ok(HandshakeSignatureValid::assertion())
+            }
+            fn verify_tls13_signature(
+                &self,
+                _: &[u8],
+                _: &CertificateDer<'_>,
+                _: &DigitallySignedStruct,
+            ) -> Result<HandshakeSignatureValid, rustls::Error> {
+                Ok(HandshakeSignatureValid::assertion())
+            }
+            fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+                vec![
+                    SignatureScheme::RSA_PSS_SHA256,
+                    SignatureScheme::RSA_PSS_SHA384,
+                    SignatureScheme::RSA_PSS_SHA512,
+                    SignatureScheme::RSA_PKCS1_SHA256,
+                    SignatureScheme::RSA_PKCS1_SHA384,
+                    SignatureScheme::RSA_PKCS1_SHA512,
+                    SignatureScheme::ECDSA_NISTP256_SHA256,
+                    SignatureScheme::ECDSA_NISTP384_SHA384,
+                    SignatureScheme::ECDSA_NISTP521_SHA512,
+                    SignatureScheme::ED25519,
+                ]
+            }
+        }
     }
 }

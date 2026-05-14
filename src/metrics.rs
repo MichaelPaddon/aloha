@@ -187,6 +187,13 @@ pub struct Snapshot {
     pub jwt_fail_1h: u64,
     pub jwt_expiry_1h: u64,
     pub jwt_issued_1h: u64,
+    /// HTTP/3 lifetime counters and live gauge.
+    pub quic_handshakes_total: u64,
+    pub quic_handshake_failures_total: u64,
+    pub quic_connections_active: i64,
+    pub quic_requests_total: u64,
+    /// Outbound h3 (proxy upstream) handshake count.
+    pub quic_outbound_handshakes_total: u64,
 }
 
 impl Snapshot {
@@ -348,6 +355,17 @@ pub struct Metrics {
     pub jwt_expiries: AtomicU64,
     // JWT session cookies successfully issued.
     pub jwt_issued: AtomicU64,
+    // HTTP/3 counters.  Kept separate from the overall request counters
+    // so operators can see the protocol split on the status page.
+    pub quic_handshakes_total: AtomicU64,
+    pub quic_handshake_failures_total: AtomicU64,
+    pub quic_connections_active: AtomicI64,
+    pub quic_requests_total: AtomicU64,
+    // Outbound HTTP/3: counts QUIC handshakes initiated by the reverse-
+    // proxy handler.  An h3-pool reuse satisfies a request without
+    // incrementing this counter, so the ratio of requests / handshakes
+    // is a direct read of pool effectiveness.
+    pub quic_outbound_handshakes_total: AtomicU64,
     // Ring-buffer archives (all written by tick_loop only).
     fine: Mutex<FineHistory>,
     paths: Mutex<PathData>,
@@ -373,6 +391,11 @@ impl Metrics {
             jwt_failures: AtomicU64::new(0),
             jwt_expiries: AtomicU64::new(0),
             jwt_issued: AtomicU64::new(0),
+            quic_handshakes_total: AtomicU64::new(0),
+            quic_handshake_failures_total: AtomicU64::new(0),
+            quic_connections_active: AtomicI64::new(0),
+            quic_requests_total: AtomicU64::new(0),
+            quic_outbound_handshakes_total: AtomicU64::new(0),
             fine: Mutex::new(FineHistory::new()),
             paths: Mutex::new(PathData {
                 slots: (0..FINE_SLOTS).map(|_| HashMap::new()).collect(),
@@ -521,6 +544,21 @@ impl Metrics {
             jwt_fail_1h,
             jwt_expiry_1h,
             jwt_issued_1h,
+            quic_handshakes_total: self
+                .quic_handshakes_total
+                .load(Ordering::Relaxed),
+            quic_handshake_failures_total: self
+                .quic_handshake_failures_total
+                .load(Ordering::Relaxed),
+            quic_connections_active: self
+                .quic_connections_active
+                .load(Ordering::Relaxed),
+            quic_requests_total: self
+                .quic_requests_total
+                .load(Ordering::Relaxed),
+            quic_outbound_handshakes_total: self
+                .quic_outbound_handshakes_total
+                .load(Ordering::Relaxed),
         }
     }
 
@@ -1259,6 +1297,11 @@ mod tests {
                 jwt_fail_1h: 0,
                 jwt_expiry_1h: 0,
                 jwt_issued_1h: 0,
+                quic_handshakes_total: 0,
+                quic_handshake_failures_total: 0,
+                quic_connections_active: 0,
+                quic_requests_total: 0,
+                quic_outbound_handshakes_total: 0,
             }
             .uptime_human()
         };

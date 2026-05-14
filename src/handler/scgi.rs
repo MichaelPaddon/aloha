@@ -4,9 +4,9 @@
 
 use super::cgi_util::{build_cgi_env, parse_cgi_response};
 use crate::error::{HttpResponse, response_502};
+use crate::error::ReqBody;
 use http_body_util::BodyExt;
 use hyper::Request;
-use hyper::body::Incoming;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 pub struct ScgiHandler {
@@ -26,7 +26,7 @@ impl ScgiHandler {
 
     pub async fn serve(
         &self,
-        req: Request<Incoming>,
+        req: Request<ReqBody>,
         matched_prefix: &str,
     ) -> HttpResponse {
         let (parts, body) = req.into_parts();
@@ -215,5 +215,44 @@ mod tests {
         )
         .unwrap();
         assert_eq!(value, body.len().to_string());
+    }
+
+    /// Empty environment + empty body still produces a well-formed
+    /// netstring with `CONTENT_LENGTH=0` first (required by the SCGI
+    /// spec).  Verifies the function doesn't crash on the no-data
+    /// degenerate case.
+    #[test]
+    fn build_scgi_request_empty_body() {
+        let req = build_scgi_request(&[], b"");
+        let colon = req.iter().position(|&b| b == b':').unwrap();
+        let declared_len: usize =
+            std::str::from_utf8(&req[..colon]).unwrap().parse().unwrap();
+        // Header block must contain "CONTENT_LENGTH\0 0\0" plus the
+        // trailing "," that terminates the netstring.
+        let header_block = &req[colon + 1..colon + 1 + declared_len];
+        assert!(header_block.starts_with(b"CONTENT_LENGTH\0"));
+        // Last byte of the wire-format request is the netstring
+        // terminator.
+        assert_eq!(*req.last().unwrap(), b',');
+    }
+
+    /// Each name/value pair is appended in order and terminated with
+    /// NUL bytes -- the spec requires this for SCGI parsers to
+    /// recognise key/value boundaries.
+    #[test]
+    fn build_scgi_request_preserves_pair_order() {
+        let e = env(&[
+            ("AAA", "1"),
+            ("BBB", "2"),
+            ("CCC", "3"),
+        ]);
+        let req = build_scgi_request(&e, b"");
+        // CONTENT_LENGTH is forced first by the function, so AAA/BBB/
+        // CCC follow in declaration order.
+        let s = String::from_utf8_lossy(&req);
+        let a = s.find("AAA").expect("AAA present");
+        let b = s.find("BBB").expect("BBB present");
+        let c = s.find("CCC").expect("CCC present");
+        assert!(a < b && b < c, "pair order not preserved");
     }
 }

@@ -10,12 +10,27 @@ license = "BSD-2-Clause"
 name = "aloha"
 path = "src/main.rs"
 
+# Test-only h3 client used by the shell integration suite to round-
+# trip HTTP/3 requests.  Built with `cargo build --example h3get`
+# and copied into the container alongside aloha.  Lives as a
+# [[example]] rather than a [[bin]] so it doesn't appear in the
+# packaged binaries.
+[[example]]
+name = "h3get"
+path = "examples/h3get.rs"
+
 [dependencies]
 hyper              = { version = "1",    features = ["http1", "http2", "server"] }
 hyper-util         = { version = "0.1",  features = ["tokio", "server", "server-auto", "client", "client-legacy"] }
 http-body-util     = "0.1"
 bytes              = "1"
 rustls             = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }
+# HTTP/3 stack -- unconditional so the packaged binary always serves
+# both TCP (h1/h2) and UDP (h3) listeners; an operator only needs to
+# declare a `udp:` listener in aloha.kdl to enable h3.
+quinn              = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs"] }
+h3                 = "0.0.8"
+h3-quinn           = "0.0.10"
 rustls-pemfile     = "2"
 tokio-rustls       = "0.26"
 rcgen              = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
@@ -25,6 +40,10 @@ arc-swap           = "1"
 x509-parser        = "0.18"
 serde_json         = "1"
 tokio              = { version = "1",    features = ["full"] }
+# Adapter for turning tokio mpsc receivers into http_body_util StreamBody.
+# Used by the HTTP/3 outbound proxy to stream upstream response bodies
+# back to the downstream client without buffering them in memory.
+tokio-stream       = "0.1"
 kdl                = "6"
 miette             = { version = "7", default-features = false }
 regex              = "1"
@@ -69,6 +88,10 @@ smoke = '''
 set -e
 cd "$CARGO_MANIFEST_DIR"
 cargo build --release
+# h3get is the HTTP/3 client used by the integration suite (Debian
+# curl can't do --http3).  Built as a release example so the
+# container picks up an optimised binary.
+cargo build --release --example h3get
 podman build -f tests/integration/Containerfile -t aloha-test .
 podman run aloha-test
 '''

@@ -3495,6 +3495,456 @@ fn auth_subrequest_missing_url_is_error() {
     );
 }
 
+// -- QUIC / HTTP/3 listener config ---------------------------------
+
+#[test]
+fn udp_prefix_selects_quic_transport() {
+    let cfg = Config::parse(
+        r#"
+        listener { bind "[::]:443"; tls-self-signed }
+        listener { bind "udp:[::]:443"; tls-self-signed }
+        vhost h { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap();
+    assert_eq!(cfg.listeners[0].transport, Transport::Tcp);
+    assert_eq!(cfg.listeners[1].transport, Transport::Udp);
+}
+
+#[test]
+fn udp_listener_without_tls_is_rejected() {
+    // QUIC mandates TLS at the transport level; surface that at parse
+    // time rather than letting an unencrypted UDP socket open.
+    let err = Config::parse(
+        r#"
+        listener { bind "udp:[::]:443" }
+        vhost h { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err.contains("udp:") && err.contains("tls"),
+        "expected tls-required error, got: {err}"
+    );
+}
+
+#[test]
+fn udp_listener_rejects_stream_mode() {
+    let err = Config::parse(
+        r#"
+        listener {
+            bind "udp:[::]:443"
+            tls-self-signed
+            proxy "127.0.0.1:5432"
+        }
+        vhost h { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err.contains("proxy") && err.contains("udp"),
+        "expected stream-mode rejection, got: {err}"
+    );
+}
+
+#[test]
+fn auto_alt_svc_populated_on_matching_tcp_listener() {
+    // Same-port TCP + UDP pair: TCP listener should carry an Alt-Svc
+    // value pointing h3 clients at the UDP port.
+    let cfg = Config::parse(
+        r#"
+        listener { bind "[::]:443"; tls-self-signed }
+        listener { bind "udp:[::]:443"; tls-self-signed }
+        vhost h { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap();
+    let tcp = &cfg.listeners[0];
+    let udp = &cfg.listeners[1];
+    assert_eq!(tcp.transport, Transport::Tcp);
+    let alt = tcp.auto_alt_svc.as_deref().expect("auto_alt_svc set");
+    assert!(alt.contains("h3=\":443\""), "unexpected: {alt}");
+    assert!(alt.contains("ma="), "missing max-age in: {alt}");
+    // UDP listener itself never carries Alt-Svc -- it would only
+    // advertise to other QUIC clients, which is meaningless.
+    assert!(udp.auto_alt_svc.is_none());
+}
+
+#[test]
+fn auto_alt_svc_only_when_ports_match() {
+    // h3 on a different port from the TCP TLS endpoint: no automatic
+    // advertisement -- the user has to set Alt-Svc explicitly via the
+    // existing headers mechanism for that topology.
+    let cfg = Config::parse(
+        r#"
+        listener { bind "[::]:443"; tls-self-signed }
+        listener { bind "udp:[::]:8443"; tls-self-signed }
+        vhost h { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap();
+    assert!(cfg.listeners[0].auto_alt_svc.is_none());
+    assert!(cfg.listeners[1].auto_alt_svc.is_none());
+}
+
+#[test]
+fn auto_alt_svc_skips_plain_http_listeners() {
+    // Auto-Alt-Svc only applies to TLS listeners.  A bare port-80
+    // HTTP listener should not advertise h3 even when a same-port
+    // UDP listener is configured (which would be unusual but legal).
+    let cfg = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        listener { bind "udp:[::]:80"; tls-self-signed }
+        vhost h { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap();
+    assert!(cfg.listeners[0].auto_alt_svc.is_none());
+}
+
+// -- Proxy scheme (HTTP/3 outbound) --------------------------------
+
+#[test]
+fn proxy_connect_timeout_parses() {
+    let cfg = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        vhost h {
+            location "/" {
+                proxy "http://backend/" { connect-timeout 5 }
+            }
+        }
+        "#,
+    )
+    .unwrap();
+    match &cfg.vhosts[0].locations[0].handler {
+        HandlerConfig::Proxy { connect_timeout_secs, .. } => {
+            assert_eq!(*connect_timeout_secs, Some(5));
+        }
+        _ => panic!("expected Proxy handler"),
+    }
+}
+
+#[test]
+fn proxy_tls_skip_verify_parses() {
+    let cfg = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        vhost h {
+            location "/" {
+                proxy "https://backend/" {
+                    tls { skip-verify }
+                }
+            }
+        }
+        "#,
+    )
+    .unwrap();
+    let h = &cfg.vhosts[0].locations[0].handler;
+    match h {
+        HandlerConfig::Proxy { upstream_tls, .. } => {
+            assert!(upstream_tls.as_ref().unwrap().skip_verify);
+        }
+        _ => panic!("expected Proxy handler"),
+    }
+}
+
+#[test]
+fn proxy_tls_skip_verify_rejects_non_https_upstream() {
+    // skip-verify only makes sense for https upstreams; an http://
+    // upstream silently consuming the knob would be a footgun.
+    let err = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        vhost h {
+            location "/" {
+                proxy "http://backend/" {
+                    tls { skip-verify }
+                }
+            }
+        }
+        "#,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err.contains("https://"),
+        "expected https-only rejection, got: {err}"
+    );
+}
+
+#[test]
+fn proxy_pool_max_idle_parses() {
+    let cfg = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        vhost h {
+            location "/" {
+                proxy "http://backend/" {
+                    pool-max-idle 32
+                }
+            }
+        }
+        "#,
+    )
+    .unwrap();
+    let h = &cfg.vhosts[0].locations[0].handler;
+    match h {
+        HandlerConfig::Proxy { pool_max_idle, .. } => {
+            assert_eq!(*pool_max_idle, Some(32));
+        }
+        _ => panic!("expected Proxy handler"),
+    }
+}
+
+#[test]
+fn proxy_scheme_h3_parses() {
+    let cfg = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        vhost h {
+            location "/" {
+                proxy "https://backend.example/" {
+                    scheme "h3"
+                }
+            }
+        }
+        "#,
+    )
+    .unwrap();
+    let h = &cfg.vhosts[0].locations[0].handler;
+    match h {
+        HandlerConfig::Proxy { scheme, .. } => {
+            assert_eq!(*scheme, ProxyUpstreamScheme::H3);
+        }
+        _ => panic!("expected Proxy handler"),
+    }
+}
+
+#[test]
+fn proxy_scheme_h3_rejects_non_https_upstream() {
+    let err = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        vhost h {
+            location "/" {
+                proxy "http://backend.example/" { scheme "h3" }
+            }
+        }
+        "#,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err.contains("scheme=h3") && err.contains("https"),
+        "expected scheme=h3 requires https; got: {err}"
+    );
+}
+
+#[test]
+fn proxy_scheme_unknown_is_rejected() {
+    let err = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        vhost h {
+            location "/" {
+                proxy "https://backend.example/" { scheme "spdy" }
+            }
+        }
+        "#,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("unknown proxy scheme"), "got: {err}");
+}
+
+// -- Per-listener ALPN override ------------------------------------
+
+#[test]
+fn alpn_override_parses() {
+    let cfg = Config::parse(
+        r#"
+        listener {
+            bind "[::]:443"
+            tls-self-signed
+            alpn "h2" "http/1.1"
+        }
+        vhost h { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap();
+    assert_eq!(
+        cfg.listeners[0].alpn.as_deref(),
+        Some(&["h2".to_string(), "http/1.1".to_string()][..])
+    );
+}
+
+#[test]
+fn alpn_default_is_none() {
+    // Absent `alpn` child means "use the protocol default" (None);
+    // the tls builders fill in ["h2","http/1.1"] / ["h3"] as
+    // appropriate.
+    let cfg = Config::parse(
+        r#"
+        listener { bind "[::]:443"; tls-self-signed }
+        vhost h { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap();
+    assert!(cfg.listeners[0].alpn.is_none());
+}
+
+// -- QUIC transport tuning -----------------------------------------
+
+#[test]
+fn quic_transport_block_parses() {
+    let cfg = Config::parse(
+        r#"
+        listener {
+            bind "udp:[::]:443"
+            tls-self-signed
+            quic-transport {
+                max-concurrent-bidi-streams 256
+                max-idle-timeout 60
+                keep-alive-interval 10
+                zero-rtt #true
+                retry-tokens #false
+                retry-token-lifetime 30
+            }
+        }
+        vhost h { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap();
+    let qt = cfg.listeners[0]
+        .quic_transport
+        .as_ref()
+        .expect("quic_transport set");
+    assert_eq!(qt.max_concurrent_bidi_streams, Some(256));
+    assert_eq!(qt.max_idle_timeout_secs, Some(60));
+    assert_eq!(qt.keep_alive_interval_secs, Some(10));
+    assert!(qt.zero_rtt_enabled);
+    assert!(!qt.retry_tokens);
+    assert_eq!(qt.retry_token_lifetime_secs, Some(30));
+}
+
+#[test]
+fn quic_transport_defaults() {
+    // Empty quic-transport block: zero-rtt off, retry-tokens on,
+    // everything else None (= use quinn defaults).
+    let cfg = Config::parse(
+        r#"
+        listener {
+            bind "udp:[::]:443"
+            tls-self-signed
+            quic-transport { }
+        }
+        vhost h { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap();
+    let qt = cfg.listeners[0].quic_transport.as_ref().unwrap();
+    assert!(!qt.zero_rtt_enabled);
+    assert!(qt.retry_tokens);
+    assert_eq!(qt.max_concurrent_bidi_streams, None);
+}
+
+#[test]
+fn quic_transport_rejected_on_tcp_listener() {
+    let err = Config::parse(
+        r#"
+        listener {
+            bind "[::]:443"
+            tls-self-signed
+            quic-transport { max-idle-timeout 30 }
+        }
+        vhost h { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err.contains("quic-transport") && err.contains("udp:"),
+        "expected udp-only rejection, got: {err}"
+    );
+}
+
+// -- Per-vhost ALPN ------------------------------------------------
+
+#[test]
+fn vhost_alpn_parses() {
+    let cfg = Config::parse(
+        r#"
+        listener { bind "[::]:443"; tls-self-signed }
+        vhost "example.com" {
+            alpn "http/1.1"
+            location "/" { static { root "."; } }
+        }
+        "#,
+    )
+    .unwrap();
+    assert_eq!(
+        cfg.vhosts[0].alpn.as_deref(),
+        Some(&["http/1.1".to_string()][..])
+    );
+}
+
+#[test]
+fn vhost_alpn_empty_list_is_rejected() {
+    let err = Config::parse(
+        r#"
+        listener { bind "[::]:443"; tls-self-signed }
+        vhost "example.com" {
+            alpn
+            location "/" { static { root "."; } }
+        }
+        "#,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err.contains("alpn") && err.contains("at least one"),
+        "expected empty-alpn rejection, got: {err}"
+    );
+}
+
+#[test]
+fn vhost_alpn_default_is_none() {
+    let cfg = Config::parse(
+        r#"
+        listener { bind "[::]:443"; tls-self-signed }
+        vhost "example.com" {
+            location "/" { static { root "."; } }
+        }
+        "#,
+    )
+    .unwrap();
+    assert!(cfg.vhosts[0].alpn.is_none());
+}
+
+#[test]
+fn alpn_empty_list_is_rejected() {
+    let err = Config::parse(
+        r#"
+        listener {
+            bind "[::]:443"
+            tls-self-signed
+            alpn
+        }
+        vhost h { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err.contains("alpn") && err.contains("at least one"),
+        "expected empty-alpn rejection, got: {err}"
+    );
+}
+
 // -- Named certificates --------------------------------------------
 
 #[test]

@@ -14,11 +14,10 @@ pub mod static_files;
 pub mod status;
 
 use crate::config::HandlerConfig;
-use crate::error::{HttpResponse, response_redirect};
+use crate::error::{HttpResponse, ReqBody, response_redirect};
 use crate::headers::{RequestContext, Template};
 use crate::metrics::Metrics;
 use hyper::Request;
-use hyper::body::Incoming;
 use std::sync::Arc;
 
 pub enum Handler {
@@ -57,11 +56,29 @@ impl Handler {
                 upstream,
                 strip_prefix,
                 proxy_protocol,
-            } => Ok(Handler::Proxy(Box::new(proxy::ProxyHandler::new(
-                upstream,
-                *strip_prefix,
-                *proxy_protocol,
-            )?))),
+                scheme,
+                pool_idle_timeout_secs,
+                pool_max_idle,
+                upstream_tls,
+                connect_timeout_secs,
+            } => {
+                let skip_verify = upstream_tls
+                    .as_ref()
+                    .map(|t| t.skip_verify)
+                    .unwrap_or(false);
+                let mut h = proxy::ProxyHandler::new(
+                    upstream,
+                    *strip_prefix,
+                    *proxy_protocol,
+                    *scheme,
+                    *pool_idle_timeout_secs,
+                    *pool_max_idle,
+                    skip_verify,
+                    *connect_timeout_secs,
+                )?;
+                h.set_metrics(metrics.clone());
+                Ok(Handler::Proxy(Box::new(h)))
+            }
             HandlerConfig::Redirect { to, code } => Ok(Handler::Redirect {
                 to: Template::parse(to),
                 code: *code,
@@ -108,7 +125,7 @@ impl Handler {
 
     pub async fn serve(
         &self,
-        req: Request<Incoming>,
+        req: Request<ReqBody>,
         matched_prefix: &str,
         ctx: &RequestContext<'_>,
     ) -> HttpResponse {

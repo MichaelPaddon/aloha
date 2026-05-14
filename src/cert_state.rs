@@ -51,4 +51,46 @@ mod tests {
         // Original is unchanged.
         assert_eq!(cs.expiry_ts, 1_000);
     }
+
+    /// Publishing a renewed cert state replaces the entry observed
+    /// by readers.  This is the round-trip the status page relies on:
+    /// AcmeManager writes the new expiry, the status snapshot reads
+    /// it back.
+    #[test]
+    fn publish_and_read_back() {
+        let shared = new_shared();
+        // Writer publishes.
+        {
+            let mut v = shared.write().unwrap();
+            v.push(CertState {
+                domains: vec!["one.example".into()],
+                expiry_ts: 1_000,
+                next_renewal_ts: 900,
+            });
+        }
+        // Reader sees the same value.
+        let snapshot: Vec<CertState> = shared.read().unwrap().clone();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].domains, vec!["one.example".to_string()]);
+        assert_eq!(snapshot[0].expiry_ts, 1_000);
+
+        // Writer mutates (renewal scenario).
+        {
+            let mut v = shared.write().unwrap();
+            v[0].expiry_ts = 9_999;
+            v[0].next_renewal_ts = 9_899;
+        }
+        // Reader sees the new value, not the snapshot.
+        let after: Vec<CertState> = shared.read().unwrap().clone();
+        assert_eq!(after[0].expiry_ts, 9_999);
+        assert_eq!(after[0].next_renewal_ts, 9_899);
+    }
+
+    /// `new_shared` returns an empty vector that readers can lock
+    /// without blocking on writers that haven't written yet.
+    #[test]
+    fn new_shared_starts_empty() {
+        let shared = new_shared();
+        assert_eq!(shared.read().unwrap().len(), 0);
+    }
 }

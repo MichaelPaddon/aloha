@@ -50,6 +50,69 @@ assert_body() {
     fi
 }
 
+# H3GET <stdout-var> <stderr-var> <url> [h3get-flags...]
+# Runs the h3get helper, captures stdout (body) and stderr
+# (status + headers).  Exit code is set in $H3GET_RC.  Debian's
+# packaged curl lacks --http3 support, so we ship our own client.
+H3GET=/usr/bin/h3get
+h3get_run() {
+    local out_var="$1" err_var="$2" url="$3"
+    shift 3
+    local rc=0 tmpdir
+    tmpdir=$(mktemp -d)
+    # h3get returns non-zero for 4xx/5xx; capture rc explicitly so
+    # `set -e` in run.sh doesn't abort the suite on negative-path
+    # assertions (e.g. asserting a 403).
+    "$H3GET" --skip-verify --max-time 5 "$@" "$url" \
+        >"$tmpdir/out" 2>"$tmpdir/err" || rc=$?
+    H3GET_RC=$rc
+    printf -v "$out_var" "%s" "$(cat "$tmpdir/out")"
+    printf -v "$err_var" "%s" "$(cat "$tmpdir/err")"
+    rm -rf "$tmpdir"
+}
+
+# assert_h3_status <label> <expected-status> <url> [h3get-flags...]
+assert_h3_status() {
+    local label="$1" expected="$2" url="$3"
+    shift 3
+    local out err
+    h3get_run out err "$url" "$@"
+    # First line of stderr is "HTTP/3 <code> <reason>".
+    local got
+    got=$(echo "$err" | head -n1 | awk '{print $2}')
+    if [ "$got" = "$expected" ]; then
+        pass "$label"
+    else
+        fail "$label" "expected HTTP/3 $expected, got '$got' (rc=$H3GET_RC)"
+    fi
+}
+
+# assert_h3_body <label> <literal-text> <url> [h3get-flags...]
+assert_h3_body() {
+    local label="$1" text="$2" url="$3"
+    shift 3
+    local out err
+    h3get_run out err "$url" "$@"
+    if echo "$out" | grep -qF "$text"; then
+        pass "$label"
+    else
+        fail "$label" "'$text' not found in h3 body (rc=$H3GET_RC)"
+    fi
+}
+
+# assert_h3_header <label> <header-name> <pattern> <url> [h3get-flags...]
+assert_h3_header() {
+    local label="$1" header="$2" pattern="$3" url="$4"
+    shift 4
+    local out err
+    h3get_run out err "$url" "$@"
+    if echo "$err" | grep -qi "^${header}:.*${pattern}"; then
+        pass "$label"
+    else
+        fail "$label" "no '${header}: *${pattern}' in h3 response"
+    fi
+}
+
 # --- server lifecycle ------------------------------------------------
 
 # start_server <config-path> <port> [https]
@@ -89,7 +152,24 @@ start_server() {
 
 stop_server() {
     if [ -n "${ALOHA_PID:-}" ]; then
-        kill "$ALOHA_PID" 2>/dev/null || true
+        kill -TERM "$ALOHA_PID" 2>/dev/null || true
+        # Give the graceful drain a brief grace window, then escalate
+        # to SIGKILL.  Production drains can take up to 30 s (see
+        # DRAIN_TIMEOUT in src/listener.rs), which is fine for live
+        # traffic but pathological for the test suite -- particularly
+        # when a QUIC client exited without a CONNECTION_CLOSE, since
+        # the QUIC listener will wait_idle until quinn's idle timer
+        # fires.  Two seconds is plenty for any in-process test where
+        # nothing is genuinely in flight.
+        local waited=0
+        while kill -0 "$ALOHA_PID" 2>/dev/null; do
+            sleep 0.1
+            waited=$((waited + 1))
+            if [ "$waited" -ge 20 ]; then
+                kill -KILL "$ALOHA_PID" 2>/dev/null || true
+                break
+            fi
+        done
         wait "$ALOHA_PID" 2>/dev/null || true
         ALOHA_PID=""
     fi

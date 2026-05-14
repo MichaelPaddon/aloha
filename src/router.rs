@@ -15,7 +15,6 @@ use crate::headers::{HeaderOp, HeaderRules, Template};
 use crate::metrics::Metrics;
 use anyhow::bail;
 use hyper::Request;
-use hyper::body::Incoming;
 use hyper::header::HeaderName;
 use regex::Regex;
 use std::collections::HashMap;
@@ -119,9 +118,9 @@ impl Router {
         })
     }
 
-    pub fn route(
+    pub fn route<B>(
         &self,
-        req: &Request<Incoming>,
+        req: &Request<B>,
         listener_bind: &str,
     ) -> Option<Route> {
         let host = req

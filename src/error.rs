@@ -3,7 +3,10 @@
 // a single concrete type without generics leaking through the call stack.
 
 use bytes::Bytes;
-use http_body_util::{BodyExt, Full, combinators::BoxBody as ErasedBody};
+use http_body_util::{
+    BodyExt, Full,
+    combinators::{BoxBody as ErasedBody, UnsyncBoxBody},
+};
 use hyper::{Response, StatusCode};
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -14,6 +17,20 @@ use std::path::PathBuf;
 // buffering while keeping error responses as simple in-memory buffers.
 pub type BoxBody = ErasedBody<Bytes, std::io::Error>;
 pub type HttpResponse = Response<BoxBody>;
+
+/// Type-erased *request* body shared by all handlers.  Hyper's TCP
+/// path delivers `hyper::body::Incoming`; the HTTP/3 path delivers a
+/// streaming adapter over h3's `recv_data`.  Both are boxed into
+/// `ReqBody` at the listener boundary so handler signatures don't have
+/// to be generic over the body type and proxy/CGI/FastCGI/SCGI
+/// backends see a single concrete body from either transport.
+///
+/// Uses `UnsyncBoxBody` rather than the Sync-bounded `BoxBody` because
+/// h3 / quinn streams are `Send` but not `Sync`; the request body is
+/// owned by exactly one task at a time so the looser bound costs us
+/// nothing.  The error type is `hyper::Error` to match the body type
+/// the proxy handler forwards to its `hyper-util` Client.
+pub type ReqBody = UnsyncBoxBody<Bytes, hyper::Error>;
 
 // Wrap an owned or static byte buffer in the common body type.
 pub fn bytes_body(b: impl Into<Bytes>) -> BoxBody {
