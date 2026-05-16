@@ -367,6 +367,20 @@ fn parse_auth_backend(
                 .map(|n| n as u64)
                 .unwrap_or(600);
 
+            let refresh = child_bool(node, "refresh").unwrap_or(false);
+            let refresh_ttl_secs = child_i64(node, "refresh-ttl")
+                .map(|n| n as u64)
+                .unwrap_or(86_400);
+            let refresh_cookie_name = child_str(node, "refresh-cookie")
+                .unwrap_or_else(|| "__aloha_oidc_refresh".to_owned());
+
+            // The OIDC spec requires `offline_access` for refresh
+            // tokens; quietly add it so operators don't have to
+            // remember (mirrors how `openid` is injected above).
+            if refresh && !scopes.iter().any(|s| s == "offline_access") {
+                scopes.push("offline_access".to_owned());
+            }
+
             // Both reserved paths must be absolute so request-URI
             // comparison in listener.rs is straightforward.
             for (k, p) in
@@ -397,6 +411,9 @@ fn parse_auth_backend(
                 login_path,
                 callback_path,
                 state_ttl_secs,
+                refresh,
+                refresh_ttl_secs,
+                refresh_cookie_name,
             }))
         }
         other => bail!(

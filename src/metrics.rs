@@ -355,6 +355,12 @@ pub struct Metrics {
     pub jwt_expiries: AtomicU64,
     // JWT session cookies successfully issued.
     pub jwt_issued: AtomicU64,
+    // OIDC refresh-token exchanges that returned a fresh ID token
+    // (and therefore extended the user's session without a redirect).
+    pub oidc_refreshes: AtomicU64,
+    // OIDC refresh attempts the IdP rejected; typically means the
+    // session was revoked or the refresh token expired.
+    pub oidc_refresh_failures: AtomicU64,
     // HTTP/3 counters.  Kept separate from the overall request counters
     // so operators can see the protocol split on the status page.
     pub quic_handshakes_total: AtomicU64,
@@ -391,6 +397,8 @@ impl Metrics {
             jwt_failures: AtomicU64::new(0),
             jwt_expiries: AtomicU64::new(0),
             jwt_issued: AtomicU64::new(0),
+            oidc_refreshes: AtomicU64::new(0),
+            oidc_refresh_failures: AtomicU64::new(0),
             quic_handshakes_total: AtomicU64::new(0),
             quic_handshake_failures_total: AtomicU64::new(0),
             quic_connections_active: AtomicI64::new(0),

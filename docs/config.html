@@ -501,6 +501,9 @@
               <li><a href="#auth-oidc-login-path">login-path</a></li>
               <li><a href="#auth-oidc-callback-path">callback-path</a></li>
               <li><a href="#auth-oidc-state-ttl">state-ttl</a></li>
+              <li><a href="#auth-oidc-refresh">refresh</a></li>
+              <li><a href="#auth-oidc-refresh-ttl">refresh-ttl</a></li>
+              <li><a href="#auth-oidc-refresh-cookie">refresh-cookie</a></li>
             </ul>
             <li class="nav-parent"><a href="#auth-pam">pam<span class="nav-tog">›</span></a></li>
             <ul class="nav-list sub3 nav-children">
@@ -1341,9 +1344,43 @@
                   user&rsquo;s username.  Falls back to <code>sub</code>
                   when the named claim is absent.</td>
             </tr>
+            <tr id="auth-oidc-refresh">
+              <td>refresh</td><td>boolean</td><td><code>#false</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Enable refresh-token support so that short-lived
+                  session cookies can be renewed without a full IdP
+                  round-trip.  When enabled, aloha implicitly requests
+                  the <code>offline_access</code> scope.</td>
+            </tr>
+            <tr id="auth-oidc-refresh-ttl">
+              <td>refresh-ttl</td><td>integer (s)</td>
+              <td><code>86400</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Sliding idle timeout for a refresh session.  Each
+                  successful refresh resets the timer; entries idle
+                  longer than this are evicted.</td>
+            </tr>
+            <tr id="auth-oidc-refresh-cookie">
+              <td>refresh-cookie</td><td>string</td>
+              <td><code>__aloha_oidc_refresh</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Name of the long-lived HttpOnly cookie carrying the
+                  opaque refresh-session id.</td>
+            </tr>
           </tbody>
         </table>
       </div>
+      <p>
+        When <code>refresh</code> is enabled, the callback response
+        sets a second cookie alongside the session JWT: an opaque
+        session id that maps to an in-memory entry holding the IdP
+        refresh token.  On any request where the session JWT has
+        expired but the refresh cookie is still present, aloha calls
+        the IdP&rsquo;s token endpoint, issues a fresh JWT, and serves
+        the request without bouncing the browser through the login
+        redirect.  Refresh state is in-memory only; a server restart
+        forces users to re-log in.
+      </p>
 
       <h4 id="auth-pam">PAM</h4>
 <pre><code><span class="kw">server</span> {

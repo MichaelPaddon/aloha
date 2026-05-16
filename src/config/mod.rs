@@ -188,6 +188,17 @@ pub struct OidcConfig {
     /// Seconds an unfinished login state (PKCE verifier, nonce,
     /// return-to URL) is kept before being evicted.  Defaults to 600.
     pub state_ttl_secs: u64,
+    /// When true, request `offline_access` from the IdP and persist
+    /// the resulting refresh token so the short-lived JWT session
+    /// cookie can be renewed without user interaction.
+    pub refresh: bool,
+    /// Seconds an idle refresh session is kept before eviction.
+    /// Sliding window: each successful refresh resets the timer.
+    /// Defaults to 86_400 (1 day).
+    pub refresh_ttl_secs: u64,
+    /// Cookie name carrying the opaque refresh session id.
+    /// Defaults to `__aloha_oidc_refresh`.
+    pub refresh_cookie_name: String,
 }
 
 /// Configuration for the LDAP authentication back-end.

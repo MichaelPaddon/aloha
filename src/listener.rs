@@ -524,33 +524,96 @@ impl AlohaService {
             // valid JWT can short-circuit the credential back-end.
             // A token that is present but fails validation (bad signature,
             // expired) counts as a security event.
-            let jwt_identity: Option<crate::auth::Identity> = match state
+            let jwt_outcome = state
                 .jwt_manager
                 .as_ref()
-                .and_then(|j| j.validate(req.headers()))
+                .and_then(|j| j.validate(req.headers()));
+            let mut jwt_identity: Option<crate::auth::Identity> =
+                match &jwt_outcome {
+                    Some(crate::jwt::JwtResult::Valid(id)) => Some(id.clone()),
+                    Some(crate::jwt::JwtResult::Invalid) => {
+                        state.metrics.jwt_failures.fetch_add(
+                            1,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                        None
+                    }
+                    // Valid signature but past exp — count separately from
+                    // bad-signature failures so operators can distinguish
+                    // normal session expiry from token tampering.
+                    Some(crate::jwt::JwtResult::Expired) => {
+                        state.metrics.jwt_expiries.fetch_add(
+                            1,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                        None
+                    }
+                    None => None,
+                };
+
+            // Set-Cookie values queued while resolving auth: applied
+            // to the response just before it leaves dispatch().  Used
+            // by the OIDC refresh path to install a freshly-issued
+            // JWT session cookie and (on rotation) an updated
+            // refresh-id cookie.
+            let mut pending_set_cookies: Vec<String> = Vec::new();
+
+            // Reactive OIDC refresh: when the JWT is missing or
+            // expired and the browser still carries a refresh-id
+            // cookie, ask the IdP for a new ID token rather than
+            // forcing the user back through the login redirect.
+            if jwt_identity.is_none()
+                && let Some(oidc) = state.oidc.as_ref()
+                && oidc.refresh_enabled()
+                && let Some(jwt) = state.jwt_manager.as_ref()
+                && let Some(sid) =
+                    cookie_value(req.headers(), oidc.refresh_cookie_name())
             {
-                Some(crate::jwt::JwtResult::Valid(id)) => Some(id),
-                Some(crate::jwt::JwtResult::Invalid) => {
-                    state
-                        .metrics
-                        .jwt_failures
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    None
+                match oidc.refresh(&sid).await {
+                    Ok((identity, new_sid)) => {
+                        state.metrics.oidc_refreshes.fetch_add(
+                            1,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                        match jwt.make_set_cookie(&identity, is_tls) {
+                            Ok(c) => pending_set_cookies.push(c),
+                            Err(e) => tracing::warn!(
+                                "oidc refresh: jwt cookie failed: {e:#}"
+                            ),
+                        }
+                        if new_sid != sid {
+                            pending_set_cookies.push(refresh_cookie_value(
+                                oidc.refresh_cookie_name(),
+                                &new_sid,
+                                oidc.refresh_ttl_secs(),
+                                is_tls,
+                            ));
+                        }
+                        jwt_identity = Some(identity);
+                    }
+                    Err(e) => {
+                        state.metrics.oidc_refresh_failures.fetch_add(
+                            1,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                        tracing::warn!(
+                            "oidc refresh: {e:#}; clearing cookie"
+                        );
+                        // The IdP rejected the refresh; the server
+                        // side is already gone, so tell the browser
+                        // to stop sending it.
+                        pending_set_cookies.push(clear_refresh_cookie(
+                            oidc.refresh_cookie_name(),
+                            is_tls,
+                        ));
+                    }
                 }
-                // Valid signature but past exp — count separately from
-                // bad-signature failures so operators can distinguish
-                // normal session expiry from token tampering.
-                Some(crate::jwt::JwtResult::Expired) => {
-                    state
-                        .metrics
-                        .jwt_expiries
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    None
-                }
-                None => None,
-            };
-            // Track whether the principal came from a JWT so we know
-            // whether to issue a fresh cookie after the response.
+            }
+
+            // Track whether the principal came from a JWT (or refresh)
+            // so we know whether to issue a fresh cookie after the
+            // response.  Refresh-derived identities already have a new
+            // cookie queued above; this flag suppresses a second one.
             let used_jwt = jwt_identity.is_some();
 
             // In session mode the inner authenticator is the credential
@@ -739,6 +802,18 @@ impl AlohaService {
                                 &rules.response,
                                 &req_ctx,
                             );
+                        }
+
+                        // Apply Set-Cookie headers queued during auth
+                        // resolution (OIDC refresh path).  Done before
+                        // the fresh-login JWT branch below so a single
+                        // request never produces two `aloha_session`
+                        // cookies.
+                        for c in &pending_set_cookies {
+                            if let Ok(hval) = c.parse() {
+                                resp.headers_mut()
+                                    .append(hyper::header::SET_COOKIE, hval);
+                            }
                         }
 
                         // In session mode: when the principal was just
@@ -963,6 +1038,37 @@ fn clear_state_cookie(is_tls: bool) -> String {
     v
 }
 
+// Long-lived refresh cookie carrying the opaque sid that maps to a
+// server-side `RefreshEntry`.  SameSite=Strict because the cookie is
+// only ever consumed by aloha itself (never sent across the IdP
+// redirect); Secure on TLS.
+fn refresh_cookie_value(
+    name: &str,
+    sid: &str,
+    ttl_secs: u64,
+    is_tls: bool,
+) -> String {
+    let mut v = format!(
+        "{name}={sid}; Path=/; HttpOnly; SameSite=Strict; Max-Age={ttl_secs}",
+    );
+    if is_tls {
+        v.push_str("; Secure");
+    }
+    v
+}
+
+// Past-dated refresh cookie used to immediately revoke a stale
+// session client-side after the server side has been forgotten.
+fn clear_refresh_cookie(name: &str, is_tls: bool) -> String {
+    let mut v = format!(
+        "{name}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0",
+    );
+    if is_tls {
+        v.push_str("; Secure");
+    }
+    v
+}
+
 // Build the 302-to-IdP response for `<login_path>`.  The state-id
 // returned from `begin_login` is mirrored into a same-origin cookie
 // so the callback can detect cross-tenant CSRF (state in URL but no
@@ -1012,13 +1118,14 @@ async fn handle_oidc_callback(
         return response_status(400, Some(error_pages)).await;
     }
 
-    let (identity, return_to) = match oidc.complete_login(code, &state).await {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!("oidc: callback failed: {e:#}");
-            return response_status(400, Some(error_pages)).await;
-        }
-    };
+    let (identity, return_to, refresh_sid) =
+        match oidc.complete_login(code, &state).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("oidc: callback failed: {e:#}");
+                return response_status(400, Some(error_pages)).await;
+            }
+        };
 
     // JWT is required for OIDC (validator enforces this); without it
     // the post-login identity would have nowhere to go.
@@ -1043,6 +1150,19 @@ async fn handle_oidc_callback(
     builder = builder.header(hyper::header::SET_COOKIE, session_cookie);
     builder = builder
         .header(hyper::header::SET_COOKIE, clear_state_cookie(is_tls));
+    // When refresh-token support is enabled and the IdP returned a
+    // refresh token, also pin the browser to the opaque session id so
+    // subsequent requests with an expired JWT can be renewed without
+    // bouncing through the IdP.
+    if let Some(sid) = refresh_sid {
+        let v = refresh_cookie_value(
+            oidc.refresh_cookie_name(),
+            &sid,
+            oidc.refresh_ttl_secs(),
+            is_tls,
+        );
+        builder = builder.header(hyper::header::SET_COOKIE, v);
+    }
     builder
         .body(bytes_body(Bytes::new()))
         .expect("known-valid status and headers")

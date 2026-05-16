@@ -4509,6 +4509,77 @@ fn oidc_rejects_non_https_issuer() {
 }
 
 #[test]
+fn oidc_refresh_defaults_off() {
+    let cfg = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        server {
+            state-dir "/tmp/aloha-test"
+            auth jwt {
+                wrap oidc {
+                    issuer "https://accounts.example.com"
+                    client-id "abc"
+                    redirect-uri "https://app.example/cb"
+                }
+            }
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap();
+    let oc = match &cfg.server.auth {
+        Some(AuthBackend::Jwt { inner: Some(b), .. }) => match b.as_ref() {
+            AuthBackend::Oidc(c) => c,
+            _ => panic!("expected oidc"),
+        },
+        _ => panic!("expected jwt"),
+    };
+    assert!(!oc.refresh);
+    assert_eq!(oc.refresh_ttl_secs, 86_400);
+    assert_eq!(oc.refresh_cookie_name, "__aloha_oidc_refresh");
+    assert!(!oc.scopes.iter().any(|s| s == "offline_access"));
+}
+
+#[test]
+fn oidc_refresh_enabled_injects_offline_access_scope() {
+    let cfg = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        server {
+            state-dir "/tmp/aloha-test"
+            auth jwt {
+                wrap oidc {
+                    issuer "https://accounts.example.com"
+                    client-id "abc"
+                    redirect-uri "https://app.example/cb"
+                    refresh #true
+                    refresh-ttl 3600
+                    refresh-cookie "session_rt"
+                }
+            }
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap();
+    let oc = match &cfg.server.auth {
+        Some(AuthBackend::Jwt { inner: Some(b), .. }) => match b.as_ref() {
+            AuthBackend::Oidc(c) => c,
+            _ => panic!("expected oidc"),
+        },
+        _ => panic!("expected jwt"),
+    };
+    assert!(oc.refresh);
+    assert_eq!(oc.refresh_ttl_secs, 3600);
+    assert_eq!(oc.refresh_cookie_name, "session_rt");
+    assert!(
+        oc.scopes.iter().any(|s| s == "offline_access"),
+        "expected offline_access in scopes, got {:?}",
+        oc.scopes,
+    );
+}
+
+#[test]
 fn oidc_defaults_inject_openid_scope() {
     let cfg = Config::parse(
         r#"
