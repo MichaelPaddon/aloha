@@ -145,6 +145,49 @@ pub enum AuthBackend {
         validity_secs: u64,
         inner: Option<Box<AuthBackend>>,
     },
+    /// Single sign-on via an external OIDC identity provider.
+    /// Must be wrapped inside `auth jwt { wrap oidc { ... } }` so the
+    /// post-login identity can be persisted as a session cookie.
+    Oidc(OidcConfig),
+}
+
+/// Configuration for the OIDC SSO authentication back-end.
+///
+/// The provider is contacted at startup for discovery (`/.well-known/
+/// openid-configuration`) and JWKS fetch.  After a successful
+/// authorisation-code + PKCE login the identity is persisted as an
+/// aloha JWT session cookie via `JwtManager::make_set_cookie`.
+#[derive(Debug, Clone)]
+pub struct OidcConfig {
+    /// IdP issuer URL, e.g. `"https://accounts.google.com"`.
+    pub issuer: String,
+    /// OAuth2 client identifier registered with the IdP.
+    pub client_id: String,
+    /// OAuth2 client secret.  Prefer `client_secret_file` so the
+    /// secret never appears in the parsed AST.  `None` is permitted
+    /// for public clients (PKCE-only).
+    pub client_secret: Option<String>,
+    /// Redirect URI registered with the IdP; must match the
+    /// listener-facing URL that points at `callback_path`.
+    pub redirect_uri: String,
+    /// OAuth2 scopes requested at login.  `openid` is required.
+    pub scopes: Vec<String>,
+    /// ID-token claim from which to read the username.
+    /// Defaults to `"sub"`.
+    pub username_claim: String,
+    /// ID-token claim from which to read group membership.
+    /// Accepts a JSON array or a space-delimited string.
+    /// Defaults to `"groups"`.
+    pub groups_claim: String,
+    /// Path served by aloha that initiates the OIDC login flow.
+    /// Defaults to `"/.aloha/oidc/login"`.
+    pub login_path: String,
+    /// Path served by aloha that receives the IdP's authorisation
+    /// code callback.  Defaults to `"/.aloha/oidc/callback"`.
+    pub callback_path: String,
+    /// Seconds an unfinished login state (PKCE verifier, nonce,
+    /// return-to URL) is kept before being evicted.  Defaults to 600.
+    pub state_ttl_secs: u64,
 }
 
 /// Configuration for the LDAP authentication back-end.
@@ -702,6 +745,24 @@ impl Config {
                 "server.state-dir is required when auth jwt is \
                  configured"
             );
+        }
+        // OIDC must be wrapped inside JWT so the post-login identity
+        // can be persisted as a session cookie.  An OIDC backend used
+        // standalone would have nowhere to record the authenticated
+        // principal after the callback completes.
+        match &self.server.auth {
+            Some(AuthBackend::Oidc(_)) => bail!(
+                "auth oidc must be wrapped inside auth jwt; \
+                 use:  auth jwt {{ wrap oidc {{ ... }} }}"
+            ),
+            Some(AuthBackend::Jwt { inner, .. }) => {
+                if let Some(b) = inner.as_deref()
+                    && matches!(b, AuthBackend::Jwt { .. })
+                {
+                    bail!("auth jwt cannot wrap another auth jwt");
+                }
+            }
+            _ => {}
         }
         // Certificate names must be unique.
         {

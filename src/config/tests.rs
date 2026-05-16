@@ -4419,3 +4419,121 @@ fn cert_key_mode_invalid_is_error() {
     );
     assert!(result.is_err());
 }
+
+#[test]
+fn oidc_parses_inside_jwt_wrap() {
+    let cfg = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        server {
+            state-dir "/tmp/aloha-test"
+            auth jwt {
+                validity 3600
+                wrap oidc {
+                    issuer "https://accounts.example.com"
+                    client-id "abc"
+                    client-secret "shh"
+                    redirect-uri "https://app.example/.aloha/oidc/callback"
+                    scope "openid"
+                    scope "email"
+                    groups-claim "roles"
+                    username-claim "preferred_username"
+                }
+            }
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap();
+    let inner = match &cfg.server.auth {
+        Some(AuthBackend::Jwt { inner: Some(b), .. }) => b.as_ref(),
+        _ => panic!("expected Jwt with inner"),
+    };
+    let oc = match inner {
+        AuthBackend::Oidc(c) => c,
+        _ => panic!("expected inner Oidc"),
+    };
+    assert_eq!(oc.issuer, "https://accounts.example.com");
+    assert_eq!(oc.client_id, "abc");
+    assert_eq!(oc.client_secret.as_deref(), Some("shh"));
+    assert_eq!(oc.username_claim, "preferred_username");
+    assert_eq!(oc.groups_claim, "roles");
+    assert!(oc.scopes.contains(&"openid".to_owned()));
+    assert!(oc.scopes.contains(&"email".to_owned()));
+    assert_eq!(oc.login_path, "/.aloha/oidc/login");
+    assert_eq!(oc.callback_path, "/.aloha/oidc/callback");
+}
+
+#[test]
+fn oidc_outside_jwt_is_rejected() {
+    let result = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        server {
+            auth oidc {
+                issuer "https://accounts.example.com"
+                client-id "abc"
+                redirect-uri "https://app.example/cb"
+            }
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    );
+    let err = result.expect_err("oidc without jwt wrap must be rejected");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("auth oidc must be wrapped inside auth jwt"),
+        "expected wrap-required error, got: {msg}",
+    );
+}
+
+#[test]
+fn oidc_rejects_non_https_issuer() {
+    let result = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        server {
+            state-dir "/tmp/aloha-test"
+            auth jwt {
+                wrap oidc {
+                    issuer "http://evil.example.com"
+                    client-id "abc"
+                    redirect-uri "https://app.example/cb"
+                }
+            }
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn oidc_defaults_inject_openid_scope() {
+    let cfg = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        server {
+            state-dir "/tmp/aloha-test"
+            auth jwt {
+                wrap oidc {
+                    issuer "https://accounts.example.com"
+                    client-id "abc"
+                    redirect-uri "https://app.example/.aloha/oidc/callback"
+                }
+            }
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap();
+    let oc = match &cfg.server.auth {
+        Some(AuthBackend::Jwt { inner: Some(b), .. }) => match b.as_ref() {
+            AuthBackend::Oidc(c) => c,
+            _ => panic!("expected oidc"),
+        },
+        _ => panic!("expected jwt"),
+    };
+    // Default scope set includes the mandatory `openid`.
+    assert!(oc.scopes.first().map(|s| s.as_str()) == Some("openid"));
+}

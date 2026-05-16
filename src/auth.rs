@@ -42,6 +42,21 @@ impl Authenticator for AnonymousAuthenticator {
     }
 }
 
+/// Placeholder used when the credential back-end is OIDC.  OIDC drives
+/// authentication through dedicated `/login` and `/callback` endpoints,
+/// not through request headers, so the regular header-based path always
+/// returns `Anonymous`.  Existing as a distinct type lets the
+/// `AppState.authenticator` factory return something concrete without
+/// special-casing the OIDC branch.
+pub struct OidcAuthenticator;
+
+#[async_trait]
+impl Authenticator for OidcAuthenticator {
+    async fn authenticate(&self, _headers: &hyper::HeaderMap) -> Principal {
+        Principal::Anonymous
+    }
+}
+
 // -- Subrequest auth -----------------------------------------------
 
 /// Authenticates by making an HTTP GET to a configured endpoint.

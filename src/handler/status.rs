@@ -121,6 +121,12 @@ fn auth_desc(b: &AuthBackend) -> AuthDesc {
             has_jwt_session: false,
             jwt_validity_secs: None,
         },
+        AuthBackend::Oidc(c) => AuthDesc {
+            kind: "OIDC",
+            detail: c.issuer.clone(),
+            has_jwt_session: false,
+            jwt_validity_secs: None,
+        },
         AuthBackend::Jwt { inner, validity_secs, .. } => {
             let (kind, detail, has_inner) = match inner {
                 None => ("JWT", "standalone".into(), false),

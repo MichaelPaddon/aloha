@@ -488,6 +488,20 @@
               <li><a href="#auth-ldap-timeout">timeout</a></li>
               <li><a href="#auth-ldap-url">url</a></li>
             </ul>
+            <li class="nav-parent"><a href="#auth-oidc">oidc<span class="nav-tog">›</span></a></li>
+            <ul class="nav-list sub3 nav-children">
+              <li><a href="#auth-oidc-issuer">issuer</a></li>
+              <li><a href="#auth-oidc-client-id">client-id</a></li>
+              <li><a href="#auth-oidc-client-secret">client-secret</a></li>
+              <li><a href="#auth-oidc-client-secret-file">client-secret-file</a></li>
+              <li><a href="#auth-oidc-redirect-uri">redirect-uri</a></li>
+              <li><a href="#auth-oidc-scope">scope</a></li>
+              <li><a href="#auth-oidc-username-claim">username-claim</a></li>
+              <li><a href="#auth-oidc-groups-claim">groups-claim</a></li>
+              <li><a href="#auth-oidc-login-path">login-path</a></li>
+              <li><a href="#auth-oidc-callback-path">callback-path</a></li>
+              <li><a href="#auth-oidc-state-ttl">state-ttl</a></li>
+            </ul>
             <li class="nav-parent"><a href="#auth-pam">pam<span class="nav-tog">›</span></a></li>
             <ul class="nav-list sub3 nav-children">
               <li><a href="#auth-pam-service">service</a></li>
@@ -1094,7 +1108,8 @@
                   Credential back-end for first-time logins.
                   Accepts the same argument as a top-level
                   <code>auth</code> block: <code>pam</code>,
-                  <code>ldap</code>, or <code>subrequest</code>
+                  <code>ldap</code>, <code>subrequest</code>, or
+                  <a href="#auth-oidc"><code>oidc</code></a>
                   with their usual children.
                   Omit for standalone validation.</td>
             </tr>
@@ -1194,6 +1209,140 @@
           Many LDAP servers accept an empty password as an anonymous
           bind, which would otherwise grant access to any username.
         </span>
+      </div>
+
+      <h4 id="auth-oidc">OIDC</h4>
+<pre><code><span class="kw">server</span> {
+    <span class="kw">state-dir</span> <span class="str">"/var/lib/aloha"</span>
+    <span class="kw">auth</span> <span class="kw">jwt</span> {
+        <span class="kw">validity</span> <span class="num">3600</span>
+        <span class="kw">wrap</span> <span class="kw">oidc</span> {
+            <span class="kw">issuer</span>             <span class="str">"https://accounts.example.com"</span>
+            <span class="kw">client-id</span>          <span class="str">"aloha"</span>
+            <span class="kw">client-secret-file</span> <span class="str">"/etc/aloha/oidc-secret"</span>
+            <span class="kw">redirect-uri</span>       <span class="str">"https://app.example/.aloha/oidc/callback"</span>
+
+            <span class="cm">// Optional:</span>
+            <span class="kw">scope</span>          <span class="str">"openid"</span> <span class="str">"profile"</span> <span class="str">"email"</span>
+            <span class="kw">groups-claim</span>   <span class="str">"groups"</span>
+            <span class="kw">username-claim</span> <span class="str">"sub"</span>
+        }
+    }
+}</code></pre>
+      <p>
+        Browser-driven single sign-on against any standards-compliant
+        OIDC identity provider (Google, Keycloak, Authelia, Okta, Entra,
+        &hellip;).  Uses the authorization-code flow with PKCE.
+        OIDC must be wrapped inside <a href="#auth-jwt">auth jwt</a> so
+        the post-login identity can be persisted as an aloha session
+        cookie; subsequent requests carry authentication via that
+        cookie and never round-trip to the IdP.
+      </p>
+      <p>
+        Two server-wide endpoints are reserved automatically (paths
+        configurable):
+      </p>
+      <ul>
+        <li><code>GET /.aloha/oidc/login</code> &mdash; generates the
+            PKCE challenge and CSRF state, then 302-redirects to the
+            IdP&rsquo;s authorisation endpoint.</li>
+        <li><code>GET /.aloha/oidc/callback</code> &mdash; validates
+            the state cookie, exchanges the code for an ID token,
+            issues the JWT session cookie, and 302-redirects to the
+            originally requested URL.</li>
+      </ul>
+      <p>
+        When OIDC is configured, anonymous browser clients that hit a
+        protected location are automatically redirected to the login
+        endpoint instead of receiving the basic-auth challenge.
+        API clients (no <code>Accept: text/html</code> or carrying an
+        <code>Authorization</code> header) keep the 401 response.
+      </p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Children</th><th>Type</th>
+              <th>Default</th><th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr id="auth-oidc-callback-path">
+              <td>callback-path</td><td>string</td>
+              <td><code>/.aloha/oidc/callback</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Path the IdP redirects to with the authorisation
+                  code.  Must match the path component of
+                  <code>redirect-uri</code>.</td>
+            </tr>
+            <tr id="auth-oidc-client-id">
+              <td>client-id</td><td>string</td><td>&mdash;</td>
+              <td><span class="badge badge-req">required</span>
+                  OAuth2 client identifier registered with the IdP.</td>
+            </tr>
+            <tr id="auth-oidc-client-secret">
+              <td>client-secret</td><td>string</td><td>&mdash;</td>
+              <td><span class="badge badge-opt">optional</span>
+                  OAuth2 client secret.  Prefer
+                  <code>client-secret-file</code> so the value never
+                  appears in the parsed configuration.</td>
+            </tr>
+            <tr id="auth-oidc-client-secret-file">
+              <td>client-secret-file</td><td>string</td><td>&mdash;</td>
+              <td><span class="badge badge-opt">optional</span>
+                  Path to a file containing the OAuth2 client secret.
+                  Trailing whitespace is stripped.  Takes precedence
+                  over an inline <code>client-secret</code>.</td>
+            </tr>
+            <tr id="auth-oidc-groups-claim">
+              <td>groups-claim</td><td>string</td><td><code>groups</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Name of the ID-token claim listing the user&rsquo;s
+                  groups.  Accepts a JSON array of strings or a
+                  single space-delimited string.</td>
+            </tr>
+            <tr id="auth-oidc-issuer">
+              <td>issuer</td><td>string</td><td>&mdash;</td>
+              <td><span class="badge badge-req">required</span>
+                  Base issuer URL.  Must use <code>https://</code>;
+                  <code>http://localhost</code> is permitted for
+                  development.  Discovery is performed at startup.</td>
+            </tr>
+            <tr id="auth-oidc-login-path">
+              <td>login-path</td><td>string</td>
+              <td><code>/.aloha/oidc/login</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Path on aloha that initiates the OIDC login flow.</td>
+            </tr>
+            <tr id="auth-oidc-redirect-uri">
+              <td>redirect-uri</td><td>string</td><td>&mdash;</td>
+              <td><span class="badge badge-req">required</span>
+                  Absolute URL registered with the IdP; must resolve
+                  back to <code>callback-path</code> on this server.</td>
+            </tr>
+            <tr id="auth-oidc-scope">
+              <td>scope</td><td>string&hellip;</td>
+              <td><code>openid profile email</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  One <code>scope "&hellip;"</code> child per requested
+                  scope.  The mandatory <code>openid</code> scope is
+                  added automatically when absent.</td>
+            </tr>
+            <tr id="auth-oidc-state-ttl">
+              <td>state-ttl</td><td>integer (s)</td><td><code>600</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Seconds an unfinished login (PKCE verifier + nonce +
+                  return URL) is held before eviction.</td>
+            </tr>
+            <tr id="auth-oidc-username-claim">
+              <td>username-claim</td><td>string</td><td><code>sub</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Name of the ID-token claim used as the authenticated
+                  user&rsquo;s username.  Falls back to <code>sub</code>
+                  when the named claim is absent.</td>
+            </tr>
+          </tbody>
+        </table>
       </div>
 
       <h4 id="auth-pam">PAM</h4>

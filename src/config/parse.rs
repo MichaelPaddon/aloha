@@ -2,7 +2,8 @@ use super::kdl::*;
 use super::{
     AuthBackend, BasicAuthConfig, CertificateDef, ErrorPageDef, GeoIpConfig,
     HandlerConfig, HeaderOpConfig, HealthConfig, LdapAuthConfig,
-    ListenerConfig, LocationConfig, PolicyRuleDef, ProxyProtocolVersion,
+    ListenerConfig, LocationConfig, OidcConfig, PolicyRuleDef,
+    ProxyProtocolVersion,
     ServerConfig, StreamMode, SubrequestAuthConfig, Timeouts, TlsConfig,
     TlsListenerConfig, TlsOptions, TlsVersion, UpstreamTlsConfig, VHostConfig,
     VHostName,
@@ -291,9 +292,116 @@ fn parse_auth_backend(
                 inner,
             })
         }
+        "oidc" => {
+            let issuer = req_child_str(node, "issuer")
+                .with_context(|| format!("{name}:{line}"))?;
+            let client_id = req_child_str(node, "client-id")
+                .with_context(|| format!("{name}:{line}"))?;
+            let redirect_uri = req_child_str(node, "redirect-uri")
+                .with_context(|| format!("{name}:{line}"))?;
+
+            // The secret may be inline (dev/test) or read from a file
+            // (production) so it never appears in the parsed AST.
+            // File form wins when both are present.
+            let inline_secret = child_str(node, "client-secret");
+            let secret_file = child_str(node, "client-secret-file");
+            let client_secret = match secret_file {
+                Some(path) => {
+                    let s = std::fs::read_to_string(&path).with_context(
+                        || {
+                            format!(
+                                "{name}:{line}: auth oidc: \
+                                 client-secret-file: reading {path}"
+                            )
+                        },
+                    )?;
+                    Some(s.trim().to_owned())
+                }
+                None => inline_secret,
+            };
+
+            // Issuer must be a https:// URL (RFC 8252 / OIDC Core 1.0)
+            // or http://localhost for local development.
+            if !(issuer.starts_with("https://")
+                || issuer.starts_with("http://localhost")
+                || issuer.starts_with("http://127.0.0.1"))
+            {
+                bail!(
+                    "{name}:{line}: auth oidc: issuer must be https:// \
+                     (http://localhost permitted for development)"
+                );
+            }
+
+            // Each `scope "..."` child contributes one scope; default
+            // to the OIDC-standard set when none are listed.  The
+            // mandatory `openid` scope is added implicitly below.
+            let mut scopes: Vec<String> = node
+                .children()
+                .map(|doc| {
+                    doc.nodes()
+                        .iter()
+                        .filter(|n| n.name().value() == "scope")
+                        .flat_map(positional_strs)
+                        .collect()
+                })
+                .unwrap_or_default();
+            if scopes.is_empty() {
+                scopes = vec![
+                    "openid".to_owned(),
+                    "profile".to_owned(),
+                    "email".to_owned(),
+                ];
+            } else if !scopes.iter().any(|s| s == "openid") {
+                scopes.insert(0, "openid".to_owned());
+            }
+
+            let username_claim = child_str(node, "username-claim")
+                .unwrap_or_else(|| "sub".to_owned());
+            let groups_claim = child_str(node, "groups-claim")
+                .unwrap_or_else(|| "groups".to_owned());
+            let login_path = child_str(node, "login-path")
+                .unwrap_or_else(|| "/.aloha/oidc/login".to_owned());
+            let callback_path = child_str(node, "callback-path")
+                .unwrap_or_else(|| "/.aloha/oidc/callback".to_owned());
+            let state_ttl_secs = child_i64(node, "state-ttl")
+                .map(|n| n as u64)
+                .unwrap_or(600);
+
+            // Both reserved paths must be absolute so request-URI
+            // comparison in listener.rs is straightforward.
+            for (k, p) in
+                [("login-path", &login_path), ("callback-path", &callback_path)]
+            {
+                if !p.starts_with('/') {
+                    bail!(
+                        "{name}:{line}: auth oidc: {k} must be an \
+                         absolute path (start with '/')"
+                    );
+                }
+            }
+            if login_path == callback_path {
+                bail!(
+                    "{name}:{line}: auth oidc: login-path and \
+                     callback-path must differ"
+                );
+            }
+
+            Ok(AuthBackend::Oidc(OidcConfig {
+                issuer,
+                client_id,
+                client_secret,
+                redirect_uri,
+                scopes,
+                username_claim,
+                groups_claim,
+                login_path,
+                callback_path,
+                state_ttl_secs,
+            }))
+        }
         other => bail!(
             "{name}:{line}: unknown auth backend '{other}'; \
-             expected 'pam', 'ldap', 'subrequest', or 'jwt'"
+             expected 'pam', 'ldap', 'subrequest', 'jwt', or 'oidc'"
         ),
     }
 }

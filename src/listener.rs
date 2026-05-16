@@ -242,6 +242,11 @@ pub struct AppState {
     // JWKS endpoint, validates incoming tokens, and (in session mode)
     // issues cookies after successful credential authentication.
     pub jwt_manager: Option<Arc<crate::jwt::JwtManager>>,
+    // OIDC provider: present when `auth jwt { wrap oidc ... }` is
+    // configured.  Drives the login/callback endpoints dispatched by
+    // dispatch() before vhost routing, and turns Deny(401) into a 302
+    // for browser clients so the SSO flow is transparent.
+    pub oidc: Option<Arc<crate::oidc::OidcProvider>>,
 }
 
 // Wraps the per-request authenticator so it implements AuthProvider
@@ -471,6 +476,49 @@ impl AlohaService {
                 return Ok(resp);
             }
 
+            // OIDC login + callback endpoints.  Intercepted before
+            // vhost routing for the same reason JWKS is: these are
+            // server-wide built-ins and must not be shadowed by a
+            // user-defined `location`.  The configured `login-path`
+            // and `callback-path` default to `/.aloha/oidc/...`, which
+            // is unlikely to clash with application paths.
+            if let Some(oidc) = &state.oidc {
+                if path == oidc.login_path() {
+                    let resp = handle_oidc_login(oidc, &query, is_tls);
+                    let ms = start.elapsed().as_millis();
+                    state.metrics.dec_active();
+                    state.metrics.record(resp.status().as_u16(), ms);
+                    state.metrics.record_path(&path);
+                    log_access(
+                        &method, &path,
+                        resp.status().as_u16(),
+                        ms, peer, &host, "-",
+                    );
+                    return Ok(resp);
+                }
+                if path == oidc.callback_path() {
+                    let resp = handle_oidc_callback(
+                        oidc,
+                        state.jwt_manager.as_deref(),
+                        req.headers(),
+                        &query,
+                        is_tls,
+                        &state.error_pages,
+                    )
+                    .await;
+                    let ms = start.elapsed().as_millis();
+                    state.metrics.dec_active();
+                    state.metrics.record(resp.status().as_u16(), ms);
+                    state.metrics.record_path(&path);
+                    log_access(
+                        &method, &path,
+                        resp.status().as_u16(),
+                        ms, peer, &host, "-",
+                    );
+                    return Ok(resp);
+                }
+            }
+
             // JWT pre-validation: extract and verify the session cookie
             // (or Bearer token) before the access policy runs so that a
             // valid JWT can short-circuit the credential back-end.
@@ -560,6 +608,27 @@ impl AlohaService {
                                         path, host,
                                         "auth failed"
                                     );
+                                    // OIDC SSO: a browser hitting a
+                                    // protected location with no
+                                    // valid session cookie should be
+                                    // redirected through the IdP
+                                    // rather than seeing the basic-
+                                    // auth challenge.  API and CLI
+                                    // clients (no `Accept: text/html`
+                                    // or carrying `Authorization`)
+                                    // continue to receive 401.
+                                    if let Some(oidc) = &state.oidc
+                                        && wants_html(req.headers())
+                                    {
+                                        let to = build_login_redirect(
+                                            oidc.login_path(),
+                                            &path_and_query,
+                                        );
+                                        return (
+                                            response_redirect(&to, 302),
+                                            String::from("-"),
+                                        );
+                                    }
                                     let realm = route
                                         .basic_auth
                                         .as_ref()
@@ -761,6 +830,222 @@ impl AlohaService {
             Ok(resp)
         }
     }
+}
+
+// True when the caller is plausibly a browser: accepts HTML and
+// hasn't presented an `Authorization` header.  Used to decide
+// whether to auto-redirect into the OIDC login flow on a 401.
+fn wants_html(h: &hyper::HeaderMap) -> bool {
+    if h.contains_key(hyper::header::AUTHORIZATION) {
+        return false;
+    }
+    h.get(hyper::header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.contains("text/html") || s.contains("*/*"))
+        .unwrap_or(false)
+}
+
+// Percent-encode a request URI so it can be embedded as a query
+// string parameter without ambiguity.  We deliberately keep '/' so
+// the encoded form remains human-readable in browser address bars.
+fn percent_encode_return(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        let safe = matches!(
+            b,
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9'
+                | b'-' | b'_' | b'.' | b'~' | b'/'
+        );
+        if safe {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+// Best-effort percent-decode.  Invalid escapes are left as-is so an
+// attacker cannot smuggle bytes via malformed input -- we only ever
+// re-use the result as a same-origin redirect target after
+// validation by `validate_return_to`.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len()
+            && let (Some(h), Some(l)) = (
+                (bytes[i + 1] as char).to_digit(16),
+                (bytes[i + 2] as char).to_digit(16),
+            )
+        {
+            out.push((h * 16 + l) as u8);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn build_login_redirect(login_path: &str, return_to: &str) -> String {
+    format!("{login_path}?return={}", percent_encode_return(return_to))
+}
+
+// Restrict the post-login redirect target to a same-origin
+// absolute path.  Rejects schemed URLs, protocol-relative URLs
+// (`//host`), and anything that doesn't start with '/'.  The
+// fallback "/" is safe for any host.
+fn validate_return_to(raw: &str) -> String {
+    if raw.starts_with('/')
+        && !raw.starts_with("//")
+        && !raw.starts_with("/\\")
+    {
+        raw.to_owned()
+    } else {
+        "/".to_owned()
+    }
+}
+
+// Extract a single query parameter value (first match) from a
+// `key1=val1&key2=val2` style string.
+fn query_param(query: &str, key: &str) -> Option<String> {
+    for pair in query.split('&') {
+        if let Some((k, v)) = pair.split_once('=')
+            && k == key
+        {
+            return Some(percent_decode(v));
+        }
+    }
+    None
+}
+
+// Read the value of a named cookie from a `Cookie:` header value.
+fn cookie_value(headers: &hyper::HeaderMap, name: &str) -> Option<String> {
+    let raw = headers.get(hyper::header::COOKIE)?.to_str().ok()?;
+    for pair in raw.split(';') {
+        let pair = pair.trim();
+        if let Some((k, v)) = pair.split_once('=')
+            && k == name
+        {
+            return Some(v.to_owned());
+        }
+    }
+    None
+}
+
+// Build the `Set-Cookie` value for the short-lived state cookie that
+// pins the browser to the CSRF token returned by `begin_login`.
+// SameSite=Lax is required so the cookie comes back on the cross-site
+// IdP redirect; Secure is added on TLS connections.
+fn state_cookie_value(state_id: &str, ttl_secs: u64, is_tls: bool) -> String {
+    let mut v = format!(
+        "__aloha_oidc_state={state_id}; Path=/; HttpOnly; \
+         SameSite=Lax; Max-Age={ttl_secs}",
+    );
+    if is_tls {
+        v.push_str("; Secure");
+    }
+    v
+}
+
+// A "delete this cookie now" Set-Cookie value, sent on the callback
+// response so the one-shot state cookie doesn't linger.
+fn clear_state_cookie(is_tls: bool) -> String {
+    let mut v = String::from(
+        "__aloha_oidc_state=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0",
+    );
+    if is_tls {
+        v.push_str("; Secure");
+    }
+    v
+}
+
+// Build the 302-to-IdP response for `<login_path>`.  The state-id
+// returned from `begin_login` is mirrored into a same-origin cookie
+// so the callback can detect cross-tenant CSRF (state in URL but no
+// cookie, or vice versa).
+fn handle_oidc_login(
+    oidc: &crate::oidc::OidcProvider,
+    query: &str,
+    is_tls: bool,
+) -> Response<BoxBody> {
+    let return_to = validate_return_to(
+        &query_param(query, "return").unwrap_or_else(|| "/".to_owned()),
+    );
+    let (url, state_id) = oidc.begin_login(return_to);
+
+    let cookie = state_cookie_value(&state_id, 600, is_tls);
+    Response::builder()
+        .status(StatusCode::FOUND)
+        .header(hyper::header::LOCATION, url.as_str())
+        .header(hyper::header::SET_COOKIE, cookie)
+        .body(bytes_body(Bytes::new()))
+        .expect("known-valid status and headers")
+}
+
+// Validate the IdP callback, exchange the code, and persist the
+// identity as a JWT cookie.  On any error returns a 400 rendered via
+// the configured error-pages set.
+async fn handle_oidc_callback(
+    oidc: &crate::oidc::OidcProvider,
+    jwt: Option<&crate::jwt::JwtManager>,
+    headers: &hyper::HeaderMap,
+    query: &str,
+    is_tls: bool,
+    error_pages: &ErrorPages,
+) -> Response<BoxBody> {
+    let Some(code) = query_param(query, "code") else {
+        return response_status(400, Some(error_pages)).await;
+    };
+    let Some(state) = query_param(query, "state") else {
+        return response_status(400, Some(error_pages)).await;
+    };
+    // CSRF: the state-id must also be carried by the browser as the
+    // cookie set in `handle_oidc_login`.  A request that has one but
+    // not the other was either replayed or cross-site.
+    let cookie_state = cookie_value(headers, "__aloha_oidc_state");
+    if cookie_state.as_deref() != Some(state.as_str()) {
+        tracing::warn!("oidc: state cookie/query mismatch");
+        return response_status(400, Some(error_pages)).await;
+    }
+
+    let (identity, return_to) = match oidc.complete_login(code, &state).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("oidc: callback failed: {e:#}");
+            return response_status(400, Some(error_pages)).await;
+        }
+    };
+
+    // JWT is required for OIDC (validator enforces this); without it
+    // the post-login identity would have nowhere to go.
+    let Some(jwt) = jwt else {
+        tracing::error!(
+            "oidc: callback succeeded but no JWT manager is configured"
+        );
+        return response_status(500, Some(error_pages)).await;
+    };
+
+    let session_cookie = match jwt.make_set_cookie(&identity, is_tls) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("oidc: jwt issue failed: {e:#}");
+            return response_status(500, Some(error_pages)).await;
+        }
+    };
+
+    let mut builder = Response::builder()
+        .status(StatusCode::FOUND)
+        .header(hyper::header::LOCATION, &return_to);
+    builder = builder.header(hyper::header::SET_COOKIE, session_cookie);
+    builder = builder
+        .header(hyper::header::SET_COOKIE, clear_state_cookie(is_tls));
+    builder
+        .body(bytes_body(Bytes::new()))
+        .expect("known-valid status and headers")
 }
 
 // Emit one access-log line per completed request at INFO level.
@@ -2150,6 +2435,69 @@ mod tests {
     use bytes::Bytes;
     use std::collections::HashMap;
 
+    // -- OIDC helper tests ---
+
+    #[test]
+    fn wants_html_true_when_accept_contains_html_and_no_auth() {
+        let mut h = hyper::HeaderMap::new();
+        h.insert(hyper::header::ACCEPT, "text/html,*/*".parse().unwrap());
+        assert!(wants_html(&h));
+    }
+
+    #[test]
+    fn wants_html_false_when_authorization_present() {
+        let mut h = hyper::HeaderMap::new();
+        h.insert(hyper::header::ACCEPT, "text/html".parse().unwrap());
+        h.insert(hyper::header::AUTHORIZATION, "Basic xx".parse().unwrap());
+        assert!(!wants_html(&h));
+    }
+
+    #[test]
+    fn wants_html_false_for_json_client() {
+        let mut h = hyper::HeaderMap::new();
+        h.insert(hyper::header::ACCEPT, "application/json".parse().unwrap());
+        assert!(!wants_html(&h));
+    }
+
+    #[test]
+    fn validate_return_to_rejects_off_origin() {
+        // Protocol-relative URLs would let an attacker redirect the
+        // user to an arbitrary host after a successful login.
+        assert_eq!(validate_return_to("//evil.example/x"), "/");
+        assert_eq!(validate_return_to("https://evil.example"), "/");
+        assert_eq!(validate_return_to("/admin"), "/admin");
+        assert_eq!(validate_return_to(""), "/");
+    }
+
+    #[test]
+    fn percent_encode_decode_roundtrip() {
+        let raw = "/a b/c?x=1&y=2";
+        let enc = percent_encode_return(raw);
+        assert!(!enc.contains(' '));
+        assert_eq!(percent_decode(&enc), raw);
+    }
+
+    #[test]
+    fn build_login_redirect_embeds_return() {
+        let r = build_login_redirect("/.aloha/oidc/login", "/admin/users?x=1");
+        assert!(r.starts_with("/.aloha/oidc/login?return="));
+        // Reserved characters in the return URL are percent-encoded.
+        assert!(r.contains("%3F") || r.contains("%3f"));
+    }
+
+    #[test]
+    fn cookie_value_picks_named_entry() {
+        let mut h = hyper::HeaderMap::new();
+        h.insert(
+            hyper::header::COOKIE,
+            "a=1; __aloha_oidc_state=abc123; b=2".parse().unwrap(),
+        );
+        assert_eq!(
+            cookie_value(&h, "__aloha_oidc_state").as_deref(),
+            Some("abc123"),
+        );
+    }
+
     // -- PeerAddr unit tests ---
 
     #[test]
@@ -2315,6 +2663,7 @@ mod tests {
             health_enabled: false,
             error_pages: Arc::new(ErrorPages::new(HashMap::new())),
             jwt_manager: None,
+            oidc: None,
         })
     }
 
@@ -2716,6 +3065,7 @@ mod tests {
             health_enabled: false,
             error_pages: Arc::new(ErrorPages::new(pages)),
             jwt_manager: None,
+            oidc: None,
         });
         let srv = TestServer::start_with_state(state).await;
 
@@ -2881,6 +3231,7 @@ mod tests {
             health_enabled: false,
             error_pages: Arc::new(ErrorPages::new(HashMap::new())),
             jwt_manager: Some(Arc::new(mgr)),
+            oidc: None,
         });
         let srv = TestServer::start_with_state(state).await;
 
@@ -3096,6 +3447,7 @@ mod tests {
             health_enabled: false,
             error_pages: Arc::new(ErrorPages::new(HashMap::new())),
             jwt_manager: None,
+            oidc: None,
         })
     }
 
@@ -3210,6 +3562,7 @@ mod tests {
             health_enabled: false,
             error_pages: Arc::new(ErrorPages::new(HashMap::new())),
             jwt_manager: None,
+            oidc: None,
         });
 
         // Bind UDP socket on an ephemeral loopback port; record the
@@ -3378,6 +3731,7 @@ mod tests {
             health_enabled: false,
             error_pages: Arc::new(ErrorPages::new(HashMap::new())),
             jwt_manager: None,
+            oidc: None,
         });
 
         // Bind the server on IPv4 loopback and use a literal-IP URL
@@ -3560,6 +3914,7 @@ mod tests {
             health_enabled: false,
             error_pages: Arc::new(ErrorPages::new(HashMap::new())),
             jwt_manager: None,
+            oidc: None,
         });
         let server_sock =
             std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -3703,6 +4058,7 @@ mod tests {
             health_enabled: false,
             error_pages: Arc::new(ErrorPages::new(HashMap::new())),
             jwt_manager: None,
+            oidc: None,
         });
         let server_sock =
             std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -3827,6 +4183,7 @@ mod tests {
             health_enabled: false,
             error_pages: Arc::new(ErrorPages::new(HashMap::new())),
             jwt_manager: None,
+            oidc: None,
         });
         let server_sock =
             std::net::UdpSocket::bind("127.0.0.1:0").unwrap();

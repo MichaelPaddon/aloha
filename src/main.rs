@@ -17,6 +17,7 @@ mod inherit;
 mod jwt;
 mod listener;
 mod metrics;
+mod oidc;
 #[cfg(unix)]
 mod privdrop;
 mod proxy_proto;
@@ -240,6 +241,24 @@ async fn main() -> anyhow::Result<()> {
 
     let router = Arc::new(router);
 
+    // OIDC discovery runs at startup so a misconfigured issuer fails
+    // fast.  Constructed only when an OIDC backend is configured
+    // (validate() guarantees it sits inside a Jwt wrapper).
+    let oidc: Option<Arc<oidc::OidcProvider>> = match &config.server.auth {
+        Some(config::AuthBackend::Jwt { inner: Some(b), .. }) => {
+            if let config::AuthBackend::Oidc(cfg) = b.as_ref() {
+                Some(
+                    oidc::OidcProvider::discover(cfg.clone())
+                        .await
+                        .context("OIDC discovery")?,
+                )
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+
     let state = Arc::new(AppState {
         router: router.clone(),
         acme_challenges: challenges.clone(),
@@ -249,6 +268,7 @@ async fn main() -> anyhow::Result<()> {
         health_enabled: config.server.health.enabled,
         error_pages,
         jwt_manager,
+        oidc,
     });
 
     // Background task: advance the request-rate ring buffer every 5 s.
@@ -593,6 +613,14 @@ fn build_authenticator(
         // back-end (if any) is built via a recursive call from main.
         Some(config::AuthBackend::Jwt { .. }) => {
             Ok(Arc::new(auth::AnonymousAuthenticator))
+        }
+        // OIDC authenticates via dedicated login/callback endpoints
+        // dispatched in listener.rs -- it has nothing useful to do
+        // when called from the lazy access-policy path, so the inner
+        // authenticator is a placeholder that always returns Anonymous.
+        Some(config::AuthBackend::Oidc(cfg)) => {
+            tracing::info!(issuer = %cfg.issuer, "auth: OIDC");
+            Ok(Arc::new(auth::OidcAuthenticator))
         }
     }
 }
