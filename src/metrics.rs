@@ -361,6 +361,9 @@ pub struct Metrics {
     // OIDC refresh attempts the IdP rejected; typically means the
     // session was revoked or the refresh token expired.
     pub oidc_refresh_failures: AtomicU64,
+    // Total successful hits on the OIDC logout endpoint, whether
+    // they redirected through the IdP or fell back to local-only.
+    pub oidc_logouts: AtomicU64,
     // HTTP/3 counters.  Kept separate from the overall request counters
     // so operators can see the protocol split on the status page.
     pub quic_handshakes_total: AtomicU64,
@@ -399,6 +402,7 @@ impl Metrics {
             jwt_issued: AtomicU64::new(0),
             oidc_refreshes: AtomicU64::new(0),
             oidc_refresh_failures: AtomicU64::new(0),
+            oidc_logouts: AtomicU64::new(0),
             quic_handshakes_total: AtomicU64::new(0),
             quic_handshake_failures_total: AtomicU64::new(0),
             quic_connections_active: AtomicI64::new(0),

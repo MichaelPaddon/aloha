@@ -504,6 +504,9 @@
               <li><a href="#auth-oidc-refresh">refresh</a></li>
               <li><a href="#auth-oidc-refresh-ttl">refresh-ttl</a></li>
               <li><a href="#auth-oidc-refresh-cookie">refresh-cookie</a></li>
+              <li><a href="#auth-oidc-logout-path">logout-path</a></li>
+              <li><a href="#auth-oidc-post-logout-uri">post-logout-uri</a></li>
+              <li><a href="#auth-oidc-idp-logout">idp-logout</a></li>
             </ul>
             <li class="nav-parent"><a href="#auth-pam">pam<span class="nav-tog">›</span></a></li>
             <ul class="nav-list sub3 nav-children">
@@ -1367,6 +1370,36 @@
                   Name of the long-lived HttpOnly cookie carrying the
                   opaque refresh-session id.</td>
             </tr>
+            <tr id="auth-oidc-logout-path">
+              <td>logout-path</td><td>string</td>
+              <td><code>/.aloha/oidc/logout</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Path on aloha that terminates the session. A
+                  <code>GET</code> here clears the JWT and refresh
+                  cookies and (optionally) redirects through the
+                  IdP&rsquo;s end-session endpoint.</td>
+            </tr>
+            <tr id="auth-oidc-post-logout-uri">
+              <td>post-logout-uri</td><td>string</td>
+              <td><code>/</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Where the browser is sent after logout completes.
+                  Must be a same-origin absolute path; pre-register
+                  the corresponding absolute URL with the IdP if
+                  RP-initiated logout is enabled.</td>
+            </tr>
+            <tr id="auth-oidc-idp-logout">
+              <td>idp-logout</td><td>boolean</td><td><code>#true</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  When true and discovery exposed
+                  <code>end_session_endpoint</code>, the logout
+                  endpoint redirects through the IdP so the IdP-side
+                  session is terminated alongside aloha&rsquo;s.  Set
+                  to <code>#false</code> for IdPs that misbehave on
+                  logout &mdash; aloha then performs local-only
+                  logout (clears its own cookies and returns to
+                  <code>post-logout-uri</code>).</td>
+            </tr>
           </tbody>
         </table>
       </div>
@@ -1380,6 +1413,20 @@
         the request without bouncing the browser through the login
         redirect.  Refresh state is in-memory only; a server restart
         forces users to re-log in.
+      </p>
+      <p>
+        <code>GET &lt;logout-path&gt;</code> tears the session down:
+        aloha drops the server-side refresh entry, emits past-dated
+        <code>Set-Cookie</code> headers that clear the JWT, refresh,
+        and login-state cookies, then issues a <code>302</code>.
+        With <code>idp-logout</code> enabled and an
+        <code>end_session_endpoint</code> in the IdP&rsquo;s
+        discovery document, the redirect carries
+        <code>id_token_hint</code>, <code>post_logout_redirect_uri</code>,
+        and <code>client_id</code> through the IdP so its session is
+        terminated too; otherwise the browser goes straight to
+        <code>post-logout-uri</code>.  Hitting the logout endpoint
+        without an active session is a safe no-op redirect.
       </p>
 
       <h4 id="auth-pam">PAM</h4>

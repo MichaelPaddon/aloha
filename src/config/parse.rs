@@ -374,6 +374,12 @@ fn parse_auth_backend(
             let refresh_cookie_name = child_str(node, "refresh-cookie")
                 .unwrap_or_else(|| "__aloha_oidc_refresh".to_owned());
 
+            let logout_path = child_str(node, "logout-path")
+                .unwrap_or_else(|| "/.aloha/oidc/logout".to_owned());
+            let post_logout_uri = child_str(node, "post-logout-uri")
+                .unwrap_or_else(|| "/".to_owned());
+            let idp_logout = child_bool(node, "idp-logout").unwrap_or(true);
+
             // The OIDC spec requires `offline_access` for refresh
             // tokens; quietly add it so operators don't have to
             // remember (mirrors how `openid` is injected above).
@@ -381,11 +387,13 @@ fn parse_auth_backend(
                 scopes.push("offline_access".to_owned());
             }
 
-            // Both reserved paths must be absolute so request-URI
+            // All reserved paths must be absolute so request-URI
             // comparison in listener.rs is straightforward.
-            for (k, p) in
-                [("login-path", &login_path), ("callback-path", &callback_path)]
-            {
+            for (k, p) in [
+                ("login-path", &login_path),
+                ("callback-path", &callback_path),
+                ("logout-path", &logout_path),
+            ] {
                 if !p.starts_with('/') {
                     bail!(
                         "{name}:{line}: auth oidc: {k} must be an \
@@ -393,10 +401,34 @@ fn parse_auth_backend(
                     );
                 }
             }
-            if login_path == callback_path {
+            // Reserved paths must be pairwise distinct so the
+            // dispatch order in listener.rs is unambiguous.
+            let paths = [
+                ("login-path", &login_path),
+                ("callback-path", &callback_path),
+                ("logout-path", &logout_path),
+            ];
+            for i in 0..paths.len() {
+                for j in (i + 1)..paths.len() {
+                    if paths[i].1 == paths[j].1 {
+                        bail!(
+                            "{name}:{line}: auth oidc: {} and {} \
+                             must differ",
+                            paths[i].0,
+                            paths[j].0,
+                        );
+                    }
+                }
+            }
+            // post-logout-uri must be a same-origin absolute path so
+            // a malicious caller can't trick us into redirecting to
+            // arbitrary hosts after logout.
+            if !post_logout_uri.starts_with('/')
+                || post_logout_uri.starts_with("//")
+            {
                 bail!(
-                    "{name}:{line}: auth oidc: login-path and \
-                     callback-path must differ"
+                    "{name}:{line}: auth oidc: post-logout-uri must be \
+                     a same-origin absolute path (start with single '/')"
                 );
             }
 
@@ -414,6 +446,9 @@ fn parse_auth_backend(
                 refresh,
                 refresh_ttl_secs,
                 refresh_cookie_name,
+                logout_path,
+                post_logout_uri,
+                idp_logout,
             }))
         }
         other => bail!(

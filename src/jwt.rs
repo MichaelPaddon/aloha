@@ -326,6 +326,13 @@ impl JwtManager {
     pub fn is_session_mode(&self) -> bool {
         self.inner.is_some()
     }
+
+    /// Cookie name carrying issued tokens.  Exposed so the OIDC
+    /// logout endpoint can emit a past-dated Set-Cookie matching
+    /// the name actually issued at login.
+    pub fn cookie_name(&self) -> &str {
+        &self.config.cookie_name
+    }
 }
 
 // -- Helpers -------------------------------------------------------

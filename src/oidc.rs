@@ -22,17 +22,58 @@ use crate::auth::Identity;
 use crate::config::OidcConfig;
 use anyhow::{Context, Result, anyhow, bail};
 use openidconnect::core::{
-    CoreAuthenticationFlow, CoreClient, CoreProviderMetadata,
+    CoreAuthDisplay, CoreAuthenticationFlow, CoreClaimName, CoreClaimType,
+    CoreClient, CoreClientAuthMethod, CoreGrantType,
+    CoreJsonWebKey, CoreJsonWebKeyType, CoreJsonWebKeyUse,
+    CoreJweContentEncryptionAlgorithm, CoreJweKeyManagementAlgorithm,
+    CoreJwsSigningAlgorithm, CoreResponseMode, CoreResponseType,
+    CoreSubjectIdentifierType,
 };
 use openidconnect::reqwest::async_http_client;
 use openidconnect::{
-    AuthorizationCode, ClientId, ClientSecret, CsrfToken, IssuerUrl, Nonce,
-    OAuth2TokenResponse, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl,
-    RefreshToken, Scope, TokenResponse,
+    AdditionalProviderMetadata, AuthorizationCode, ClientId, ClientSecret,
+    CsrfToken, IssuerUrl, Nonce, OAuth2TokenResponse, PkceCodeChallenge,
+    PkceCodeVerifier, ProviderMetadata, RedirectUrl, RefreshToken, Scope,
+    TokenResponse,
 };
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+/// Provider-metadata extension carrying the `end_session_endpoint`
+/// URL.  The OIDC core spec puts this field in the RP-Initiated
+/// Logout 1.0 addendum, which is why `openidconnect`'s
+/// `CoreProviderMetadata` doesn't surface it -- the crate exposes
+/// the `AdditionalProviderMetadata` trait for exactly this case.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct LogoutMetadata {
+    #[serde(default)]
+    end_session_endpoint: Option<url::Url>,
+}
+impl AdditionalProviderMetadata for LogoutMetadata {}
+
+// Mirror `CoreProviderMetadata` exactly, swapping the additional-
+// metadata slot.  This lets discovery deserialise our extra field
+// while preserving every other Core type, so the rest of the OIDC
+// pipeline keeps working unchanged.
+type AlohaProviderMetadata = ProviderMetadata<
+    LogoutMetadata,
+    CoreAuthDisplay,
+    CoreClientAuthMethod,
+    CoreClaimName,
+    CoreClaimType,
+    CoreGrantType,
+    CoreJweContentEncryptionAlgorithm,
+    CoreJweKeyManagementAlgorithm,
+    CoreJwsSigningAlgorithm,
+    CoreJsonWebKeyType,
+    CoreJsonWebKeyUse,
+    CoreJsonWebKey,
+    CoreResponseMode,
+    CoreResponseType,
+    CoreSubjectIdentifierType,
+>;
 
 /// A pending login waiting for the IdP to redirect back to the
 /// callback endpoint.
@@ -52,6 +93,10 @@ struct RefreshEntry {
     // We keep it here only for completeness; current code passes None
     // to the ID-token verifier on refresh.
     expires_at: Instant,
+    // Raw ID-token JWT, used as `id_token_hint` when the logout
+    // endpoint redirects to the IdP's `end_session_endpoint`.  Some
+    // IdPs require this to identify the session being terminated.
+    id_token: String,
 }
 
 /// Runtime handle for the configured OIDC IdP.  Constructed once at
@@ -64,6 +109,10 @@ pub struct OidcProvider {
     // Refresh sessions; only populated when `cfg.refresh` is true.
     refreshes: Mutex<HashMap<String, RefreshEntry>>,
     refresh_ttl: Duration,
+    // IdP's `end_session_endpoint` if exposed during discovery.
+    // Without this, RP-initiated logout falls back to a local-only
+    // cookie clear and a redirect to `post_logout_uri`.
+    end_session_url: Option<url::Url>,
 }
 
 impl OidcProvider {
@@ -73,17 +122,30 @@ impl OidcProvider {
     pub async fn discover(cfg: OidcConfig) -> Result<Arc<Self>> {
         let issuer_url = IssuerUrl::new(cfg.issuer.clone())
             .with_context(|| format!("invalid OIDC issuer URL: {}", cfg.issuer))?;
-        let metadata =
-            CoreProviderMetadata::discover_async(issuer_url, async_http_client)
-                .await
-                .with_context(|| {
-                    format!("OIDC discovery failed for {}", cfg.issuer)
-                })?;
+        let metadata = AlohaProviderMetadata::discover_async(
+            issuer_url,
+            async_http_client,
+        )
+        .await
+        .with_context(|| {
+            format!("OIDC discovery failed for {}", cfg.issuer)
+        })?;
 
-        let client = CoreClient::from_provider_metadata(
-            metadata,
+        let end_session_url =
+            metadata.additional_metadata().end_session_endpoint.clone();
+
+        // CoreClient::from_provider_metadata accepts the Core
+        // metadata type specifically.  Build the client directly from
+        // the individual endpoints we need, which keeps us
+        // independent of any future Core/Aloha-metadata divergence.
+        let client = CoreClient::new(
             ClientId::new(cfg.client_id.clone()),
             cfg.client_secret.clone().map(ClientSecret::new),
+            metadata.issuer().clone(),
+            metadata.authorization_endpoint().clone(),
+            metadata.token_endpoint().cloned(),
+            metadata.userinfo_endpoint().cloned(),
+            metadata.jwks().clone(),
         )
         .set_redirect_uri(
             RedirectUrl::new(cfg.redirect_uri.clone()).with_context(|| {
@@ -98,6 +160,7 @@ impl OidcProvider {
             cfg,
             states: Mutex::new(HashMap::new()),
             refreshes: Mutex::new(HashMap::new()),
+            end_session_url,
         });
 
         // Periodic eviction of unfinished logins.  Without this the
@@ -166,6 +229,44 @@ impl OidcProvider {
         self.cfg.refresh_ttl_secs
     }
 
+    /// Path served as the in-browser logout endpoint.
+    pub fn logout_path(&self) -> &str {
+        &self.cfg.logout_path
+    }
+
+    /// Target the browser is redirected to after logout completes
+    /// (whether the IdP-initiated branch ran or not).
+    pub fn post_logout_uri(&self) -> &str {
+        &self.cfg.post_logout_uri
+    }
+
+    /// When true, the logout endpoint bounces the browser through
+    /// the IdP's `end_session_endpoint` if discovery exposed one.
+    pub fn idp_logout_enabled(&self) -> bool {
+        self.cfg.idp_logout
+    }
+
+    /// IdP's RP-initiated logout endpoint, if discovery surfaced it.
+    pub fn end_session_url(&self) -> Option<&url::Url> {
+        self.end_session_url.as_ref()
+    }
+
+    /// OAuth client id; passed as `client_id` query param on the
+    /// end_session redirect for IdPs that accept it without an
+    /// `id_token_hint`.
+    pub fn client_id(&self) -> &str {
+        &self.cfg.client_id
+    }
+
+    /// Drop the refresh entry matching `sid` and return its stored
+    /// `id_token`.  Called by the logout endpoint to (a) tear down
+    /// the server-side session and (b) recover the JWT to send back
+    /// to the IdP as `id_token_hint`.  Returns `None` when no entry
+    /// is present (e.g. the user opens the logout URL twice).
+    pub fn take_logout_session(&self, sid: &str) -> Option<String> {
+        self.refreshes.lock().unwrap().remove(sid).map(|e| e.id_token)
+    }
+
     /// Exchange the authorisation code returned by the IdP for an ID
     /// token and verify it.  Returns the authenticated identity, the
     /// saved `return_to` URL, and (when refresh support is enabled
@@ -200,6 +301,7 @@ impl OidcProvider {
         let id_token = token_response
             .id_token()
             .ok_or_else(|| anyhow!("IdP response did not include an id_token"))?;
+        let id_token_str = id_token.to_string();
         let claims = id_token
             .claims(&self.client.id_token_verifier(), &entry.nonce)
             .context("ID token validation failed")?;
@@ -220,7 +322,9 @@ impl OidcProvider {
 
         // Stash the refresh token (if any) under a fresh random sid.
         // The caller turns the sid into a long-lived HttpOnly cookie;
-        // the refresh token itself never leaves the server.
+        // the refresh token itself never leaves the server.  The raw
+        // ID token is stashed alongside it so the logout endpoint can
+        // present it to the IdP as `id_token_hint`.
         let sid = if self.cfg.refresh {
             token_response.refresh_token().map(|rt| {
                 let id = CsrfToken::new_random().secret().clone();
@@ -229,6 +333,7 @@ impl OidcProvider {
                     RefreshEntry {
                         refresh_token: rt.clone(),
                         expires_at: Instant::now() + self.refresh_ttl,
+                        id_token: id_token_str.clone(),
                     },
                 );
                 id
@@ -279,6 +384,12 @@ impl OidcProvider {
         let id_token = token_response
             .id_token()
             .ok_or_else(|| anyhow!("refresh response had no id_token"))?;
+        // OIDC Core §12.2 says the new id_token is OPTIONAL on
+        // refresh -- but every IdP we care about returns one, and
+        // without it we can't re-derive the user's identity, so
+        // treat its absence as an error.  When it IS present we also
+        // stash it for use as `id_token_hint` on logout.
+        let new_id_token_str = id_token.to_string();
         // Per OIDC Core 1.0 §12.2 the nonce check is only required on
         // the initial authentication response; refresh responses are
         // bound to the prior session via the refresh token itself.
@@ -298,7 +409,10 @@ impl OidcProvider {
         // Token rotation: when the IdP returns a new refresh token,
         // re-key the entry under a fresh sid.  The old sid stays
         // valid only long enough for this request's response to
-        // arrive at the browser carrying the new cookie value.
+        // arrive at the browser carrying the new cookie value.  The
+        // id_token is always updated (some IdPs include a fresh one
+        // even when keeping the refresh token, which is what we want
+        // to send on logout).
         let new_sid = match token_response.refresh_token() {
             Some(new_rt) => {
                 let id = CsrfToken::new_random().secret().clone();
@@ -309,15 +423,18 @@ impl OidcProvider {
                     RefreshEntry {
                         refresh_token: new_rt.clone(),
                         expires_at: Instant::now() + self.refresh_ttl,
+                        id_token: new_id_token_str,
                     },
                 );
                 id
             }
             None => {
-                // Same token still valid: just slide the TTL forward.
+                // Same token still valid: just slide the TTL forward
+                // and refresh the stored id_token alongside it.
                 let mut map = self.refreshes.lock().unwrap();
                 if let Some(e) = map.get_mut(sid) {
                     e.expires_at = Instant::now() + self.refresh_ttl;
+                    e.id_token = new_id_token_str;
                 }
                 sid.to_owned()
             }
@@ -407,7 +524,7 @@ fn extract_groups_claim(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn empty() -> openidconnect::EmptyAdditionalClaims {
@@ -431,7 +548,20 @@ mod tests {
     // `refreshes` via the refresh_count() helper and the public
     // `refresh()` failure paths exercised through unit code that
     // doesn't require an IdP.
-    fn provider_for_store(ttl: Duration) -> Arc<OidcProvider> {
+    pub(crate) fn provider_for_store_with_end_session(
+        ttl: Duration,
+        end_session: url::Url,
+    ) -> Arc<OidcProvider> {
+        let p = provider_for_store(ttl);
+        // Safe: only one Arc handle exists at construction time and
+        // we haven't published it yet, so get_mut succeeds.
+        let mut tmp = p;
+        Arc::get_mut(&mut tmp).unwrap().end_session_url =
+            Some(end_session);
+        tmp
+    }
+
+    pub(crate) fn provider_for_store(ttl: Duration) -> Arc<OidcProvider> {
         // Use a minimal CoreClient that won't be invoked: the refresh
         // tests below only insert/inspect entries and verify
         // eviction.  Building a real client requires discovery, which
@@ -450,6 +580,9 @@ mod tests {
             refresh: true,
             refresh_ttl_secs: ttl.as_secs(),
             refresh_cookie_name: "__aloha_oidc_refresh".into(),
+            logout_path: "/.aloha/oidc/logout".into(),
+            post_logout_uri: "/".into(),
+            idp_logout: true,
         };
         let client = CoreClient::new(
             ClientId::new(cfg.client_id.clone()),
@@ -471,6 +604,7 @@ mod tests {
             cfg,
             states: Mutex::new(HashMap::new()),
             refreshes: Mutex::new(HashMap::new()),
+            end_session_url: None,
         })
     }
 
@@ -483,10 +617,31 @@ mod tests {
                 refresh_token: RefreshToken::new("rt".into()),
                 // Already in the past.
                 expires_at: Instant::now() - Duration::from_secs(1),
+                id_token: "test".into(),
             },
         );
         assert_eq!(p.refresh_count(), 1);
         p.evict_expired();
+        assert_eq!(p.refresh_count(), 0);
+    }
+
+    #[test]
+    fn take_logout_session_returns_stored_id_token() {
+        let p = provider_for_store(Duration::from_secs(60));
+        p.refreshes.lock().unwrap().insert(
+            "sid".into(),
+            RefreshEntry {
+                refresh_token: RefreshToken::new("rt".into()),
+                expires_at: Instant::now() + Duration::from_secs(60),
+                id_token: "the-id-token".into(),
+            },
+        );
+        assert_eq!(
+            p.take_logout_session("sid").as_deref(),
+            Some("the-id-token"),
+        );
+        // Second call returns None: pop semantics.
+        assert!(p.take_logout_session("sid").is_none());
         assert_eq!(p.refresh_count(), 0);
     }
 
@@ -498,6 +653,7 @@ mod tests {
             RefreshEntry {
                 refresh_token: RefreshToken::new("rt".into()),
                 expires_at: Instant::now() + Duration::from_secs(60),
+                id_token: "test".into(),
             },
         );
         p.evict_expired();

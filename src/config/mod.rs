@@ -199,6 +199,18 @@ pub struct OidcConfig {
     /// Cookie name carrying the opaque refresh session id.
     /// Defaults to `__aloha_oidc_refresh`.
     pub refresh_cookie_name: String,
+    /// Path served as the in-browser logout endpoint.
+    /// Defaults to `/.aloha/oidc/logout`.
+    pub logout_path: String,
+    /// Where to redirect the browser after logout completes.
+    /// Must be a same-origin absolute path; defaults to `/`.
+    pub post_logout_uri: String,
+    /// When true (default), the logout endpoint redirects through
+    /// the IdP's `end_session_endpoint` (RP-initiated logout) so the
+    /// IdP-side session is terminated alongside aloha's.  Set to
+    /// `#false` for IdPs that misbehave on logout; aloha then
+    /// performs a local-only logout (clears its own cookies).
+    pub idp_logout: bool,
 }
 
 /// Configuration for the LDAP authentication back-end.

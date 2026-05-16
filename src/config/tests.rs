@@ -4541,6 +4541,83 @@ fn oidc_refresh_defaults_off() {
 }
 
 #[test]
+fn oidc_logout_fields_default() {
+    let cfg = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        server {
+            state-dir "/tmp/aloha-test"
+            auth jwt {
+                wrap oidc {
+                    issuer "https://accounts.example.com"
+                    client-id "abc"
+                    redirect-uri "https://app.example/cb"
+                }
+            }
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap();
+    let oc = match &cfg.server.auth {
+        Some(AuthBackend::Jwt { inner: Some(b), .. }) => match b.as_ref() {
+            AuthBackend::Oidc(c) => c,
+            _ => panic!("expected oidc"),
+        },
+        _ => panic!("expected jwt"),
+    };
+    assert_eq!(oc.logout_path, "/.aloha/oidc/logout");
+    assert_eq!(oc.post_logout_uri, "/");
+    assert!(oc.idp_logout);
+}
+
+#[test]
+fn oidc_logout_path_rejected_when_overlaps_login() {
+    let result = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        server {
+            state-dir "/tmp/aloha-test"
+            auth jwt {
+                wrap oidc {
+                    issuer "https://accounts.example.com"
+                    client-id "abc"
+                    redirect-uri "https://app.example/cb"
+                    logout-path "/.aloha/oidc/login"
+                }
+            }
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    );
+    let err = result.expect_err("overlapping paths must be rejected");
+    let msg = format!("{err:#}");
+    assert!(msg.contains("must differ"), "got: {msg}");
+}
+
+#[test]
+fn oidc_post_logout_uri_rejects_off_origin() {
+    let result = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        server {
+            state-dir "/tmp/aloha-test"
+            auth jwt {
+                wrap oidc {
+                    issuer "https://accounts.example.com"
+                    client-id "abc"
+                    redirect-uri "https://app.example/cb"
+                    post-logout-uri "//evil.example/"
+                }
+            }
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    );
+    assert!(result.is_err());
+}
+
+#[test]
 fn oidc_refresh_enabled_injects_offline_access_scope() {
     let cfg = Config::parse(
         r#"

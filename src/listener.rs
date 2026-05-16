@@ -517,6 +517,28 @@ impl AlohaService {
                     );
                     return Ok(resp);
                 }
+                if path == oidc.logout_path() {
+                    let resp = handle_oidc_logout(
+                        oidc,
+                        state.jwt_manager.as_deref(),
+                        req.headers(),
+                        is_tls,
+                    );
+                    state.metrics.oidc_logouts.fetch_add(
+                        1,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                    let ms = start.elapsed().as_millis();
+                    state.metrics.dec_active();
+                    state.metrics.record(resp.status().as_u16(), ms);
+                    state.metrics.record_path(&path);
+                    log_access(
+                        &method, &path,
+                        resp.status().as_u16(),
+                        ms, peer, &host, "-",
+                    );
+                    return Ok(resp);
+                }
             }
 
             // JWT pre-validation: extract and verify the session cookie
@@ -1067,6 +1089,107 @@ fn clear_refresh_cookie(name: &str, is_tls: bool) -> String {
         v.push_str("; Secure");
     }
     v
+}
+
+// Past-dated cookie that clears the JWT session.  The cookie name is
+// read from the live JwtManager so it matches whatever was issued at
+// login -- if the operator renames the cookie in config, logout
+// still tears the right one down.
+fn clear_jwt_cookie(name: &str, is_tls: bool) -> String {
+    let mut v = format!(
+        "{name}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0",
+    );
+    if is_tls {
+        v.push_str("; Secure");
+    }
+    v
+}
+
+// Build the redirect target for the logout endpoint.  When the IdP
+// exposed an end_session_endpoint AND we still have an id_token to
+// hand it AND the operator hasn't disabled idp-logout, redirect
+// through the IdP so the IdP-side session is terminated too.
+// Otherwise drop the user back at `post_logout_uri` (local logout).
+fn build_logout_redirect(
+    oidc: &crate::oidc::OidcProvider,
+    id_token_hint: Option<&str>,
+) -> String {
+    let post_logout = oidc.post_logout_uri();
+    if !oidc.idp_logout_enabled() {
+        return post_logout.to_owned();
+    }
+    let Some(end_session) = oidc.end_session_url() else {
+        return post_logout.to_owned();
+    };
+    // OIDC RP-Initiated Logout 1.0 §3: id_token_hint identifies the
+    // session, post_logout_redirect_uri is where the IdP returns the
+    // browser, client_id is supplied for IdPs that key off it
+    // instead of id_token_hint.
+    let mut url = end_session.to_string();
+    let sep = if url.contains('?') { '&' } else { '?' };
+    let post = percent_encode_return(post_logout);
+    let cid = percent_encode_return(oidc.client_id());
+    match id_token_hint {
+        Some(hint) => {
+            let hint_enc = percent_encode_return(hint);
+            format!(
+                "{url}{sep}id_token_hint={hint_enc}&\
+                 post_logout_redirect_uri={post}&client_id={cid}",
+            )
+        }
+        None => {
+            // Without an id_token_hint we still try the IdP path:
+            // many IdPs accept post_logout_redirect_uri + client_id
+            // alone, and the worst case (rejection) is the same
+            // outcome as the local-only branch.
+            url.push(sep);
+            url.push_str(&format!(
+                "post_logout_redirect_uri={post}&client_id={cid}"
+            ));
+            url
+        }
+    }
+}
+
+// Tear down the session and 302 the browser onward.  Always clears
+// aloha's own cookies; the redirect target depends on whether the
+// IdP-initiated path is available (see `build_logout_redirect`).
+fn handle_oidc_logout(
+    oidc: &crate::oidc::OidcProvider,
+    jwt: Option<&crate::jwt::JwtManager>,
+    headers: &hyper::HeaderMap,
+    is_tls: bool,
+) -> Response<BoxBody> {
+    // Pop the server-side session (if any) and recover the stored
+    // id_token for use as id_token_hint.  Doing this unconditionally
+    // means an attacker who replays an old logout URL cannot keep a
+    // refresh entry alive past the user's intent to log out.
+    let id_token_hint =
+        cookie_value(headers, oidc.refresh_cookie_name())
+            .and_then(|sid| oidc.take_logout_session(&sid));
+
+    let location = build_logout_redirect(oidc, id_token_hint.as_deref());
+
+    let mut builder = Response::builder()
+        .status(StatusCode::FOUND)
+        .header(hyper::header::LOCATION, location);
+    if let Some(j) = jwt {
+        builder = builder.header(
+            hyper::header::SET_COOKIE,
+            clear_jwt_cookie(j.cookie_name(), is_tls),
+        );
+    }
+    builder = builder.header(
+        hyper::header::SET_COOKIE,
+        clear_refresh_cookie(oidc.refresh_cookie_name(), is_tls),
+    );
+    // Best-effort: also clear any stale OIDC state cookie left
+    // behind by an abandoned login.
+    builder = builder
+        .header(hyper::header::SET_COOKIE, clear_state_cookie(is_tls));
+    builder
+        .body(bytes_body(Bytes::new()))
+        .expect("known-valid status and headers")
 }
 
 // Build the 302-to-IdP response for `<login_path>`.  The state-id
@@ -2603,6 +2726,33 @@ mod tests {
         assert!(r.starts_with("/.aloha/oidc/login?return="));
         // Reserved characters in the return URL are percent-encoded.
         assert!(r.contains("%3F") || r.contains("%3f"));
+    }
+
+    #[test]
+    fn build_logout_redirect_falls_back_to_post_logout_uri() {
+        // Without an end_session_url discovered, the function must
+        // return the configured post-logout URI verbatim so the
+        // browser leaves aloha cleanly.
+        let p = crate::oidc::tests::provider_for_store(
+            std::time::Duration::from_secs(60),
+        );
+        let r = build_logout_redirect(&p, Some("any-id-token"));
+        assert_eq!(r, "/");
+    }
+
+    #[test]
+    fn build_logout_redirect_emits_idp_query_when_end_session_set() {
+        // Inject an end_session_url directly: we don't want to hit
+        // discovery in unit tests.
+        let p = crate::oidc::tests::provider_for_store_with_end_session(
+            std::time::Duration::from_secs(60),
+            url::Url::parse("https://idp.example/logout").unwrap(),
+        );
+        let r = build_logout_redirect(&p, Some("the.id.token"));
+        assert!(r.starts_with("https://idp.example/logout?"), "got {r}");
+        assert!(r.contains("id_token_hint=the.id.token"), "got {r}");
+        assert!(r.contains("post_logout_redirect_uri=/"), "got {r}");
+        assert!(r.contains("client_id="), "got {r}");
     }
 
     #[test]
