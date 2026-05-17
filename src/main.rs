@@ -241,17 +241,20 @@ async fn main() -> anyhow::Result<()> {
 
     let router = Arc::new(router);
 
-    // OIDC discovery runs at startup so a misconfigured issuer fails
-    // fast.  Constructed only when an OIDC backend is configured
-    // (validate() guarantees it sits inside a Jwt wrapper).
+    // Construct the OIDC provider in not-ready state and let it
+    // bootstrap itself in the background.  Discovery failures do
+    // not block startup; the provider's endpoints serve 503 until
+    // the first successful discovery (controlled by
+    // `discovery-retry`).
     let oidc: Option<Arc<oidc::OidcProvider>> = match &config.server.auth {
         Some(config::AuthBackend::Jwt { inner: Some(b), .. }) => {
             if let config::AuthBackend::Oidc(cfg) = b.as_ref() {
-                Some(
-                    oidc::OidcProvider::discover(cfg.clone())
-                        .await
-                        .context("OIDC discovery")?,
-                )
+                let p = oidc::OidcProvider::new(cfg.clone(), metrics.clone());
+                tracing::info!(
+                    issuer = %cfg.issuer,
+                    "oidc: bootstrapping discovery in background"
+                );
+                Some(p)
             } else {
                 None
             }

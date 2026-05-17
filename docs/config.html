@@ -507,6 +507,9 @@
               <li><a href="#auth-oidc-logout-path">logout-path</a></li>
               <li><a href="#auth-oidc-post-logout-uri">post-logout-uri</a></li>
               <li><a href="#auth-oidc-idp-logout">idp-logout</a></li>
+              <li><a href="#auth-oidc-userinfo">userinfo</a></li>
+              <li><a href="#auth-oidc-discovery-refresh">discovery-refresh</a></li>
+              <li><a href="#auth-oidc-discovery-retry">discovery-retry</a></li>
             </ul>
             <li class="nav-parent"><a href="#auth-pam">pam<span class="nav-tog">›</span></a></li>
             <ul class="nav-list sub3 nav-children">
@@ -1399,6 +1402,41 @@
                   logout &mdash; aloha then performs local-only
                   logout (clears its own cookies and returns to
                   <code>post-logout-uri</code>).</td>
+            </tr>
+            <tr id="auth-oidc-userinfo">
+              <td>userinfo</td><td>boolean</td><td><code>#false</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  When enabled, fetch the IdP&rsquo;s
+                  <code>/userinfo</code> endpoint after each token
+                  exchange and merge its claims with the ID token
+                  (UserInfo wins on non-empty values).  Required for
+                  IdPs that omit <code>groups</code> / <code>email</code>
+                  from the ID token; Google is the canonical
+                  example.  Adds one extra HTTP round-trip per login
+                  and per refresh.</td>
+            </tr>
+            <tr id="auth-oidc-discovery-refresh">
+              <td>discovery-refresh</td><td>integer (s)</td>
+              <td><code>3600</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Seconds between periodic re-runs of OIDC discovery.
+                  This is how aloha picks up JWKS rotation at the
+                  IdP without restart.  Set to <code>0</code> to
+                  disable periodic refresh (only the initial
+                  bootstrap runs).</td>
+            </tr>
+            <tr id="auth-oidc-discovery-retry">
+              <td>discovery-retry</td><td>boolean</td>
+              <td><code>#true</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  When true (default), discovery failures at startup
+                  do not abort aloha &mdash; the provider stays in a
+                  not-ready state and a background task retries with
+                  exponential backoff (capped at 5 minutes).  All
+                  OIDC endpoints return <code>503</code> with a
+                  <code>Retry-After</code> header until the first
+                  successful discovery.  Set to <code>#false</code>
+                  to restore fail-fast startup.</td>
             </tr>
           </tbody>
         </table>

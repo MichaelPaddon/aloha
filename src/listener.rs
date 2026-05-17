@@ -14,7 +14,8 @@ use crate::compress;
 use crate::config::{ListenerConfig, Timeouts};
 use crate::error::{
     BoxBody, ErrorPages, ReqBody, bytes_body, response_404, response_413,
-    response_redirect, response_status, response_www_auth,
+    response_503_retry, response_redirect, response_status,
+    response_www_auth,
 };
 use http_body_util::BodyExt;
 use crate::geoip;
@@ -483,7 +484,16 @@ impl AlohaService {
             // and `callback-path` default to `/.aloha/oidc/...`, which
             // is unlikely to clash with application paths.
             if let Some(oidc) = &state.oidc {
+                // Single readiness check covers all three OIDC
+                // endpoints below.  Returning a 503 here (rather than
+                // letting each handler error internally) keeps the
+                // failure mode uniform and lets clients honour the
+                // Retry-After header.
+                let oidc_ready = oidc.is_ready();
                 if path == oidc.login_path() {
+                    if !oidc_ready {
+                        return Ok(response_503_retry(5));
+                    }
                     let resp = handle_oidc_login(oidc, &query, is_tls);
                     let ms = start.elapsed().as_millis();
                     state.metrics.dec_active();
@@ -497,6 +507,9 @@ impl AlohaService {
                     return Ok(resp);
                 }
                 if path == oidc.callback_path() {
+                    if !oidc_ready {
+                        return Ok(response_503_retry(5));
+                    }
                     let resp = handle_oidc_callback(
                         oidc,
                         state.jwt_manager.as_deref(),
@@ -518,6 +531,9 @@ impl AlohaService {
                     return Ok(resp);
                 }
                 if path == oidc.logout_path() {
+                    if !oidc_ready {
+                        return Ok(response_503_retry(5));
+                    }
                     let resp = handle_oidc_logout(
                         oidc,
                         state.jwt_manager.as_deref(),
@@ -586,6 +602,7 @@ impl AlohaService {
             // forcing the user back through the login redirect.
             if jwt_identity.is_none()
                 && let Some(oidc) = state.oidc.as_ref()
+                && oidc.is_ready()
                 && oidc.refresh_enabled()
                 && let Some(jwt) = state.jwt_manager.as_ref()
                 && let Some(sid) =
@@ -703,6 +720,7 @@ impl AlohaService {
                                     // or carrying `Authorization`)
                                     // continue to receive 401.
                                     if let Some(oidc) = &state.oidc
+                                        && oidc.is_ready()
                                         && wants_html(req.headers())
                                     {
                                         let to = build_login_redirect(
@@ -1204,7 +1222,14 @@ fn handle_oidc_login(
     let return_to = validate_return_to(
         &query_param(query, "return").unwrap_or_else(|| "/".to_owned()),
     );
-    let (url, state_id) = oidc.begin_login(return_to);
+    // Caller-side dispatch already short-circuits with a 503 when
+    // the provider isn't ready, but begin_login is fallible at the
+    // type level so the second check below is purely defensive --
+    // a race between is_ready() and begin_login() should never
+    // happen in practice but is cheap to handle.
+    let Some((url, state_id)) = oidc.begin_login(return_to) else {
+        return response_503_retry(5);
+    };
 
     let cookie = state_cookie_value(&state_id, 600, is_tls);
     Response::builder()
@@ -2753,6 +2778,19 @@ mod tests {
         assert!(r.contains("id_token_hint=the.id.token"), "got {r}");
         assert!(r.contains("post_logout_redirect_uri=/"), "got {r}");
         assert!(r.contains("client_id="), "got {r}");
+    }
+
+    #[test]
+    fn response_503_retry_carries_retry_after_header() {
+        // Confirms the helper used for the OIDC not-ready path emits
+        // both 503 and a Retry-After header so polite clients back
+        // off while discovery completes.
+        let r = crate::error::response_503_retry(5);
+        assert_eq!(r.status().as_u16(), 503);
+        assert_eq!(
+            r.headers().get("Retry-After").and_then(|v| v.to_str().ok()),
+            Some("5"),
+        );
     }
 
     #[test]

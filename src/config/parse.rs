@@ -379,6 +379,12 @@ fn parse_auth_backend(
             let post_logout_uri = child_str(node, "post-logout-uri")
                 .unwrap_or_else(|| "/".to_owned());
             let idp_logout = child_bool(node, "idp-logout").unwrap_or(true);
+            let userinfo = child_bool(node, "userinfo").unwrap_or(false);
+            let discovery_refresh_secs = child_i64(node, "discovery-refresh")
+                .map(|n| n as u64)
+                .unwrap_or(3600);
+            let discovery_retry =
+                child_bool(node, "discovery-retry").unwrap_or(true);
 
             // The OIDC spec requires `offline_access` for refresh
             // tokens; quietly add it so operators don't have to
@@ -449,6 +455,9 @@ fn parse_auth_backend(
                 logout_path,
                 post_logout_uri,
                 idp_logout,
+                userinfo,
+                discovery_refresh_secs,
+                discovery_retry,
             }))
         }
         other => bail!(

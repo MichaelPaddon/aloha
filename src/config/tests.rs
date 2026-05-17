@@ -4541,6 +4541,71 @@ fn oidc_refresh_defaults_off() {
 }
 
 #[test]
+fn oidc_operational_fields_default() {
+    let cfg = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        server {
+            state-dir "/tmp/aloha-test"
+            auth jwt {
+                wrap oidc {
+                    issuer "https://accounts.example.com"
+                    client-id "abc"
+                    redirect-uri "https://app.example/cb"
+                }
+            }
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap();
+    let oc = match &cfg.server.auth {
+        Some(AuthBackend::Jwt { inner: Some(b), .. }) => match b.as_ref() {
+            AuthBackend::Oidc(c) => c,
+            _ => panic!("expected oidc"),
+        },
+        _ => panic!("expected jwt"),
+    };
+    assert!(!oc.userinfo);
+    assert_eq!(oc.discovery_refresh_secs, 3600);
+    assert!(oc.discovery_retry);
+}
+
+#[test]
+fn oidc_discovery_refresh_zero_disables() {
+    let cfg = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        server {
+            state-dir "/tmp/aloha-test"
+            auth jwt {
+                wrap oidc {
+                    issuer "https://accounts.example.com"
+                    client-id "abc"
+                    redirect-uri "https://app.example/cb"
+                    discovery-refresh 0
+                    discovery-retry #false
+                    userinfo #true
+                }
+            }
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap();
+    let oc = match &cfg.server.auth {
+        Some(AuthBackend::Jwt { inner: Some(b), .. }) => match b.as_ref() {
+            AuthBackend::Oidc(c) => c,
+            _ => panic!("expected oidc"),
+        },
+        _ => panic!("expected jwt"),
+    };
+    assert_eq!(oc.discovery_refresh_secs, 0);
+    assert!(!oc.discovery_retry);
+    assert!(oc.userinfo);
+}
+
+#[test]
 fn oidc_logout_fields_default() {
     let cfg = Config::parse(
         r#"

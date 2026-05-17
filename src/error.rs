@@ -178,6 +178,21 @@ pub fn response_redirect(to: &str, code: u16) -> HttpResponse {
         .expect("caller-validated redirect code and URL")
 }
 
+/// 503 Service Unavailable carrying `Retry-After: <secs>`.  Used by
+/// OIDC endpoints when the provider has not yet completed discovery,
+/// so a polite client backs off rather than hammering aloha while
+/// the IdP comes back online.
+pub fn response_503_retry(secs: u64) -> HttpResponse {
+    Response::builder()
+        .status(StatusCode::SERVICE_UNAVAILABLE)
+        .header("Retry-After", secs.to_string())
+        .header("Content-Type", "text/html; charset=utf-8")
+        .body(bytes_body(Bytes::from_static(
+            b"<h1>503 Service Unavailable</h1>",
+        )))
+        .expect("known-valid status and headers")
+}
+
 // -- Tests ---------------------------------------------------------
 
 #[cfg(test)]

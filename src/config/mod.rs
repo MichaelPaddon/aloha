@@ -211,6 +211,20 @@ pub struct OidcConfig {
     /// `#false` for IdPs that misbehave on logout; aloha then
     /// performs a local-only logout (clears its own cookies).
     pub idp_logout: bool,
+    /// When true, the callback (and refresh) fetches the IdP's
+    /// `/userinfo` endpoint and merges those claims with the ID
+    /// token, with UserInfo winning on non-empty values.  Necessary
+    /// for IdPs that omit `groups`/`email` from the ID token.
+    pub userinfo: bool,
+    /// Seconds between periodic re-discoveries (JWKS hot-swap).
+    /// `0` disables the periodic refresh; the initial bootstrap
+    /// still runs.  Defaults to 3600.
+    pub discovery_refresh_secs: u64,
+    /// When true (default), discovery failures at startup do not
+    /// abort aloha — the provider stays in a not-ready state and a
+    /// background task retries with exponential backoff.  Set to
+    /// `#false` to restore strict fail-fast startup.
+    pub discovery_retry: bool,
 }
 
 /// Configuration for the LDAP authentication back-end.

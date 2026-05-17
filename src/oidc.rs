@@ -20,7 +20,9 @@
 
 use crate::auth::Identity;
 use crate::config::OidcConfig;
+use crate::metrics::Metrics;
 use anyhow::{Context, Result, anyhow, bail};
+use arc_swap::ArcSwap;
 use openidconnect::core::{
     CoreAuthDisplay, CoreAuthenticationFlow, CoreClaimName, CoreClaimType,
     CoreClient, CoreClientAuthMethod, CoreGrantType,
@@ -31,10 +33,10 @@ use openidconnect::core::{
 };
 use openidconnect::reqwest::async_http_client;
 use openidconnect::{
-    AdditionalProviderMetadata, AuthorizationCode, ClientId, ClientSecret,
-    CsrfToken, IssuerUrl, Nonce, OAuth2TokenResponse, PkceCodeChallenge,
-    PkceCodeVerifier, ProviderMetadata, RedirectUrl, RefreshToken, Scope,
-    TokenResponse,
+    AccessToken, AdditionalProviderMetadata, AuthorizationCode, ClientId,
+    ClientSecret, CsrfToken, IssuerUrl, Nonce, OAuth2TokenResponse,
+    PkceCodeChallenge, PkceCodeVerifier, ProviderMetadata, RedirectUrl,
+    RefreshToken, Scope, TokenResponse, UserInfoClaims,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -101,9 +103,16 @@ struct RefreshEntry {
 
 /// Runtime handle for the configured OIDC IdP.  Constructed once at
 /// startup; cloned via `Arc` into `AppState`.
+///
+/// `client` and `end_session_url` are wrapped in `ArcSwap` so they
+/// can be hot-swapped by the background refresh task without
+/// requiring callers to hold a lock.  When discovery has not yet
+/// completed (or has not yet succeeded), `client` is `None` and the
+/// hot-path methods return a "not ready" error.
 pub struct OidcProvider {
-    client: CoreClient,
+    client: ArcSwap<Option<Arc<CoreClient>>>,
     cfg: OidcConfig,
+    metrics: Arc<Metrics>,
     states: Mutex<HashMap<String, StateEntry>>,
     state_ttl: Duration,
     // Refresh sessions; only populated when `cfg.refresh` is true.
@@ -112,60 +121,175 @@ pub struct OidcProvider {
     // IdP's `end_session_endpoint` if exposed during discovery.
     // Without this, RP-initiated logout falls back to a local-only
     // cookie clear and a redirect to `post_logout_uri`.
-    end_session_url: Option<url::Url>,
+    end_session_url: ArcSwap<Option<url::Url>>,
+}
+
+/// Single discovery attempt: build a fresh `CoreClient` and pluck
+/// the optional `end_session_endpoint`.  Factored out so the
+/// bootstrap path and the periodic-refresh path share exactly the
+/// same construction logic.
+async fn run_discovery(
+    cfg: &OidcConfig,
+) -> Result<(CoreClient, Option<url::Url>)> {
+    let issuer_url = IssuerUrl::new(cfg.issuer.clone())
+        .with_context(|| format!("invalid OIDC issuer URL: {}", cfg.issuer))?;
+    let metadata = AlohaProviderMetadata::discover_async(
+        issuer_url,
+        async_http_client,
+    )
+    .await
+    .with_context(|| format!("OIDC discovery failed for {}", cfg.issuer))?;
+
+    let end_session_url =
+        metadata.additional_metadata().end_session_endpoint.clone();
+
+    // Build the client from individual endpoints rather than
+    // CoreClient::from_provider_metadata so we stay independent of
+    // any future Core/Aloha-metadata divergence.
+    let client = CoreClient::new(
+        ClientId::new(cfg.client_id.clone()),
+        cfg.client_secret.clone().map(ClientSecret::new),
+        metadata.issuer().clone(),
+        metadata.authorization_endpoint().clone(),
+        metadata.token_endpoint().cloned(),
+        metadata.userinfo_endpoint().cloned(),
+        metadata.jwks().clone(),
+    )
+    .set_redirect_uri(
+        RedirectUrl::new(cfg.redirect_uri.clone()).with_context(|| {
+            format!("invalid redirect-uri: {}", cfg.redirect_uri)
+        })?,
+    );
+
+    Ok((client, end_session_url))
 }
 
 impl OidcProvider {
-    /// Run OIDC discovery and build the runtime client.  Network
-    /// failures bubble up; the caller decides whether to abort startup
-    /// or retry in the background.
-    pub async fn discover(cfg: OidcConfig) -> Result<Arc<Self>> {
-        let issuer_url = IssuerUrl::new(cfg.issuer.clone())
-            .with_context(|| format!("invalid OIDC issuer URL: {}", cfg.issuer))?;
-        let metadata = AlohaProviderMetadata::discover_async(
-            issuer_url,
-            async_http_client,
-        )
-        .await
-        .with_context(|| {
-            format!("OIDC discovery failed for {}", cfg.issuer)
-        })?;
-
-        let end_session_url =
-            metadata.additional_metadata().end_session_endpoint.clone();
-
-        // CoreClient::from_provider_metadata accepts the Core
-        // metadata type specifically.  Build the client directly from
-        // the individual endpoints we need, which keeps us
-        // independent of any future Core/Aloha-metadata divergence.
-        let client = CoreClient::new(
-            ClientId::new(cfg.client_id.clone()),
-            cfg.client_secret.clone().map(ClientSecret::new),
-            metadata.issuer().clone(),
-            metadata.authorization_endpoint().clone(),
-            metadata.token_endpoint().cloned(),
-            metadata.userinfo_endpoint().cloned(),
-            metadata.jwks().clone(),
-        )
-        .set_redirect_uri(
-            RedirectUrl::new(cfg.redirect_uri.clone()).with_context(|| {
-                format!("invalid redirect-uri: {}", cfg.redirect_uri)
-            })?,
-        );
-
+    /// Construct an OIDC provider in a not-ready state and spawn
+    /// background tasks for (1) initial discovery with retry and
+    /// (2) periodic re-discovery for JWKS hot-swap.  Returns
+    /// immediately; the provider becomes ready once the bootstrap
+    /// task completes its first successful discovery.
+    ///
+    /// When `discovery-retry` is `#false` and the bootstrap call
+    /// fails, the provider stays in the not-ready state and all
+    /// endpoints serve 503.  This matches the user's explicit
+    /// fail-fast request without crashing aloha; restart picks up
+    /// the new IdP state.
+    pub fn new(cfg: OidcConfig, metrics: Arc<Metrics>) -> Arc<Self> {
         let provider = Arc::new(Self {
-            client,
+            client: ArcSwap::new(Arc::new(None)),
             state_ttl: Duration::from_secs(cfg.state_ttl_secs),
             refresh_ttl: Duration::from_secs(cfg.refresh_ttl_secs),
-            cfg,
+            metrics,
+            end_session_url: ArcSwap::new(Arc::new(None)),
             states: Mutex::new(HashMap::new()),
             refreshes: Mutex::new(HashMap::new()),
-            end_session_url,
+            cfg,
         });
 
-        // Periodic eviction of unfinished logins.  Without this the
-        // state store would grow unboundedly if browsers abandon the
-        // IdP redirect (closed tab, network failure, etc.).
+        // Background discovery: exponential-backoff bootstrap, then
+        // periodic refresh to pick up JWKS rotation at the IdP.
+        let weak = Arc::downgrade(&provider);
+        tokio::spawn(async move {
+            let mut attempt: u32 = 0;
+            // Bootstrap loop.
+            loop {
+                let Some(p) = weak.upgrade() else { return };
+                match run_discovery(&p.cfg).await {
+                    Ok((client, end_session)) => {
+                        p.client.store(Arc::new(Some(Arc::new(client))));
+                        p.end_session_url.store(Arc::new(end_session));
+                        p.metrics.oidc_discoveries.fetch_add(
+                            1,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                        tracing::info!(
+                            issuer = %p.cfg.issuer,
+                            "oidc: discovery succeeded"
+                        );
+                        break;
+                    }
+                    Err(e) => {
+                        p.metrics.oidc_discovery_failures.fetch_add(
+                            1,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                        if !p.cfg.discovery_retry {
+                            tracing::error!(
+                                issuer = %p.cfg.issuer,
+                                error = %format!("{e:#}"),
+                                "oidc: discovery failed (retry disabled); \
+                                 provider will remain unavailable"
+                            );
+                            return;
+                        }
+                        // Cap backoff at 5 minutes.
+                        let secs = std::cmp::min(1u64 << attempt.min(8), 300);
+                        tracing::warn!(
+                            issuer = %p.cfg.issuer,
+                            retry_in = secs,
+                            error = %format!("{e:#}"),
+                            "oidc: discovery failed; retrying"
+                        );
+                        drop(p);
+                        tokio::time::sleep(Duration::from_secs(secs)).await;
+                        attempt = attempt.saturating_add(1);
+                    }
+                }
+            }
+
+            // Periodic refresh loop -- only runs after a successful
+            // bootstrap, so failures here are silent and leave the
+            // last-known-good client in place.  refresh=0 disables
+            // the periodic path entirely.
+            let Some(p) = weak.upgrade() else { return };
+            let interval_secs = p.cfg.discovery_refresh_secs;
+            drop(p);
+            if interval_secs == 0 {
+                return;
+            }
+            let mut ticker = tokio::time::interval(
+                Duration::from_secs(interval_secs),
+            );
+            // Skip the immediate tick: we just completed discovery.
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                let Some(p) = weak.upgrade() else { return };
+                match run_discovery(&p.cfg).await {
+                    Ok((client, end_session)) => {
+                        p.client.store(Arc::new(Some(Arc::new(client))));
+                        p.end_session_url.store(Arc::new(end_session));
+                        p.metrics.oidc_discoveries.fetch_add(
+                            1,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                        tracing::debug!(
+                            issuer = %p.cfg.issuer,
+                            "oidc: discovery refreshed"
+                        );
+                    }
+                    Err(e) => {
+                        p.metrics.oidc_discovery_failures.fetch_add(
+                            1,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                        tracing::warn!(
+                            issuer = %p.cfg.issuer,
+                            error = %format!("{e:#}"),
+                            "oidc: periodic discovery failed; \
+                             keeping previous client"
+                        );
+                    }
+                }
+            }
+        });
+
+        // Periodic eviction of unfinished logins and expired refresh
+        // entries.  Spawned separately from the discovery task so
+        // their cadences are independent (eviction needs to run on
+        // the order of state-ttl, discovery on the order of an hour).
         let weak = Arc::downgrade(&provider);
         let ttl = provider.state_ttl;
         tokio::spawn(async move {
@@ -181,17 +305,114 @@ impl OidcProvider {
             }
         });
 
-        Ok(provider)
+        provider
     }
 
-    /// Build the authorisation URL the browser should be redirected
-    /// to.  Returns the URL plus the CSRF state id (mirrored back in
-    /// the callback's query string).
-    pub fn begin_login(&self, return_to: String) -> (url::Url, String) {
+    /// Current OIDC client, if discovery has completed.  Hot-path
+    /// methods bail with a "not ready" error when this returns
+    /// `None`; the listener turns that into a 503 + `Retry-After`.
+    pub fn client(&self) -> Option<Arc<CoreClient>> {
+        self.client.load().as_ref().clone()
+    }
+
+    /// True when the OIDC provider has completed at least one
+    /// successful discovery and is ready to handle login flows.
+    pub fn is_ready(&self) -> bool {
+        self.client.load().is_some()
+    }
+
+    /// Optionally fetch the IdP's `/userinfo` endpoint and merge its
+    /// claims with the ones we already extracted from the ID token.
+    /// UserInfo wins on non-empty values: the OIDC spec calls it the
+    /// canonical source for non-essential claims.  A failed UserInfo
+    /// request degrades to the ID-token values and logs a warning so
+    /// login still succeeds.
+    async fn merge_userinfo(
+        &self,
+        client: &CoreClient,
+        access_token: &AccessToken,
+        id_token_username: &str,
+        id_token_groups: Vec<String>,
+    ) -> (String, Vec<String>) {
+        if !self.cfg.userinfo {
+            return (id_token_username.to_owned(), id_token_groups);
+        }
+        let request = match client
+            .user_info(access_token.clone(), None)
+        {
+            Ok(r) => r,
+            Err(e) => {
+                // Configuration-level error (no userinfo endpoint in
+                // discovery, etc.).  Distinct from a network/HTTP
+                // failure below; log once but don't keep retrying.
+                tracing::warn!(
+                    error = %format!("{e:#}"),
+                    "oidc: userinfo not configurable for this IdP"
+                );
+                return (id_token_username.to_owned(), id_token_groups);
+            }
+        };
+        let info: UserInfoClaims<
+            openidconnect::EmptyAdditionalClaims,
+            openidconnect::core::CoreGenderClaim,
+        > = match request.request_async(async_http_client).await {
+            Ok(c) => c,
+            Err(e) => {
+                self.metrics.oidc_userinfo_failures.fetch_add(
+                    1,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                tracing::warn!(
+                    error = %format!("{e:#}"),
+                    "oidc: userinfo request failed; falling back \
+                     to ID-token claims"
+                );
+                return (id_token_username.to_owned(), id_token_groups);
+            }
+        };
+
+        // UserInfoClaims doesn't expose its extra fields directly;
+        // round-trip through JSON, which is cheap and gives us the
+        // same dynamic-claim access we already use on the ID token.
+        let json = match serde_json::to_value(&info) {
+            Ok(v) => v,
+            Err(_) => return (id_token_username.to_owned(), id_token_groups),
+        };
+        // Reuse the same claim-extraction logic so configured
+        // username-claim / groups-claim names work identically on
+        // both surfaces.
+        let username = match json
+            .get(&self.cfg.username_claim)
+            .and_then(|v| v.as_str())
+        {
+            Some(s) if !s.is_empty() => s.to_owned(),
+            _ => id_token_username.to_owned(),
+        };
+        let groups = extract_groups_claim_from_json(
+            &self.cfg.groups_claim,
+            &json,
+        );
+        let groups = if groups.is_empty() {
+            id_token_groups
+        } else {
+            groups
+        };
+        (username, groups)
+    }
+
+    /// Build the authorisation URL the browser should be
+    /// redirected to.  Returns `None` when discovery has not yet
+    /// completed; otherwise the URL plus the CSRF state id (mirrored
+    /// back in the callback's query string).
+    pub fn begin_login(
+        &self,
+        return_to: String,
+    ) -> Option<(url::Url, String)> {
+        let client = self.client()?;
         let (pkce_challenge, pkce_verifier) =
             PkceCodeChallenge::new_random_sha256();
 
-        let mut req = self.client.authorize_url(
+        let mut req = client.authorize_url(
             CoreAuthenticationFlow::AuthorizationCode,
             CsrfToken::new_random,
             Nonce::new_random,
@@ -211,7 +432,7 @@ impl OidcProvider {
         };
         self.states.lock().unwrap().insert(state_id.clone(), entry);
 
-        (auth_url, state_id)
+        Some((auth_url, state_id))
     }
 
     /// True when refresh-token support is enabled for this provider.
@@ -247,8 +468,11 @@ impl OidcProvider {
     }
 
     /// IdP's RP-initiated logout endpoint, if discovery surfaced it.
-    pub fn end_session_url(&self) -> Option<&url::Url> {
-        self.end_session_url.as_ref()
+    /// Returned by value because the ArcSwap-backed storage rules out
+    /// borrowing a stable reference; cloning a small `url::Url` is
+    /// cheap and the call site happens once per logout request.
+    pub fn end_session_url(&self) -> Option<url::Url> {
+        (*self.end_session_url.load_full()).clone()
     }
 
     /// OAuth client id; passed as `client_id` query param on the
@@ -277,6 +501,10 @@ impl OidcProvider {
         code: String,
         state_id: &str,
     ) -> Result<(Identity, String, Option<String>)> {
+        let client = self
+            .client()
+            .ok_or_else(|| anyhow!("OIDC provider not ready"))?;
+
         // Remove the entry first so a replayed callback can't reuse
         // the same PKCE verifier even if validation later fails.
         let entry = self
@@ -290,8 +518,7 @@ impl OidcProvider {
             bail!("OIDC state expired before callback");
         }
 
-        let token_response = self
-            .client
+        let token_response = client
             .exchange_code(AuthorizationCode::new(code))
             .set_pkce_verifier(entry.pkce_verifier)
             .request_async(async_http_client)
@@ -303,7 +530,7 @@ impl OidcProvider {
             .ok_or_else(|| anyhow!("IdP response did not include an id_token"))?;
         let id_token_str = id_token.to_string();
         let claims = id_token
-            .claims(&self.client.id_token_verifier(), &entry.nonce)
+            .claims(&client.id_token_verifier(), &entry.nonce)
             .context("ID token validation failed")?;
 
         // The OIDC `sub` claim is always present and uniquely
@@ -312,13 +539,24 @@ impl OidcProvider {
         // `preferred_username`), we look it up via the additional
         // claims map — falling back to `sub` if absent.
         let extra = claims.additional_claims();
-        let username = extract_string_claim(
+        let id_username = extract_string_claim(
             &self.cfg.username_claim,
             extra,
             claims.subject().as_str(),
         );
-        let groups =
+        let id_groups =
             extract_groups_claim(&self.cfg.groups_claim, extra);
+
+        // UserInfo merge -- noop when the feature is off.  When on,
+        // /userinfo claims take precedence on non-empty values.
+        let (username, groups) = self
+            .merge_userinfo(
+                &client,
+                token_response.access_token(),
+                &id_username,
+                id_groups,
+            )
+            .await;
 
         // Stash the refresh token (if any) under a fresh random sid.
         // The caller turns the sid into a long-lived HttpOnly cookie;
@@ -356,6 +594,9 @@ impl OidcProvider {
         &self,
         sid: &str,
     ) -> Result<(Identity, String)> {
+        let client = self
+            .client()
+            .ok_or_else(|| anyhow!("OIDC provider not ready"))?;
         let rt = {
             let map = self.refreshes.lock().unwrap();
             let entry = map.get(sid).ok_or_else(|| {
@@ -369,8 +610,7 @@ impl OidcProvider {
             entry.refresh_token.clone()
         };
 
-        let token_response = self
-            .client
+        let token_response = client
             .exchange_refresh_token(&rt)
             .request_async(async_http_client)
             .await
@@ -394,17 +634,27 @@ impl OidcProvider {
         // the initial authentication response; refresh responses are
         // bound to the prior session via the refresh token itself.
         let claims = id_token
-            .claims(&self.client.id_token_verifier(), |_: Option<&Nonce>| Ok(()))
+            .claims(&client.id_token_verifier(), |_: Option<&Nonce>| Ok(()))
             .context("refreshed ID token validation failed")?;
 
         let extra = claims.additional_claims();
-        let username = extract_string_claim(
+        let id_username = extract_string_claim(
             &self.cfg.username_claim,
             extra,
             claims.subject().as_str(),
         );
-        let groups =
+        let id_groups =
             extract_groups_claim(&self.cfg.groups_claim, extra);
+
+        // UserInfo merge against the freshly-issued access token.
+        let (username, groups) = self
+            .merge_userinfo(
+                &client,
+                token_response.access_token(),
+                &id_username,
+                id_groups,
+            )
+            .await;
 
         // Token rotation: when the IdP returns a new refresh token,
         // re-key the entry under a fresh sid.  The old sid stays
@@ -509,6 +759,16 @@ fn extract_groups_claim(
         Ok(v) => v,
         Err(_) => return Vec::new(),
     };
+    extract_groups_claim_from_json(name, &json)
+}
+
+/// Same as `extract_groups_claim` but reads directly from a
+/// serialised JSON value.  Used by the UserInfo merge path which
+/// already has the full claim document in hand.
+fn extract_groups_claim_from_json(
+    name: &str,
+    json: &serde_json::Value,
+) -> Vec<String> {
     match json.get(name) {
         Some(serde_json::Value::Array(items)) => items
             .iter()
@@ -553,12 +813,8 @@ pub(crate) mod tests {
         end_session: url::Url,
     ) -> Arc<OidcProvider> {
         let p = provider_for_store(ttl);
-        // Safe: only one Arc handle exists at construction time and
-        // we haven't published it yet, so get_mut succeeds.
-        let mut tmp = p;
-        Arc::get_mut(&mut tmp).unwrap().end_session_url =
-            Some(end_session);
-        tmp
+        p.end_session_url.store(Arc::new(Some(end_session)));
+        p
     }
 
     pub(crate) fn provider_for_store(ttl: Duration) -> Arc<OidcProvider> {
@@ -583,6 +839,9 @@ pub(crate) mod tests {
             logout_path: "/.aloha/oidc/logout".into(),
             post_logout_uri: "/".into(),
             idp_logout: true,
+            userinfo: false,
+            discovery_refresh_secs: 0,
+            discovery_retry: true,
         };
         let client = CoreClient::new(
             ClientId::new(cfg.client_id.clone()),
@@ -598,14 +857,99 @@ pub(crate) mod tests {
         )
         .set_redirect_uri(RedirectUrl::new(cfg.redirect_uri.clone()).unwrap());
         Arc::new(OidcProvider {
-            client,
+            client: ArcSwap::new(Arc::new(Some(Arc::new(client)))),
             state_ttl: Duration::from_secs(cfg.state_ttl_secs),
             refresh_ttl: ttl,
+            metrics: Arc::new(Metrics::new()),
             cfg,
             states: Mutex::new(HashMap::new()),
             refreshes: Mutex::new(HashMap::new()),
-            end_session_url: None,
+            end_session_url: ArcSwap::new(Arc::new(None)),
         })
+    }
+
+    #[test]
+    fn provider_new_starts_in_not_ready_state() {
+        // Issuer points at a non-routable address so background
+        // discovery cannot succeed before this synchronous assert
+        // runs.  The contract under test: new() is synchronous and
+        // returns a provider that is_ready() == false until the
+        // background bootstrap completes.
+        let cfg = crate::config::OidcConfig {
+            issuer: "https://127.0.0.1:1/".into(),
+            client_id: "id".into(),
+            client_secret: None,
+            redirect_uri: "https://app.example/cb".into(),
+            scopes: vec!["openid".into()],
+            username_claim: "sub".into(),
+            groups_claim: "groups".into(),
+            login_path: "/.aloha/oidc/login".into(),
+            callback_path: "/.aloha/oidc/callback".into(),
+            state_ttl_secs: 60,
+            refresh: false,
+            refresh_ttl_secs: 60,
+            refresh_cookie_name: "__aloha_oidc_refresh".into(),
+            logout_path: "/.aloha/oidc/logout".into(),
+            post_logout_uri: "/".into(),
+            idp_logout: false,
+            userinfo: false,
+            discovery_refresh_secs: 0,
+            // Disable retry so the background task exits promptly
+            // when discovery fails -- prevents the test runtime
+            // from spinning on retries.
+            discovery_retry: false,
+        };
+        // OidcProvider::new spawns a tokio task, so we need a runtime.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let p = OidcProvider::new(cfg, Arc::new(Metrics::new()));
+            assert!(!p.is_ready());
+            assert!(p.client().is_none());
+        });
+    }
+
+    #[test]
+    fn userinfo_merge_disabled_returns_id_token_values() {
+        // With userinfo off, the helper must short-circuit before
+        // touching the network -- the dummy CoreClient stored on
+        // provider_for_store would fail any real call.
+        let p = provider_for_store(Duration::from_secs(60));
+        let client = p.client().expect("test provider has a client");
+        let access = openidconnect::AccessToken::new("at".into());
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (user, groups) = rt.block_on(p.merge_userinfo(
+            &client,
+            &access,
+            "alice",
+            vec!["devs".into()],
+        ));
+        assert_eq!(user, "alice");
+        assert_eq!(groups, vec!["devs".to_string()]);
+    }
+
+    #[test]
+    fn extract_groups_claim_from_json_array_and_string() {
+        // Array form (Keycloak/Authelia).
+        let v = serde_json::json!({"groups": ["admins", "devs"]});
+        assert_eq!(
+            extract_groups_claim_from_json("groups", &v),
+            vec!["admins", "devs"],
+        );
+        // Space-delimited string form (some SAML-style IdPs).
+        let v = serde_json::json!({"groups": "admins devs"});
+        assert_eq!(
+            extract_groups_claim_from_json("groups", &v),
+            vec!["admins", "devs"],
+        );
+        // Missing.
+        let v = serde_json::json!({});
+        assert!(extract_groups_claim_from_json("groups", &v).is_empty());
     }
 
     #[test]
