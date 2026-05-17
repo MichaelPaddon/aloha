@@ -1,6 +1,6 @@
 [package]
 name = "aloha"
-version = "1.0.0-rc3"
+version = "1.0.0-rc4"
 edition = "2024"
 description = "HTTP/reverse-proxy server with TLS, virtual hosts, and static file serving"
 authors = ["Michael Paddon <6d7770@gmail.com>"]
