@@ -401,6 +401,30 @@ fn parse_auth_backend(
                     .map(|n| n as u64)
                     .unwrap_or(300);
 
+            let bearer = child_bool(node, "bearer").unwrap_or(false);
+            // Each `bearer-audience "..."` child contributes one
+            // accepted audience.  Repeated nodes mirror the existing
+            // `scope` handling above.
+            let bearer_audiences: Vec<String> = node
+                .children()
+                .map(|doc| {
+                    doc.nodes()
+                        .iter()
+                        .filter(|n| n.name().value() == "bearer-audience")
+                        .flat_map(positional_strs)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let bearer_cache_size = child_i64(node, "bearer-cache-size")
+                .map(|n| n.max(1) as usize)
+                .unwrap_or(1024);
+            if bearer && bearer_audiences.is_empty() {
+                bail!(
+                    "{name}:{line}: auth oidc: bearer #true requires \
+                     at least one bearer-audience entry"
+                );
+            }
+
             // The OIDC spec requires `offline_access` for refresh
             // tokens; quietly add it so operators don't have to
             // remember (mirrors how `openid` is injected above).
@@ -479,6 +503,9 @@ fn parse_auth_backend(
                 backchannel_logout_path,
                 backchannel_max_iat_skew_secs,
                 backchannel_jti_ttl_secs,
+                bearer,
+                bearer_audiences,
+                bearer_cache_size,
             })))
         }
         other => bail!(

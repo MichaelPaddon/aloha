@@ -627,7 +627,10 @@ impl AlohaService {
                         );
                         None
                     }
-                    None => None,
+                    // `validate()` folds `NotMine` to `None`; this
+                    // arm is here only for exhaustiveness and is
+                    // unreachable in practice.
+                    Some(crate::jwt::JwtResult::NotMine) | None => None,
                 };
 
             // Set-Cookie values queued while resolving auth: applied
@@ -636,6 +639,40 @@ impl AlohaService {
             // JWT session cookie and (on rotation) an updated
             // refresh-id cookie.
             let mut pending_set_cookies: Vec<String> = Vec::new();
+
+            // Bearer-token resource-server mode: when the session
+            // JWT validation found nothing of ours, and the request
+            // carries an `Authorization: Bearer` header, hand the
+            // token to the OIDC validator.  Successful validation
+            // populates `jwt_identity` so the access policy sees an
+            // authenticated principal; failure leaves the request
+            // anonymous and lets the policy decide.
+            if jwt_identity.is_none()
+                && let Some(oidc) = state.oidc.as_ref()
+                && oidc.bearer_enabled()
+                && oidc.is_ready()
+                && let Some(token) = extract_bearer(req.headers())
+            {
+                match oidc.validate_bearer_token(&token) {
+                    Ok(id) => {
+                        state.metrics.oidc_bearer_validations.fetch_add(
+                            1,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                        jwt_identity = Some(id);
+                    }
+                    Err(e) => {
+                        state.metrics.oidc_bearer_failures.fetch_add(
+                            1,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                        tracing::debug!(
+                            error = %format!("{e:#}"),
+                            "oidc bearer: rejected"
+                        );
+                    }
+                }
+            }
 
             // Reactive OIDC refresh: when the JWT is missing or
             // expired and the browser still carries a refresh-id
@@ -1120,6 +1157,24 @@ fn query_param(query: &str, key: &str) -> Option<String> {
         }
     }
     None
+}
+
+// Extract the token from an `Authorization: Bearer <token>` header,
+// accepting any-case for the scheme word.  Returns `None` when the
+// header is absent, isn't ASCII, doesn't lead with `bearer`, or the
+// trailing token is empty.  Used by the OIDC bearer-token mode to
+// hand IdP-issued JWTs to the resource-server validator.
+fn extract_bearer(headers: &hyper::HeaderMap) -> Option<String> {
+    let raw = headers.get(hyper::header::AUTHORIZATION)?.to_str().ok()?;
+    let (scheme, token) = raw.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("bearer") {
+        return None;
+    }
+    let token = token.trim();
+    if token.is_empty() {
+        return None;
+    }
+    Some(token.to_owned())
 }
 
 // Read the value of a named cookie from a `Cookie:` header value.
@@ -3017,6 +3072,47 @@ mod tests {
             r.headers().get("Retry-After").and_then(|v| v.to_str().ok()),
             Some("5"),
         );
+    }
+
+    #[test]
+    fn extract_bearer_accepts_case_insensitive_scheme() {
+        let mut h = hyper::HeaderMap::new();
+        h.insert(
+            hyper::header::AUTHORIZATION,
+            "bearer eyJhbGciOiJSUzI1NiJ9.payload.sig".parse().unwrap(),
+        );
+        assert_eq!(
+            extract_bearer(&h).as_deref(),
+            Some("eyJhbGciOiJSUzI1NiJ9.payload.sig"),
+        );
+        h.insert(
+            hyper::header::AUTHORIZATION,
+            "BEARER tok".parse().unwrap(),
+        );
+        assert_eq!(extract_bearer(&h).as_deref(), Some("tok"));
+    }
+
+    #[test]
+    fn extract_bearer_rejects_non_bearer_scheme() {
+        let mut h = hyper::HeaderMap::new();
+        h.insert(hyper::header::AUTHORIZATION, "Basic abc".parse().unwrap());
+        assert!(extract_bearer(&h).is_none());
+    }
+
+    #[test]
+    fn extract_bearer_rejects_empty_token() {
+        let mut h = hyper::HeaderMap::new();
+        h.insert(
+            hyper::header::AUTHORIZATION,
+            "Bearer    ".parse().unwrap(),
+        );
+        assert!(extract_bearer(&h).is_none());
+    }
+
+    #[test]
+    fn extract_bearer_missing_header_returns_none() {
+        let h = hyper::HeaderMap::new();
+        assert!(extract_bearer(&h).is_none());
     }
 
     #[test]

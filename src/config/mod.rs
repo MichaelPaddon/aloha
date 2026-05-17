@@ -242,6 +242,20 @@ pub struct OidcConfig {
     /// Seconds a seen `jti` is remembered to reject replays.
     /// Defaults to 300; should be larger than the iat-skew window.
     pub backchannel_jti_ttl_secs: u64,
+    /// Accept `Authorization: Bearer <jwt>` from API callers,
+    /// validated against the IdP's JWKS as an alternative to the
+    /// session cookie.  Requires `bearer_audiences` to be non-empty.
+    pub bearer: bool,
+    /// Audience values an inbound bearer token's `aud` claim may
+    /// carry.  Required when `bearer` is true.  Multiple values
+    /// are supported -- resource servers often accept tokens for
+    /// more than one audience.
+    pub bearer_audiences: Vec<String>,
+    /// LRU capacity for verified bearer tokens.  Defaults to 1024.
+    /// Each cached entry is a `SHA-256(token)` key mapped to an
+    /// (`Identity`, `exp`) pair, so the per-request cost on a cache
+    /// hit is a hash + a map lookup.
+    pub bearer_cache_size: usize,
 }
 
 /// Configuration for the LDAP authentication back-end.

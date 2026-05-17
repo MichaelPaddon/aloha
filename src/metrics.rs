@@ -380,6 +380,13 @@ pub struct Metrics {
     // stage: bad form body, bad JWT, bad signature, bad claim, or
     // replayed jti.
     pub oidc_backchannel_failures: AtomicU64,
+    // Bearer (resource-server) tokens that successfully verified.
+    // Counts both fresh validations and would-be-fresh calls -- the
+    // LRU cache hit is separately surfaced as a debug log path.
+    pub oidc_bearer_validations: AtomicU64,
+    // Bearer tokens rejected at any validation stage: malformed
+    // JWT, bad signature, wrong issuer/audience, expired, etc.
+    pub oidc_bearer_failures: AtomicU64,
     // HTTP/3 counters.  Kept separate from the overall request counters
     // so operators can see the protocol split on the status page.
     pub quic_handshakes_total: AtomicU64,
@@ -424,6 +431,8 @@ impl Metrics {
             oidc_userinfo_failures: AtomicU64::new(0),
             oidc_backchannel_logouts: AtomicU64::new(0),
             oidc_backchannel_failures: AtomicU64::new(0),
+            oidc_bearer_validations: AtomicU64::new(0),
+            oidc_bearer_failures: AtomicU64::new(0),
             quic_handshakes_total: AtomicU64::new(0),
             quic_handshake_failures_total: AtomicU64::new(0),
             quic_connections_active: AtomicI64::new(0),

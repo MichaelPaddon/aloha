@@ -42,7 +42,9 @@ use serde::{Deserialize, Serialize};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use openidconnect::JsonWebKey as _;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -182,6 +184,17 @@ pub struct OidcProvider {
     // mapped to their expiry time.  Prevents replay of an already-
     // processed logout_token within the JTI-TTL window.
     seen_jtis: Mutex<HashMap<String, Instant>>,
+    // LRU cache of validated bearer tokens, keyed by SHA-256(token).
+    // Each entry holds the resolved Identity and the token's `exp`
+    // claim so a cache hit can skip the (RSA-heavy) signature
+    // verification.  Empty when bearer mode is disabled.
+    bearer_cache: Mutex<lru::LruCache<[u8; 32], BearerCacheEntry>>,
+}
+
+#[derive(Clone)]
+struct BearerCacheEntry {
+    identity: Identity,
+    expires_at: u64,
 }
 
 /// Single discovery attempt: build a fresh `CoreClient`, the
@@ -253,6 +266,10 @@ impl OidcProvider {
             end_session_url: ArcSwap::new(Arc::new(None)),
             jwks: ArcSwap::new(Arc::new(None)),
             seen_jtis: Mutex::new(HashMap::new()),
+            bearer_cache: Mutex::new(lru::LruCache::new(
+                NonZeroUsize::new(cfg.bearer_cache_size.max(1))
+                    .expect("bearer_cache_size >= 1"),
+            )),
             states: Mutex::new(HashMap::new()),
             refreshes: Mutex::new(HashMap::new()),
             cfg,
@@ -791,6 +808,125 @@ impl OidcProvider {
         Ok((Identity { username, groups }, new_sid))
     }
 
+    /// True when bearer-token resource-server mode is enabled.
+    pub fn bearer_enabled(&self) -> bool {
+        self.cfg.bearer
+    }
+
+    /// Validate an `Authorization: Bearer <jwt>` token against the
+    /// IdP's JWKS and configured audience allowlist.  On success
+    /// returns the resolved `Identity`; on any failure returns an
+    /// error describing the rejection reason.  Result is cached
+    /// keyed by `SHA-256(token)` so subsequent requests bearing the
+    /// same token skip the signature verification entirely until
+    /// the token's own `exp`.
+    pub fn validate_bearer_token(&self, token: &str) -> Result<Identity> {
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .context("clock before epoch")?
+            .as_secs();
+
+        // Fast path: cached identity if still within token validity.
+        let key: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+        {
+            let mut cache = self.bearer_cache.lock().unwrap();
+            if let Some(entry) = cache.get(&key) {
+                if entry.expires_at > now {
+                    return Ok(entry.identity.clone());
+                }
+                cache.pop(&key);
+            }
+        }
+
+        // Slow path: parse and verify against the discovered JWKS.
+        let parsed = parse_compact_jws(token)?;
+        let jwks_guard = self.jwks.load_full();
+        let jwks = jwks_guard
+            .as_ref()
+            .clone()
+            .ok_or_else(|| anyhow!("JWKS not available; OIDC not ready"))?;
+        if !jwks_signature_verifies(&jwks, &parsed) {
+            bail!("bearer token signature did not match any JWKS key");
+        }
+
+        // Standard claim checks.  The `aud` allowlist is the
+        // security anchor: operators configure which audience
+        // identifiers their resource server accepts.
+        let payload = &parsed.payload;
+        let iss = payload
+            .get("iss")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("bearer token missing iss"))?;
+        if iss != self.cfg.issuer.trim_end_matches('/')
+            && iss != self.cfg.issuer
+        {
+            bail!("bearer token iss does not match configured issuer");
+        }
+        let aud_match = match payload.get("aud") {
+            Some(serde_json::Value::String(s)) => {
+                self.cfg.bearer_audiences.iter().any(|a| a == s)
+            }
+            Some(serde_json::Value::Array(items)) => items
+                .iter()
+                .filter_map(|v| v.as_str())
+                .any(|s| self.cfg.bearer_audiences.iter().any(|a| a == s)),
+            _ => false,
+        };
+        if !aud_match {
+            bail!(
+                "bearer token aud does not match any configured \
+                 bearer-audience"
+            );
+        }
+        let exp = payload
+            .get("exp")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| anyhow!("bearer token missing exp"))?;
+        if exp <= now {
+            bail!("bearer token expired");
+        }
+        // `nbf` is optional; honour it with a small skew tolerance
+        // so a slightly-fast issuer clock doesn't reject otherwise
+        // valid tokens.
+        if let Some(nbf) = payload.get("nbf").and_then(|v| v.as_u64())
+            && nbf > now + 30
+        {
+            bail!("bearer token not yet valid (nbf in the future)");
+        }
+
+        // Build the Identity from configured claims, with the same
+        // semantics as ID-token claim extraction.
+        let payload_json = payload.clone();
+        let username = match payload_json
+            .get(&self.cfg.username_claim)
+            .and_then(|v| v.as_str())
+        {
+            Some(s) if !s.is_empty() => s.to_owned(),
+            _ => payload_json
+                .get("sub")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_owned(),
+        };
+        let groups = extract_groups_claim_from_json(
+            &self.cfg.groups_claim,
+            &payload_json,
+        );
+
+        let identity = Identity { username, groups };
+
+        // Cache the verified identity until the token's own exp.
+        self.bearer_cache.lock().unwrap().put(
+            key,
+            BearerCacheEntry {
+                identity: identity.clone(),
+                expires_at: exp,
+            },
+        );
+
+        Ok(identity)
+    }
+
     /// True when back-channel logout is enabled in config.  Used by
     /// `listener.rs` to decide whether to register the endpoint at
     /// dispatch time.
@@ -828,21 +964,7 @@ impl OidcProvider {
             .as_ref()
             .clone()
             .ok_or_else(|| anyhow!("JWKS not available; OIDC not ready"))?;
-        let alg = parsed.alg.clone();
-        let signed_input = parsed.signed_input.as_bytes();
-        let sig_bytes = parsed.signature_bytes.as_slice();
-        let verified = jwks
-            .keys()
-            .iter()
-            .filter(|k| match (k.key_id(), parsed.kid.as_deref()) {
-                (Some(jwk_kid), Some(hdr_kid)) => {
-                    jwk_kid.as_str() == hdr_kid
-                }
-                // No kid on either side: try the key.
-                _ => parsed.kid.is_none(),
-            })
-            .any(|k| k.verify_signature(&alg, signed_input, sig_bytes).is_ok());
-        if !verified {
+        if !jwks_signature_verifies(&jwks, &parsed) {
             bail!("logout_token signature did not match any JWKS key");
         }
 
@@ -1038,6 +1160,28 @@ struct ParsedJws {
     payload: serde_json::Value,
 }
 
+/// Walk a JWKS and return true when any key verifies the parsed
+/// JWS.  Shared between the back-channel logout endpoint and the
+/// bearer-token resource-server path: both need exactly this
+/// "is the IdP signature valid against any of our cached keys"
+/// check.  When the JWS header carries a `kid`, only keys with a
+/// matching `kid` are tried; otherwise we walk every key.
+fn jwks_signature_verifies(
+    jwks: &openidconnect::core::CoreJsonWebKeySet,
+    parsed: &ParsedJws,
+) -> bool {
+    let signed = parsed.signed_input.as_bytes();
+    let sig = parsed.signature_bytes.as_slice();
+    jwks.keys()
+        .iter()
+        .filter(|k| match (k.key_id(), parsed.kid.as_deref()) {
+            (Some(jwk_kid), Some(hdr_kid)) => jwk_kid.as_str() == hdr_kid,
+            // No kid on either side: still attempt the key.
+            _ => parsed.kid.is_none(),
+        })
+        .any(|k| k.verify_signature(&parsed.alg, signed, sig).is_ok())
+}
+
 fn parse_compact_jws(token: &str) -> Result<ParsedJws> {
     // JWS compact form: header.payload.signature, each segment
     // base64url-encoded without padding.
@@ -1186,6 +1330,9 @@ pub(crate) mod tests {
                 "/.aloha/oidc/backchannel-logout".into(),
             backchannel_max_iat_skew_secs: 120,
             backchannel_jti_ttl_secs: 300,
+            bearer: false,
+            bearer_audiences: vec![],
+            bearer_cache_size: 16,
         };
         let client = CoreClient::new(
             ClientId::new(cfg.client_id.clone()),
@@ -1211,6 +1358,9 @@ pub(crate) mod tests {
             end_session_url: ArcSwap::new(Arc::new(None)),
             jwks: ArcSwap::new(Arc::new(None)),
             seen_jtis: Mutex::new(HashMap::new()),
+            bearer_cache: Mutex::new(lru::LruCache::new(
+                NonZeroUsize::new(16).unwrap(),
+            )),
         })
     }
 
@@ -1249,6 +1399,9 @@ pub(crate) mod tests {
                 "/.aloha/oidc/backchannel-logout".into(),
             backchannel_max_iat_skew_secs: 120,
             backchannel_jti_ttl_secs: 300,
+            bearer: false,
+            bearer_audiences: vec![],
+            bearer_cache_size: 16,
         };
         // OidcProvider::new spawns a tokio task, so we need a runtime.
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -1342,6 +1495,61 @@ pub(crate) mod tests {
         // Second call returns None: pop semantics.
         assert!(p.take_logout_session("sid").is_none());
         assert_eq!(p.refresh_count(), 0);
+    }
+
+    #[test]
+    fn bearer_cache_returns_stored_identity() {
+        // Direct exercise of the cache short-circuit: insert an
+        // entry by hand and confirm validate_bearer_token returns
+        // it without touching the JWS parser (the entry sits under
+        // the SHA-256 of the token bytes, so any token string that
+        // hashes to the same key works).
+        let p = provider_for_store(Duration::from_secs(60));
+        let token = "anything";
+        let key: [u8; 32] = sha2::Sha256::digest(token.as_bytes()).into();
+        let id = Identity {
+            username: "alice".into(),
+            groups: vec!["devs".into()],
+        };
+        let future_exp = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 600;
+        p.bearer_cache.lock().unwrap().put(
+            key,
+            BearerCacheEntry {
+                identity: id.clone(),
+                expires_at: future_exp,
+            },
+        );
+        let got = p.validate_bearer_token(token).expect("cache hit");
+        assert_eq!(got.username, id.username);
+        assert_eq!(got.groups, id.groups);
+    }
+
+    #[test]
+    fn bearer_cache_evicts_expired_entry_on_lookup() {
+        let p = provider_for_store(Duration::from_secs(60));
+        let token = "anything";
+        let key: [u8; 32] = sha2::Sha256::digest(token.as_bytes()).into();
+        p.bearer_cache.lock().unwrap().put(
+            key,
+            BearerCacheEntry {
+                identity: Identity {
+                    username: "alice".into(),
+                    groups: vec![],
+                },
+                // Already past.
+                expires_at: 0,
+            },
+        );
+        // The validator should NOT return the expired entry; it
+        // tries to parse "anything" as a JWS and fails -- which is
+        // an error, not a cache hit.  Either way, the cache entry
+        // must be gone afterwards.
+        assert!(p.validate_bearer_token(token).is_err());
+        assert!(p.bearer_cache.lock().unwrap().peek(&key).is_none());
     }
 
     #[test]

@@ -514,6 +514,9 @@
               <li><a href="#auth-oidc-backchannel-logout-path">backchannel-logout-path</a></li>
               <li><a href="#auth-oidc-backchannel-max-iat-skew">backchannel-max-iat-skew</a></li>
               <li><a href="#auth-oidc-backchannel-jti-ttl">backchannel-jti-ttl</a></li>
+              <li><a href="#auth-oidc-bearer">bearer</a></li>
+              <li><a href="#auth-oidc-bearer-audience">bearer-audience</a></li>
+              <li><a href="#auth-oidc-bearer-cache-size">bearer-cache-size</a></li>
             </ul>
             <li class="nav-parent"><a href="#auth-pam">pam<span class="nav-tog">›</span></a></li>
             <ul class="nav-list sub3 nav-children">
@@ -1479,6 +1482,31 @@
                   Should comfortably exceed
                   <code>backchannel-max-iat-skew</code>.</td>
             </tr>
+            <tr id="auth-oidc-bearer">
+              <td>bearer</td><td>boolean</td><td><code>#false</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Accept <code>Authorization: Bearer &lt;jwt&gt;</code>
+                  from API callers, validated against the IdP&rsquo;s
+                  JWKS as a parallel auth path alongside the browser
+                  session cookie.  Requires at least one
+                  <code>bearer-audience</code> entry.</td>
+            </tr>
+            <tr id="auth-oidc-bearer-audience">
+              <td>bearer-audience</td><td>string</td><td>&mdash;</td>
+              <td><span class="badge badge-opt">optional</span>
+                  Repeatable: each child contributes one accepted
+                  <code>aud</code> value.  A bearer token is rejected
+                  unless its <code>aud</code> claim contains at least
+                  one of the listed values.</td>
+            </tr>
+            <tr id="auth-oidc-bearer-cache-size">
+              <td>bearer-cache-size</td><td>integer</td>
+              <td><code>1024</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  LRU capacity for verified bearer tokens.  Cache
+                  hits skip the per-request signature verification
+                  until the token&rsquo;s own <code>exp</code>.</td>
+            </tr>
           </tbody>
         </table>
       </div>
@@ -1540,6 +1568,26 @@
         enforcement via <code>acr_values</code>, and localised
         login pages via <code>ui_locales</code>.  See OIDC Core 1.0
         &sect;3.1.2.1 for the canonical definitions.
+      </p>
+      <p>
+        <strong>Bearer-token resource-server mode.</strong>  With
+        <code>bearer</code> enabled, aloha accepts
+        <code>Authorization: Bearer &lt;jwt&gt;</code> from API
+        callers in addition to the browser session cookie.  Tokens
+        are validated against the IdP&rsquo;s cached JWKS
+        (signature, <code>iss</code>, <code>exp</code>,
+        <code>nbf</code>) and rejected unless the <code>aud</code>
+        claim contains at least one configured
+        <code>bearer-audience</code>.  Successful validations are
+        cached by <code>SHA-256(token)</code> under the configured
+        <code>bearer-cache-size</code>, so repeated requests with
+        the same token skip the crypto until the token&rsquo;s own
+        <code>exp</code>.  The resolved Identity uses the same
+        <code>username-claim</code> / <code>groups-claim</code>
+        configuration as the SSO flow, so access policies see one
+        consistent Identity shape regardless of which auth path
+        produced it.  Supports JWT-format tokens only; opaque
+        (introspection-required) tokens are not yet handled.
       </p>
 
       <h4 id="auth-pam">PAM</h4>

@@ -4541,6 +4541,104 @@ fn oidc_refresh_defaults_off() {
 }
 
 #[test]
+fn oidc_bearer_default_off() {
+    let cfg = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        server {
+            state-dir "/tmp/aloha-test"
+            auth jwt {
+                wrap oidc {
+                    issuer "https://accounts.example.com"
+                    client-id "abc"
+                    redirect-uri "https://app.example/cb"
+                }
+            }
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap();
+    let oc = match &cfg.server.auth {
+        Some(AuthBackend::Jwt { inner: Some(b), .. }) => match b.as_ref() {
+            AuthBackend::Oidc(c) => c,
+            _ => panic!("expected oidc"),
+        },
+        _ => panic!("expected jwt"),
+    };
+    assert!(!oc.bearer);
+    assert!(oc.bearer_audiences.is_empty());
+    assert_eq!(oc.bearer_cache_size, 1024);
+}
+
+#[test]
+fn oidc_bearer_requires_audience() {
+    let result = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        server {
+            state-dir "/tmp/aloha-test"
+            auth jwt {
+                wrap oidc {
+                    issuer "https://accounts.example.com"
+                    client-id "abc"
+                    redirect-uri "https://app.example/cb"
+                    bearer #true
+                }
+            }
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    );
+    let err = result.expect_err("bearer without audience must be rejected");
+    assert!(
+        format!("{err:#}").contains("bearer-audience"),
+        "got: {err:#}",
+    );
+}
+
+#[test]
+fn oidc_bearer_collects_repeated_audiences() {
+    let cfg = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        server {
+            state-dir "/tmp/aloha-test"
+            auth jwt {
+                wrap oidc {
+                    issuer "https://accounts.example.com"
+                    client-id "abc"
+                    redirect-uri "https://app.example/cb"
+                    bearer #true
+                    bearer-audience "https://api.example/v1"
+                    bearer-audience "https://api.example/v2"
+                    bearer-cache-size 32
+                }
+            }
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap();
+    let oc = match &cfg.server.auth {
+        Some(AuthBackend::Jwt { inner: Some(b), .. }) => match b.as_ref() {
+            AuthBackend::Oidc(c) => c,
+            _ => panic!("expected oidc"),
+        },
+        _ => panic!("expected jwt"),
+    };
+    assert!(oc.bearer);
+    assert_eq!(
+        oc.bearer_audiences,
+        vec![
+            "https://api.example/v1".to_string(),
+            "https://api.example/v2".to_string(),
+        ],
+    );
+    assert_eq!(oc.bearer_cache_size, 32);
+}
+
+#[test]
 fn oidc_backchannel_defaults() {
     let cfg = Config::parse(
         r#"
