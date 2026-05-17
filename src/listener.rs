@@ -530,6 +530,47 @@ impl AlohaService {
                     );
                     return Ok(resp);
                 }
+                if oidc.backchannel_logout_enabled()
+                    && path == oidc.backchannel_logout_path()
+                {
+                    if method != hyper::Method::POST {
+                        let resp = response_status(
+                            405,
+                            Some(&state.error_pages),
+                        )
+                        .await;
+                        let ms = start.elapsed().as_millis();
+                        state.metrics.dec_active();
+                        state.metrics.record(resp.status().as_u16(), ms);
+                        state.metrics.record_path(&path);
+                        log_access(
+                            &method, &path,
+                            resp.status().as_u16(),
+                            ms, peer, &host, "-",
+                        );
+                        return Ok(resp);
+                    }
+                    if !oidc_ready {
+                        return Ok(response_503_retry(5));
+                    }
+                    let resp = handle_oidc_backchannel_logout(
+                        oidc,
+                        req,
+                        &state.metrics,
+                        &state.error_pages,
+                    )
+                    .await;
+                    let ms = start.elapsed().as_millis();
+                    state.metrics.dec_active();
+                    state.metrics.record(resp.status().as_u16(), ms);
+                    state.metrics.record_path(&path);
+                    log_access(
+                        &method, &path,
+                        resp.status().as_u16(),
+                        ms, peer, &host, "-",
+                    );
+                    return Ok(resp);
+                }
                 if path == oidc.logout_path() {
                     if !oidc_ready {
                         return Ok(response_503_retry(5));
@@ -1005,6 +1046,50 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+// Maximum length permitted for any single OIDC login hint value.
+// All five hints are short by spec -- a 256-byte cap rejects URL-
+// pollution attempts without ever interfering with real input.
+const MAX_HINT_LEN: usize = 256;
+
+// Validate a single hint value: bounded length, printable ASCII
+// excluding control characters and percent (percent-decoded values
+// shouldn't contain raw percent literally).  Returns a borrowed
+// reference on success so the caller can convert to owned.
+fn validate_hint(value: &str) -> Result<(), ()> {
+    if value.is_empty() || value.len() > MAX_HINT_LEN {
+        return Err(());
+    }
+    if value
+        .bytes()
+        .any(|b| !(0x20..=0x7e).contains(&b))
+    {
+        return Err(());
+    }
+    Ok(())
+}
+
+// Read OIDC login hints from the query string.  Unknown params are
+// ignored; the five allowlisted params (login_hint, prompt,
+// max_age, acr_values, ui_locales) are validated for length and
+// charset before being forwarded.  Returns Err only when a value
+// is *present* but invalid -- a missing hint is fine.
+fn build_idp_hints(query: &str) -> Result<crate::oidc::IdpHints, ()> {
+    let mut hints = crate::oidc::IdpHints::default();
+    for (name, slot) in [
+        ("login_hint", &mut hints.login_hint),
+        ("prompt", &mut hints.prompt),
+        ("max_age", &mut hints.max_age),
+        ("acr_values", &mut hints.acr_values),
+        ("ui_locales", &mut hints.ui_locales),
+    ] {
+        if let Some(v) = query_param(query, name) {
+            validate_hint(&v)?;
+            *slot = Some(v);
+        }
+    }
+    Ok(hints)
+}
+
 fn build_login_redirect(login_path: &str, return_to: &str) -> String {
     format!("{login_path}?return={}", percent_encode_return(return_to))
 }
@@ -1169,6 +1254,107 @@ fn build_logout_redirect(
     }
 }
 
+// Accept an IdP-pushed back-channel logout token.  Reads the
+// `logout_token=<jwt>` form-urlencoded body, hands it to the OIDC
+// validator, and returns 200 OK on success.  The endpoint MUST NOT
+// be cached (per spec) so we add Cache-Control: no-store.
+//
+// Validation failures return 400; a successful validation that
+// happens to match zero sessions still returns 200 (idle but
+// well-formed logout).
+async fn handle_oidc_backchannel_logout(
+    oidc: &crate::oidc::OidcProvider,
+    req: Request<ReqBody>,
+    metrics: &Metrics,
+    error_pages: &ErrorPages,
+) -> Response<BoxBody> {
+    // Reject anything that isn't form-urlencoded immediately --
+    // the spec requires this content type.
+    let is_form = req
+        .headers()
+        .get(hyper::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| {
+            let ct = s.split(';').next().unwrap_or("").trim();
+            ct.eq_ignore_ascii_case("application/x-www-form-urlencoded")
+        })
+        .unwrap_or(false);
+    if !is_form {
+        metrics.oidc_backchannel_failures.fetch_add(
+            1,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        return response_status(400, Some(error_pages)).await;
+    }
+
+    // Cap body at 64 KiB -- logout_tokens are JWTs, typically a few
+    // hundred bytes.  An RSA-signed token with many claims might
+    // touch ~4 KiB; this cap leaves a comfortable margin while
+    // bounding memory on adversarial input.
+    let body_bytes = match http_body_util::Limited::new(req.into_body(), 64 * 1024)
+        .collect()
+        .await
+    {
+        Ok(c) => c.to_bytes(),
+        Err(_) => {
+            metrics.oidc_backchannel_failures.fetch_add(
+                1,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            return response_status(400, Some(error_pages)).await;
+        }
+    };
+
+    // Extract the logout_token from the form body using the same
+    // percent-decoder we already use for query params.
+    let body_str = match std::str::from_utf8(&body_bytes) {
+        Ok(s) => s,
+        Err(_) => {
+            metrics.oidc_backchannel_failures.fetch_add(
+                1,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            return response_status(400, Some(error_pages)).await;
+        }
+    };
+    let Some(token) = query_param(body_str, "logout_token") else {
+        metrics.oidc_backchannel_failures.fetch_add(
+            1,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        return response_status(400, Some(error_pages)).await;
+    };
+
+    match oidc.apply_backchannel_logout(&token) {
+        Ok(removed) => {
+            metrics.oidc_backchannel_logouts.fetch_add(
+                1,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            tracing::info!(
+                removed,
+                "oidc: back-channel logout processed"
+            );
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(hyper::header::CACHE_CONTROL, "no-store")
+                .body(bytes_body(Bytes::new()))
+                .expect("known-valid status and headers")
+        }
+        Err(e) => {
+            metrics.oidc_backchannel_failures.fetch_add(
+                1,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            tracing::warn!(
+                error = %format!("{e:#}"),
+                "oidc: back-channel logout rejected"
+            );
+            response_status(400, Some(error_pages)).await
+        }
+    }
+}
+
 // Tear down the session and 302 the browser onward.  Always clears
 // aloha's own cookies; the redirect target depends on whether the
 // IdP-initiated path is available (see `build_logout_redirect`).
@@ -1222,12 +1408,19 @@ fn handle_oidc_login(
     let return_to = validate_return_to(
         &query_param(query, "return").unwrap_or_else(|| "/".to_owned()),
     );
+    // Optional standard OIDC login hints from the URL.  All five are
+    // pass-through to the IdP; we only enforce coarse length/charset
+    // hygiene here so a malformed query doesn't reach the IdP.
+    let hints = match build_idp_hints(query) {
+        Ok(h) => h,
+        Err(_) => return crate::error::response_400(),
+    };
     // Caller-side dispatch already short-circuits with a 503 when
     // the provider isn't ready, but begin_login is fallible at the
     // type level so the second check below is purely defensive --
     // a race between is_ready() and begin_login() should never
     // happen in practice but is cheap to handle.
-    let Some((url, state_id)) = oidc.begin_login(return_to) else {
+    let Some((url, state_id)) = oidc.begin_login(return_to, hints) else {
         return response_503_retry(5);
     };
 
@@ -2778,6 +2971,39 @@ mod tests {
         assert!(r.contains("id_token_hint=the.id.token"), "got {r}");
         assert!(r.contains("post_logout_redirect_uri=/"), "got {r}");
         assert!(r.contains("client_id="), "got {r}");
+    }
+
+    #[test]
+    fn build_idp_hints_accepts_allowlisted_params() {
+        let h = build_idp_hints(
+            "return=/&login_hint=alice%40example&prompt=login&ui_locales=en"
+        )
+        .unwrap();
+        assert_eq!(h.login_hint.as_deref(), Some("alice@example"));
+        assert_eq!(h.prompt.as_deref(), Some("login"));
+        assert_eq!(h.ui_locales.as_deref(), Some("en"));
+        assert!(h.max_age.is_none());
+        assert!(h.acr_values.is_none());
+    }
+
+    #[test]
+    fn build_idp_hints_rejects_overlong_value() {
+        let big = "a".repeat(300);
+        let q = format!("login_hint={big}");
+        assert!(build_idp_hints(&q).is_err());
+    }
+
+    #[test]
+    fn build_idp_hints_rejects_control_characters() {
+        // %01 percent-decodes to ASCII SOH (0x01), a control char.
+        assert!(build_idp_hints("login_hint=%01bad").is_err());
+    }
+
+    #[test]
+    fn build_idp_hints_ignores_unknown_params() {
+        let h = build_idp_hints("return=/&surprise=nope&login_hint=alice")
+            .unwrap();
+        assert_eq!(h.login_hint.as_deref(), Some("alice"));
     }
 
     #[test]

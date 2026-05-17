@@ -148,7 +148,9 @@ pub enum AuthBackend {
     /// Single sign-on via an external OIDC identity provider.
     /// Must be wrapped inside `auth jwt { wrap oidc { ... } }` so the
     /// post-login identity can be persisted as a session cookie.
-    Oidc(OidcConfig),
+    /// Boxed because `OidcConfig` is significantly larger than the
+    /// other variants and clippy flags the size disparity.
+    Oidc(Box<OidcConfig>),
 }
 
 /// Configuration for the OIDC SSO authentication back-end.
@@ -225,6 +227,21 @@ pub struct OidcConfig {
     /// background task retries with exponential backoff.  Set to
     /// `#false` to restore strict fail-fast startup.
     pub discovery_retry: bool,
+    /// When true (default), expose a POST endpoint that accepts
+    /// signed `logout_token`s pushed by the IdP and tears down any
+    /// matching server-side refresh entries.  Spec: OpenID Connect
+    /// Back-Channel Logout 1.0.
+    pub backchannel_logout_enabled: bool,
+    /// Path that receives the IdP's POSTed `logout_token`.
+    /// Defaults to `/.aloha/oidc/backchannel-logout`.
+    pub backchannel_logout_path: String,
+    /// Maximum acceptable `iat` skew on inbound logout-tokens, in
+    /// seconds.  Defaults to 120.  Anything older is rejected as
+    /// stale to limit replay surface.
+    pub backchannel_max_iat_skew_secs: u64,
+    /// Seconds a seen `jti` is remembered to reject replays.
+    /// Defaults to 300; should be larger than the iat-skew window.
+    pub backchannel_jti_ttl_secs: u64,
 }
 
 /// Configuration for the LDAP authentication back-end.

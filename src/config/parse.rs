@@ -386,6 +386,21 @@ fn parse_auth_backend(
             let discovery_retry =
                 child_bool(node, "discovery-retry").unwrap_or(true);
 
+            let backchannel_logout_enabled =
+                child_bool(node, "backchannel-logout").unwrap_or(true);
+            let backchannel_logout_path =
+                child_str(node, "backchannel-logout-path").unwrap_or_else(
+                    || "/.aloha/oidc/backchannel-logout".to_owned(),
+                );
+            let backchannel_max_iat_skew_secs =
+                child_i64(node, "backchannel-max-iat-skew")
+                    .map(|n| n as u64)
+                    .unwrap_or(120);
+            let backchannel_jti_ttl_secs =
+                child_i64(node, "backchannel-jti-ttl")
+                    .map(|n| n as u64)
+                    .unwrap_or(300);
+
             // The OIDC spec requires `offline_access` for refresh
             // tokens; quietly add it so operators don't have to
             // remember (mirrors how `openid` is injected above).
@@ -399,6 +414,7 @@ fn parse_auth_backend(
                 ("login-path", &login_path),
                 ("callback-path", &callback_path),
                 ("logout-path", &logout_path),
+                ("backchannel-logout-path", &backchannel_logout_path),
             ] {
                 if !p.starts_with('/') {
                     bail!(
@@ -413,6 +429,7 @@ fn parse_auth_backend(
                 ("login-path", &login_path),
                 ("callback-path", &callback_path),
                 ("logout-path", &logout_path),
+                ("backchannel-logout-path", &backchannel_logout_path),
             ];
             for i in 0..paths.len() {
                 for j in (i + 1)..paths.len() {
@@ -438,7 +455,7 @@ fn parse_auth_backend(
                 );
             }
 
-            Ok(AuthBackend::Oidc(OidcConfig {
+            Ok(AuthBackend::Oidc(Box::new(OidcConfig {
                 issuer,
                 client_id,
                 client_secret,
@@ -458,7 +475,11 @@ fn parse_auth_backend(
                 userinfo,
                 discovery_refresh_secs,
                 discovery_retry,
-            }))
+                backchannel_logout_enabled,
+                backchannel_logout_path,
+                backchannel_max_iat_skew_secs,
+                backchannel_jti_ttl_secs,
+            })))
         }
         other => bail!(
             "{name}:{line}: unknown auth backend '{other}'; \

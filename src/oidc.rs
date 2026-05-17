@@ -39,9 +39,12 @@ use openidconnect::{
     RefreshToken, Scope, TokenResponse, UserInfoClaims,
 };
 use serde::{Deserialize, Serialize};
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use openidconnect::JsonWebKey as _;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 /// Provider-metadata extension carrying the `end_session_endpoint`
 /// URL.  The OIDC core spec puts this field in the RP-Initiated
@@ -77,6 +80,47 @@ type AlohaProviderMetadata = ProviderMetadata<
     CoreSubjectIdentifierType,
 >;
 
+/// Standard OIDC login-flow hints the relying party may forward to
+/// the IdP's authorisation endpoint.  All five are optional and
+/// pass-through; aloha enforces only basic length/charset hygiene
+/// at the listener edge.  Definitions: OIDC Core 1.0 §3.1.2.1.
+#[derive(Default, Debug, Clone)]
+pub struct IdpHints {
+    /// Hint to the IdP about the user being authenticated, typically
+    /// an email address or login name.  Forwarded as `login_hint`.
+    pub login_hint: Option<String>,
+    /// Controls re-authentication / consent behaviour.  Allowed
+    /// values per spec: `none`, `login`, `consent`, `select_account`.
+    /// Forwarded as `prompt`.
+    pub prompt: Option<String>,
+    /// Maximum allowable authentication age, in seconds, before the
+    /// IdP MUST actively re-authenticate.  Forwarded as `max_age`.
+    pub max_age: Option<String>,
+    /// Space-separated list of authentication context-class refs.
+    /// Used to request specific MFA / assurance levels.  Forwarded
+    /// as `acr_values`.
+    pub acr_values: Option<String>,
+    /// Space-separated list of BCP-47 locale tags ordered by
+    /// preference.  Forwarded as `ui_locales`.
+    pub ui_locales: Option<String>,
+}
+
+impl IdpHints {
+    /// Iterate the configured (name, value) pairs in the order they
+    /// appear on the struct.  Skips `None` fields.
+    fn pairs(&self) -> impl Iterator<Item = (&'static str, &str)> {
+        [
+            ("login_hint", self.login_hint.as_deref()),
+            ("prompt", self.prompt.as_deref()),
+            ("max_age", self.max_age.as_deref()),
+            ("acr_values", self.acr_values.as_deref()),
+            ("ui_locales", self.ui_locales.as_deref()),
+        ]
+        .into_iter()
+        .filter_map(|(k, v)| v.map(|val| (k, val)))
+    }
+}
+
 /// A pending login waiting for the IdP to redirect back to the
 /// callback endpoint.
 struct StateEntry {
@@ -99,6 +143,14 @@ struct RefreshEntry {
     // endpoint redirects to the IdP's `end_session_endpoint`.  Some
     // IdPs require this to identify the session being terminated.
     id_token: String,
+    // IdP's `sub` claim from the ID token: the stable user
+    // identifier at this issuer.  Used by back-channel logout to
+    // find every session belonging to a single user when the
+    // logout_token carries only `sub` (no `sid`).
+    subject: String,
+    // IdP's `sid` claim from the ID token, when present.  Used by
+    // back-channel logout to target a single session.
+    idp_sid: Option<String>,
 }
 
 /// Runtime handle for the configured OIDC IdP.  Constructed once at
@@ -122,15 +174,30 @@ pub struct OidcProvider {
     // Without this, RP-initiated logout falls back to a local-only
     // cookie clear and a redirect to `post_logout_uri`.
     end_session_url: ArcSwap<Option<url::Url>>,
+    // Cached JWKS from the most recent successful discovery.  Used
+    // by the back-channel logout endpoint to verify IdP-signed
+    // logout_tokens directly, without re-fetching keys per request.
+    jwks: ArcSwap<Option<Arc<openidconnect::core::CoreJsonWebKeySet>>>,
+    // Recently-seen `jti` values from back-channel-logout tokens,
+    // mapped to their expiry time.  Prevents replay of an already-
+    // processed logout_token within the JTI-TTL window.
+    seen_jtis: Mutex<HashMap<String, Instant>>,
 }
 
-/// Single discovery attempt: build a fresh `CoreClient` and pluck
-/// the optional `end_session_endpoint`.  Factored out so the
-/// bootstrap path and the periodic-refresh path share exactly the
-/// same construction logic.
+/// Single discovery attempt: build a fresh `CoreClient`, the
+/// optional `end_session_endpoint`, and a copy of the JWKS.
+/// Factored out so the bootstrap path and the periodic-refresh path
+/// share exactly the same construction logic.  The JWKS is returned
+/// separately so the back-channel logout endpoint can verify
+/// signatures without going through the (more constrained) ID-token
+/// verifier path.
 async fn run_discovery(
     cfg: &OidcConfig,
-) -> Result<(CoreClient, Option<url::Url>)> {
+) -> Result<(
+    CoreClient,
+    Option<url::Url>,
+    openidconnect::core::CoreJsonWebKeySet,
+)> {
     let issuer_url = IssuerUrl::new(cfg.issuer.clone())
         .with_context(|| format!("invalid OIDC issuer URL: {}", cfg.issuer))?;
     let metadata = AlohaProviderMetadata::discover_async(
@@ -142,6 +209,7 @@ async fn run_discovery(
 
     let end_session_url =
         metadata.additional_metadata().end_session_endpoint.clone();
+    let jwks = metadata.jwks().clone();
 
     // Build the client from individual endpoints rather than
     // CoreClient::from_provider_metadata so we stay independent of
@@ -153,7 +221,7 @@ async fn run_discovery(
         metadata.authorization_endpoint().clone(),
         metadata.token_endpoint().cloned(),
         metadata.userinfo_endpoint().cloned(),
-        metadata.jwks().clone(),
+        jwks.clone(),
     )
     .set_redirect_uri(
         RedirectUrl::new(cfg.redirect_uri.clone()).with_context(|| {
@@ -161,7 +229,7 @@ async fn run_discovery(
         })?,
     );
 
-    Ok((client, end_session_url))
+    Ok((client, end_session_url, jwks))
 }
 
 impl OidcProvider {
@@ -183,6 +251,8 @@ impl OidcProvider {
             refresh_ttl: Duration::from_secs(cfg.refresh_ttl_secs),
             metrics,
             end_session_url: ArcSwap::new(Arc::new(None)),
+            jwks: ArcSwap::new(Arc::new(None)),
+            seen_jtis: Mutex::new(HashMap::new()),
             states: Mutex::new(HashMap::new()),
             refreshes: Mutex::new(HashMap::new()),
             cfg,
@@ -197,9 +267,10 @@ impl OidcProvider {
             loop {
                 let Some(p) = weak.upgrade() else { return };
                 match run_discovery(&p.cfg).await {
-                    Ok((client, end_session)) => {
+                    Ok((client, end_session, jwks)) => {
                         p.client.store(Arc::new(Some(Arc::new(client))));
                         p.end_session_url.store(Arc::new(end_session));
+                        p.jwks.store(Arc::new(Some(Arc::new(jwks))));
                         p.metrics.oidc_discoveries.fetch_add(
                             1,
                             std::sync::atomic::Ordering::Relaxed,
@@ -258,9 +329,10 @@ impl OidcProvider {
                 ticker.tick().await;
                 let Some(p) = weak.upgrade() else { return };
                 match run_discovery(&p.cfg).await {
-                    Ok((client, end_session)) => {
+                    Ok((client, end_session, jwks)) => {
                         p.client.store(Arc::new(Some(Arc::new(client))));
                         p.end_session_url.store(Arc::new(end_session));
+                        p.jwks.store(Arc::new(Some(Arc::new(jwks))));
                         p.metrics.oidc_discoveries.fetch_add(
                             1,
                             std::sync::atomic::Ordering::Relaxed,
@@ -403,10 +475,14 @@ impl OidcProvider {
     /// Build the authorisation URL the browser should be
     /// redirected to.  Returns `None` when discovery has not yet
     /// completed; otherwise the URL plus the CSRF state id (mirrored
-    /// back in the callback's query string).
+    /// back in the callback's query string).  `hints` carries the
+    /// optional standard login parameters (`login_hint`, `prompt`,
+    /// etc.) that the caller has validated and wishes to forward to
+    /// the IdP.
     pub fn begin_login(
         &self,
         return_to: String,
+        hints: IdpHints,
     ) -> Option<(url::Url, String)> {
         let client = self.client()?;
         let (pkce_challenge, pkce_verifier) =
@@ -419,6 +495,11 @@ impl OidcProvider {
         );
         for scope in &self.cfg.scopes {
             req = req.add_scope(Scope::new(scope.clone()));
+        }
+        // Pass-through OIDC login hints.  `add_extra_param` URL-
+        // encodes the value, so no further escaping is needed here.
+        for (name, value) in hints.pairs() {
+            req = req.add_extra_param(name, value);
         }
         let (auth_url, csrf, nonce) =
             req.set_pkce_challenge(pkce_challenge).url();
@@ -546,6 +627,12 @@ impl OidcProvider {
         );
         let id_groups =
             extract_groups_claim(&self.cfg.groups_claim, extra);
+        // Capture the OIDC subject and session id (if any) for use by
+        // the back-channel logout endpoint, which keys session lookups
+        // on these.  `sub` is always present; `sid` is sent by IdPs
+        // that support back-channel logout but is otherwise optional.
+        let subject = claims.subject().as_str().to_owned();
+        let idp_sid = extract_optional_string_claim("sid", extra);
 
         // UserInfo merge -- noop when the feature is off.  When on,
         // /userinfo claims take precedence on non-empty values.
@@ -572,6 +659,8 @@ impl OidcProvider {
                         refresh_token: rt.clone(),
                         expires_at: Instant::now() + self.refresh_ttl,
                         id_token: id_token_str.clone(),
+                        subject: subject.clone(),
+                        idp_sid: idp_sid.clone(),
                     },
                 );
                 id
@@ -645,6 +734,8 @@ impl OidcProvider {
         );
         let id_groups =
             extract_groups_claim(&self.cfg.groups_claim, extra);
+        let new_subject = claims.subject().as_str().to_owned();
+        let new_idp_sid = extract_optional_string_claim("sid", extra);
 
         // UserInfo merge against the freshly-issued access token.
         let (username, groups) = self
@@ -674,23 +765,184 @@ impl OidcProvider {
                         refresh_token: new_rt.clone(),
                         expires_at: Instant::now() + self.refresh_ttl,
                         id_token: new_id_token_str,
+                        subject: new_subject,
+                        idp_sid: new_idp_sid,
                     },
                 );
                 id
             }
             None => {
                 // Same token still valid: just slide the TTL forward
-                // and refresh the stored id_token alongside it.
+                // and refresh the stored id_token alongside it.  Also
+                // freshen the subject/sid since the IdP may have
+                // rotated session identifiers without rotating the
+                // refresh token.
                 let mut map = self.refreshes.lock().unwrap();
                 if let Some(e) = map.get_mut(sid) {
                     e.expires_at = Instant::now() + self.refresh_ttl;
                     e.id_token = new_id_token_str;
+                    e.subject = new_subject;
+                    e.idp_sid = new_idp_sid;
                 }
                 sid.to_owned()
             }
         };
 
         Ok((Identity { username, groups }, new_sid))
+    }
+
+    /// True when back-channel logout is enabled in config.  Used by
+    /// `listener.rs` to decide whether to register the endpoint at
+    /// dispatch time.
+    pub fn backchannel_logout_enabled(&self) -> bool {
+        self.cfg.backchannel_logout_enabled
+    }
+
+    /// Path the IdP POSTs logout_tokens to.
+    pub fn backchannel_logout_path(&self) -> &str {
+        &self.cfg.backchannel_logout_path
+    }
+
+    /// Validate an IdP-pushed `logout_token` and tear down any
+    /// matching server-side refresh entries.  Returns the number of
+    /// entries removed (0 is a valid outcome -- the token was
+    /// well-formed and signed but matched no live sessions).
+    ///
+    /// Spec: OpenID Connect Back-Channel Logout 1.0 §2.6 (request),
+    /// §2.4 (logout_token), §2.6 (validation).
+    pub fn apply_backchannel_logout(&self, token: &str) -> Result<usize> {
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .context("clock before epoch")?
+            .as_secs() as i64;
+
+        // Parse the compact JWS without verifying yet.
+        let parsed = parse_compact_jws(token)?;
+
+        // Locate a matching JWK.  Empty JWKS or missing kid match
+        // count as "verification failed"; some IdPs sign with a key
+        // that has no `kid` set, so absent `kid` means "any of our
+        // keys may match" -- we walk them in order.
+        let jwks_guard = self.jwks.load_full();
+        let jwks = jwks_guard
+            .as_ref()
+            .clone()
+            .ok_or_else(|| anyhow!("JWKS not available; OIDC not ready"))?;
+        let alg = parsed.alg.clone();
+        let signed_input = parsed.signed_input.as_bytes();
+        let sig_bytes = parsed.signature_bytes.as_slice();
+        let verified = jwks
+            .keys()
+            .iter()
+            .filter(|k| match (k.key_id(), parsed.kid.as_deref()) {
+                (Some(jwk_kid), Some(hdr_kid)) => {
+                    jwk_kid.as_str() == hdr_kid
+                }
+                // No kid on either side: try the key.
+                _ => parsed.kid.is_none(),
+            })
+            .any(|k| k.verify_signature(&alg, signed_input, sig_bytes).is_ok());
+        if !verified {
+            bail!("logout_token signature did not match any JWKS key");
+        }
+
+        // Claim checks.
+        let payload = &parsed.payload;
+        let iss = payload
+            .get("iss")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("logout_token missing iss"))?;
+        if iss != self.cfg.issuer.trim_end_matches('/')
+            && iss != self.cfg.issuer
+        {
+            bail!("logout_token iss does not match configured issuer");
+        }
+        let aud_ok = match payload.get("aud") {
+            Some(serde_json::Value::String(s)) => s == &self.cfg.client_id,
+            Some(serde_json::Value::Array(items)) => items
+                .iter()
+                .any(|v| v.as_str() == Some(self.cfg.client_id.as_str())),
+            _ => false,
+        };
+        if !aud_ok {
+            bail!("logout_token aud does not include our client_id");
+        }
+        let iat = payload
+            .get("iat")
+            .and_then(|v| v.as_i64())
+            .ok_or_else(|| anyhow!("logout_token missing iat"))?;
+        let skew = self.cfg.backchannel_max_iat_skew_secs as i64;
+        if (now - iat).abs() > skew {
+            bail!("logout_token iat outside accepted skew window");
+        }
+        // OIDC Back-Channel Logout 1.0 §2.5: the events claim MUST be
+        // an object containing the back-channel-logout schema URL as
+        // a key, with an empty object as its value.
+        let events = payload
+            .get("events")
+            .and_then(|v| v.as_object())
+            .ok_or_else(|| anyhow!("logout_token missing events object"))?;
+        if !events
+            .contains_key("http://schemas.openid.net/event/backchannel-logout")
+        {
+            bail!("logout_token events does not declare back-channel-logout");
+        }
+        // The spec also explicitly forbids the `nonce` claim on
+        // logout_tokens; reject if seen.
+        if payload.get("nonce").is_some() {
+            bail!("logout_token must not carry a nonce claim");
+        }
+        let sub = payload.get("sub").and_then(|v| v.as_str());
+        let sid = payload.get("sid").and_then(|v| v.as_str());
+        if sub.is_none() && sid.is_none() {
+            bail!("logout_token must contain at least one of sub or sid");
+        }
+        // jti is REQUIRED so we can detect replays.
+        let jti = payload
+            .get("jti")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("logout_token missing jti"))?;
+        if !self.record_jti(jti) {
+            bail!("logout_token jti replay detected");
+        }
+
+        // Tear down matching refresh entries.  When sid is given,
+        // remove only matching sessions; when only sub is given,
+        // remove every entry for that user (RP-implementation
+        // recommended by §2.6).
+        let removed = {
+            let mut map = self.refreshes.lock().unwrap();
+            let before = map.len();
+            match (sid, sub) {
+                (Some(sid_val), _) => {
+                    map.retain(|_, e| e.idp_sid.as_deref() != Some(sid_val));
+                }
+                (None, Some(sub_val)) => {
+                    map.retain(|_, e| e.subject != sub_val);
+                }
+                _ => {}
+            }
+            before - map.len()
+        };
+
+        Ok(removed)
+    }
+
+    /// Record a `jti`; returns `false` when the value was already
+    /// seen within the TTL window (i.e. this is a replay attempt).
+    fn record_jti(&self, jti: &str) -> bool {
+        let ttl =
+            Duration::from_secs(self.cfg.backchannel_jti_ttl_secs);
+        let now = Instant::now();
+        let mut map = self.seen_jtis.lock().unwrap();
+        // Opportunistic prune of long-stale entries so the map
+        // doesn't grow unboundedly between scheduled evictions.
+        map.retain(|_, expires_at| *expires_at > now);
+        if map.contains_key(jti) {
+            return false;
+        }
+        map.insert(jti.to_owned(), now + ttl);
+        true
     }
 
     /// Path served as the in-browser login endpoint.
@@ -717,11 +969,30 @@ impl OidcProvider {
             .lock()
             .unwrap()
             .retain(|_, e| now <= e.expires_at);
+        // Seen jtis carry absolute expiry too.
+        self.seen_jtis
+            .lock()
+            .unwrap()
+            .retain(|_, expires_at| now <= *expires_at);
     }
 
     #[cfg(test)]
     fn refresh_count(&self) -> usize {
         self.refreshes.lock().unwrap().len()
+    }
+}
+
+/// Like `extract_string_claim` but returns `None` when the claim is
+/// missing or not a non-empty string, rather than a fallback value.
+/// Used for `sid` which is genuinely optional on the ID token.
+fn extract_optional_string_claim(
+    name: &str,
+    extra: &openidconnect::EmptyAdditionalClaims,
+) -> Option<String> {
+    let json = serde_json::to_value(extra).ok()?;
+    match json.get(name).and_then(|v| v.as_str()) {
+        Some(s) if !s.is_empty() => Some(s.to_owned()),
+        _ => None,
     }
 }
 
@@ -745,6 +1016,74 @@ fn extract_string_claim(
         Some(s) if !s.is_empty() => s.to_owned(),
         _ => default.to_owned(),
     }
+}
+
+/// Parsed components of a compact JWS, ready for signature
+/// verification + claim inspection.  Pure-data; no crypto is run
+/// here.  Used by the back-channel logout endpoint, which has its
+/// own validation rules and cannot reuse openidconnect's strict
+/// IdToken verifier (logout_tokens lack `exp`, mustn't carry
+/// `nonce`, etc).
+struct ParsedJws {
+    /// JWS signing algorithm advertised in the protected header.
+    alg: CoreJwsSigningAlgorithm,
+    /// Optional key-id from the protected header.
+    kid: Option<String>,
+    /// The exact bytes `header.payload` (base64url-encoded segments
+    /// joined by '.') over which the signature is computed.
+    signed_input: String,
+    /// Raw decoded signature bytes.
+    signature_bytes: Vec<u8>,
+    /// Decoded payload as parsed JSON.
+    payload: serde_json::Value,
+}
+
+fn parse_compact_jws(token: &str) -> Result<ParsedJws> {
+    // JWS compact form: header.payload.signature, each segment
+    // base64url-encoded without padding.
+    let mut parts = token.split('.');
+    let h = parts.next().ok_or_else(|| anyhow!("malformed JWS"))?;
+    let p = parts.next().ok_or_else(|| anyhow!("malformed JWS"))?;
+    let s = parts.next().ok_or_else(|| anyhow!("malformed JWS"))?;
+    if parts.next().is_some() {
+        bail!("malformed JWS: too many segments");
+    }
+    let header_bytes = URL_SAFE_NO_PAD
+        .decode(h)
+        .context("logout_token header base64url decode")?;
+    let payload_bytes = URL_SAFE_NO_PAD
+        .decode(p)
+        .context("logout_token payload base64url decode")?;
+    let signature_bytes = URL_SAFE_NO_PAD
+        .decode(s)
+        .context("logout_token signature base64url decode")?;
+    let header: serde_json::Value = serde_json::from_slice(&header_bytes)
+        .context("logout_token header JSON parse")?;
+    let payload: serde_json::Value = serde_json::from_slice(&payload_bytes)
+        .context("logout_token payload JSON parse")?;
+    let alg_str = header
+        .get("alg")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("logout_token header missing alg"))?;
+    // CoreJwsSigningAlgorithm has serde rename attrs mapping each
+    // variant to its standard alg name string, so a JSON round-trip
+    // is enough to deserialise.
+    let alg: CoreJwsSigningAlgorithm =
+        serde_json::from_value(serde_json::Value::String(alg_str.to_owned()))
+            .with_context(|| {
+                format!("logout_token alg '{alg_str}' is not recognised")
+            })?;
+    let kid = header
+        .get("kid")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_owned());
+    Ok(ParsedJws {
+        alg,
+        kid,
+        signed_input: format!("{h}.{p}"),
+        signature_bytes,
+        payload,
+    })
 }
 
 /// Read a groups claim from the additional-claims map.  Accepts both
@@ -842,6 +1181,11 @@ pub(crate) mod tests {
             userinfo: false,
             discovery_refresh_secs: 0,
             discovery_retry: true,
+            backchannel_logout_enabled: true,
+            backchannel_logout_path:
+                "/.aloha/oidc/backchannel-logout".into(),
+            backchannel_max_iat_skew_secs: 120,
+            backchannel_jti_ttl_secs: 300,
         };
         let client = CoreClient::new(
             ClientId::new(cfg.client_id.clone()),
@@ -865,6 +1209,8 @@ pub(crate) mod tests {
             states: Mutex::new(HashMap::new()),
             refreshes: Mutex::new(HashMap::new()),
             end_session_url: ArcSwap::new(Arc::new(None)),
+            jwks: ArcSwap::new(Arc::new(None)),
+            seen_jtis: Mutex::new(HashMap::new()),
         })
     }
 
@@ -898,6 +1244,11 @@ pub(crate) mod tests {
             // when discovery fails -- prevents the test runtime
             // from spinning on retries.
             discovery_retry: false,
+            backchannel_logout_enabled: false,
+            backchannel_logout_path:
+                "/.aloha/oidc/backchannel-logout".into(),
+            backchannel_max_iat_skew_secs: 120,
+            backchannel_jti_ttl_secs: 300,
         };
         // OidcProvider::new spawns a tokio task, so we need a runtime.
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -962,6 +1313,8 @@ pub(crate) mod tests {
                 // Already in the past.
                 expires_at: Instant::now() - Duration::from_secs(1),
                 id_token: "test".into(),
+                subject: "alice".into(),
+                idp_sid: None,
             },
         );
         assert_eq!(p.refresh_count(), 1);
@@ -978,6 +1331,8 @@ pub(crate) mod tests {
                 refresh_token: RefreshToken::new("rt".into()),
                 expires_at: Instant::now() + Duration::from_secs(60),
                 id_token: "the-id-token".into(),
+                subject: "alice".into(),
+                idp_sid: None,
             },
         );
         assert_eq!(
@@ -990,6 +1345,35 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn record_jti_rejects_replay() {
+        let p = provider_for_store(Duration::from_secs(60));
+        assert!(p.record_jti("jti-1"));
+        assert!(!p.record_jti("jti-1"));
+        // A different jti is still accepted.
+        assert!(p.record_jti("jti-2"));
+    }
+
+    #[test]
+    fn idp_hints_pairs_filters_none_and_preserves_order() {
+        let h = IdpHints {
+            login_hint: Some("alice@example".into()),
+            prompt: None,
+            max_age: Some("0".into()),
+            acr_values: None,
+            ui_locales: Some("fr".into()),
+        };
+        let pairs: Vec<_> = h.pairs().collect();
+        assert_eq!(
+            pairs,
+            vec![
+                ("login_hint", "alice@example"),
+                ("max_age", "0"),
+                ("ui_locales", "fr"),
+            ],
+        );
+    }
+
+    #[test]
     fn refresh_store_keeps_live_entries() {
         let p = provider_for_store(Duration::from_secs(60));
         p.refreshes.lock().unwrap().insert(
@@ -998,6 +1382,8 @@ pub(crate) mod tests {
                 refresh_token: RefreshToken::new("rt".into()),
                 expires_at: Instant::now() + Duration::from_secs(60),
                 id_token: "test".into(),
+                subject: "alice".into(),
+                idp_sid: None,
             },
         );
         p.evict_expired();

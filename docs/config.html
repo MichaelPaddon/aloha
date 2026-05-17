@@ -510,6 +510,10 @@
               <li><a href="#auth-oidc-userinfo">userinfo</a></li>
               <li><a href="#auth-oidc-discovery-refresh">discovery-refresh</a></li>
               <li><a href="#auth-oidc-discovery-retry">discovery-retry</a></li>
+              <li><a href="#auth-oidc-backchannel-logout">backchannel-logout</a></li>
+              <li><a href="#auth-oidc-backchannel-logout-path">backchannel-logout-path</a></li>
+              <li><a href="#auth-oidc-backchannel-max-iat-skew">backchannel-max-iat-skew</a></li>
+              <li><a href="#auth-oidc-backchannel-jti-ttl">backchannel-jti-ttl</a></li>
             </ul>
             <li class="nav-parent"><a href="#auth-pam">pam<span class="nav-tog">›</span></a></li>
             <ul class="nav-list sub3 nav-children">
@@ -1438,6 +1442,43 @@
                   successful discovery.  Set to <code>#false</code>
                   to restore fail-fast startup.</td>
             </tr>
+            <tr id="auth-oidc-backchannel-logout">
+              <td>backchannel-logout</td><td>boolean</td>
+              <td><code>#true</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  When true (default), expose a
+                  <code>POST</code>-only endpoint that accepts
+                  signed <code>logout_token</code>s pushed by the
+                  IdP and tears down matching server-side refresh
+                  entries.  Spec: OpenID Connect Back-Channel Logout
+                  1.0.</td>
+            </tr>
+            <tr id="auth-oidc-backchannel-logout-path">
+              <td>backchannel-logout-path</td><td>string</td>
+              <td><code>/.aloha/oidc/backchannel-logout</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Path the IdP POSTs the <code>logout_token</code>
+                  to.  Register the corresponding absolute URL with
+                  the IdP&rsquo;s client settings.</td>
+            </tr>
+            <tr id="auth-oidc-backchannel-max-iat-skew">
+              <td>backchannel-max-iat-skew</td><td>integer (s)</td>
+              <td><code>120</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Maximum acceptable clock skew, in seconds, between
+                  the inbound logout-token&rsquo;s <code>iat</code>
+                  claim and the local clock.  Anything older is
+                  rejected as stale.</td>
+            </tr>
+            <tr id="auth-oidc-backchannel-jti-ttl">
+              <td>backchannel-jti-ttl</td><td>integer (s)</td>
+              <td><code>300</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  How long a successfully-applied logout-token&rsquo;s
+                  <code>jti</code> is remembered to reject replays.
+                  Should comfortably exceed
+                  <code>backchannel-max-iat-skew</code>.</td>
+            </tr>
           </tbody>
         </table>
       </div>
@@ -1465,6 +1506,40 @@
         terminated too; otherwise the browser goes straight to
         <code>post-logout-uri</code>.  Hitting the logout endpoint
         without an active session is a safe no-op redirect.
+      </p>
+      <p>
+        <strong>Back-channel logout.</strong>  With
+        <code>backchannel-logout</code> enabled (the default), aloha
+        also exposes a <code>POST</code>-only endpoint that accepts
+        signed <code>logout_token</code> JWTs pushed by the IdP.
+        Each token is validated (signature against the cached JWKS,
+        <code>iss</code>/<code>aud</code>, <code>iat</code> within
+        <code>backchannel-max-iat-skew</code>, the back-channel-logout
+        <code>events</code> claim, presence of <code>sub</code> or
+        <code>sid</code>, absence of <code>nonce</code>, and
+        <code>jti</code> uniqueness within
+        <code>backchannel-jti-ttl</code>).  On success aloha removes
+        every refresh entry whose stored <code>sid</code> matches
+        (or every entry for the user when only <code>sub</code> was
+        sent).  This only tears down <em>server-side</em> state
+        &mdash; the user&rsquo;s in-flight JWT session cookie remains
+        valid until its own expiry, so operators who need fast
+        revocation should keep <code>validity</code> short.
+      </p>
+      <p>
+        <strong>Login-flow query passthrough.</strong>  The login
+        endpoint forwards the standard OIDC hints
+        <code>login_hint</code>, <code>prompt</code>,
+        <code>max_age</code>, <code>acr_values</code>, and
+        <code>ui_locales</code> to the IdP&rsquo;s authorisation URL
+        when they appear on the inbound query string (alongside
+        <code>return</code>).  Values are length-capped at 256 bytes
+        and restricted to printable ASCII.  Useful for SPAs that
+        need <code>prompt=none</code> silent re-auth, password-
+        manager deep links via <code>login_hint</code>, MFA
+        enforcement via <code>acr_values</code>, and localised
+        login pages via <code>ui_locales</code>.  See OIDC Core 1.0
+        &sect;3.1.2.1 for the canonical definitions.
       </p>
 
       <h4 id="auth-pam">PAM</h4>

@@ -373,6 +373,13 @@ pub struct Metrics {
     // /userinfo fetches that failed after login; the login still
     // succeeds with the ID-token claim values as fallback.
     pub oidc_userinfo_failures: AtomicU64,
+    // Back-channel logout tokens that successfully validated and
+    // were applied (regardless of how many sessions matched).
+    pub oidc_backchannel_logouts: AtomicU64,
+    // Back-channel logout requests rejected at any validation
+    // stage: bad form body, bad JWT, bad signature, bad claim, or
+    // replayed jti.
+    pub oidc_backchannel_failures: AtomicU64,
     // HTTP/3 counters.  Kept separate from the overall request counters
     // so operators can see the protocol split on the status page.
     pub quic_handshakes_total: AtomicU64,
@@ -415,6 +422,8 @@ impl Metrics {
             oidc_discoveries: AtomicU64::new(0),
             oidc_discovery_failures: AtomicU64::new(0),
             oidc_userinfo_failures: AtomicU64::new(0),
+            oidc_backchannel_logouts: AtomicU64::new(0),
+            oidc_backchannel_failures: AtomicU64::new(0),
             quic_handshakes_total: AtomicU64::new(0),
             quic_handshake_failures_total: AtomicU64::new(0),
             quic_connections_active: AtomicI64::new(0),

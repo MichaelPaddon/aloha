@@ -249,7 +249,10 @@ async fn main() -> anyhow::Result<()> {
     let oidc: Option<Arc<oidc::OidcProvider>> = match &config.server.auth {
         Some(config::AuthBackend::Jwt { inner: Some(b), .. }) => {
             if let config::AuthBackend::Oidc(cfg) = b.as_ref() {
-                let p = oidc::OidcProvider::new(cfg.clone(), metrics.clone());
+                let p = oidc::OidcProvider::new(
+                    (**cfg).clone(),
+                    metrics.clone(),
+                );
                 tracing::info!(
                     issuer = %cfg.issuer,
                     "oidc: bootstrapping discovery in background"

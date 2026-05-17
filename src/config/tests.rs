@@ -4541,6 +4541,63 @@ fn oidc_refresh_defaults_off() {
 }
 
 #[test]
+fn oidc_backchannel_defaults() {
+    let cfg = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        server {
+            state-dir "/tmp/aloha-test"
+            auth jwt {
+                wrap oidc {
+                    issuer "https://accounts.example.com"
+                    client-id "abc"
+                    redirect-uri "https://app.example/cb"
+                }
+            }
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap();
+    let oc = match &cfg.server.auth {
+        Some(AuthBackend::Jwt { inner: Some(b), .. }) => match b.as_ref() {
+            AuthBackend::Oidc(c) => c,
+            _ => panic!("expected oidc"),
+        },
+        _ => panic!("expected jwt"),
+    };
+    assert!(oc.backchannel_logout_enabled);
+    assert_eq!(
+        oc.backchannel_logout_path,
+        "/.aloha/oidc/backchannel-logout"
+    );
+    assert_eq!(oc.backchannel_max_iat_skew_secs, 120);
+    assert_eq!(oc.backchannel_jti_ttl_secs, 300);
+}
+
+#[test]
+fn oidc_backchannel_path_must_differ() {
+    let result = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        server {
+            state-dir "/tmp/aloha-test"
+            auth jwt {
+                wrap oidc {
+                    issuer "https://accounts.example.com"
+                    client-id "abc"
+                    redirect-uri "https://app.example/cb"
+                    backchannel-logout-path "/.aloha/oidc/logout"
+                }
+            }
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    );
+    assert!(result.is_err(), "overlapping paths must be rejected");
+}
+
+#[test]
 fn oidc_operational_fields_default() {
     let cfg = Config::parse(
         r#"
