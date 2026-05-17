@@ -387,6 +387,15 @@ pub struct Metrics {
     // Bearer tokens rejected at any validation stage: malformed
     // JWT, bad signature, wrong issuer/audience, expired, etc.
     pub oidc_bearer_failures: AtomicU64,
+    // RFC 7009 refresh-token revocations the IdP accepted.
+    pub oidc_revocations: AtomicU64,
+    // Revocation attempts the IdP rejected (network, 4xx, etc.).
+    // Logged but otherwise harmless: revocation is defence-in-depth.
+    pub oidc_revocation_failures: AtomicU64,
+    // Authorization-response callbacks rejected because the
+    // returned `iss` parameter (RFC 9207) did not match our
+    // configured issuer.  Mix-up attack mitigation.
+    pub oidc_callback_iss_mismatches: AtomicU64,
     // HTTP/3 counters.  Kept separate from the overall request counters
     // so operators can see the protocol split on the status page.
     pub quic_handshakes_total: AtomicU64,
@@ -433,6 +442,9 @@ impl Metrics {
             oidc_backchannel_failures: AtomicU64::new(0),
             oidc_bearer_validations: AtomicU64::new(0),
             oidc_bearer_failures: AtomicU64::new(0),
+            oidc_revocations: AtomicU64::new(0),
+            oidc_revocation_failures: AtomicU64::new(0),
+            oidc_callback_iss_mismatches: AtomicU64::new(0),
             quic_handshakes_total: AtomicU64::new(0),
             quic_handshake_failures_total: AtomicU64::new(0),
             quic_connections_active: AtomicI64::new(0),

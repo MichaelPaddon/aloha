@@ -517,6 +517,9 @@
               <li><a href="#auth-oidc-bearer">bearer</a></li>
               <li><a href="#auth-oidc-bearer-audience">bearer-audience</a></li>
               <li><a href="#auth-oidc-bearer-cache-size">bearer-cache-size</a></li>
+              <li><a href="#auth-oidc-revoke-on-logout">revoke-on-logout</a></li>
+              <li><a href="#auth-oidc-require-iss">require-iss</a></li>
+              <li><a href="#auth-oidc-resource">resource</a></li>
             </ul>
             <li class="nav-parent"><a href="#auth-pam">pam<span class="nav-tog">›</span></a></li>
             <ul class="nav-list sub3 nav-children">
@@ -1507,6 +1510,41 @@
                   hits skip the per-request signature verification
                   until the token&rsquo;s own <code>exp</code>.</td>
             </tr>
+            <tr id="auth-oidc-revoke-on-logout">
+              <td>revoke-on-logout</td><td>boolean</td>
+              <td><code>#true</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  When true (default), the logout endpoint
+                  additionally POSTs the dropped refresh token to
+                  the IdP&rsquo;s <code>revocation_endpoint</code>
+                  (RFC 7009).  Defence-in-depth on top of the
+                  end-session redirect.  The call is
+                  fire-and-forget &mdash; logout returns promptly
+                  even if the IdP&rsquo;s revocation endpoint is
+                  slow.</td>
+            </tr>
+            <tr id="auth-oidc-require-iss">
+              <td>require-iss</td><td>boolean</td>
+              <td><code>#false</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Mix-up attack mitigation (RFC 9207).  Aloha
+                  always rejects callbacks whose <code>iss</code>
+                  parameter is present but does not match the
+                  configured issuer.  With <code>require-iss
+                  #true</code> the callback also rejects
+                  responses that omit <code>iss</code> entirely.</td>
+            </tr>
+            <tr id="auth-oidc-resource">
+              <td>resource</td><td>string</td><td>&mdash;</td>
+              <td><span class="badge badge-opt">optional</span>
+                  Repeatable: each child contributes one RFC 8707
+                  <code>resource</code> value.  Forwarded on the
+                  authorization, code-exchange, and refresh
+                  requests so the IdP narrows the access
+                  token&rsquo;s <code>aud</code> to the listed
+                  resources.  Values must be absolute http(s) URLs
+                  without a <code>#fragment</code>.</td>
+            </tr>
           </tbody>
         </table>
       </div>
@@ -1588,6 +1626,22 @@
         consistent Identity shape regardless of which auth path
         produced it.  Supports JWT-format tokens only; opaque
         (introspection-required) tokens are not yet handled.
+      </p>
+      <p>
+        <strong>OAuth standards-track polish.</strong>  Three small
+        defensive measures sit alongside the main flow:
+        <code>revoke-on-logout</code> (RFC 7009) tells the IdP to
+        invalidate the refresh token at logout in addition to the
+        existing end-session redirect;
+        <code>require-iss</code> + the (always-on) <code>iss</code>
+        match on the callback (RFC 9207) protects against
+        mix-up attacks where a malicious site tricks a logged-in
+        user into completing an authorization flow against the
+        wrong IdP;
+        <code>resource</code> (RFC 8707) lets the relying party
+        narrow the access token&rsquo;s <code>aud</code> to one or
+        more specific protected resources, which pairs naturally
+        with bearer-token resource-server mode above.
       </p>
 
       <h4 id="auth-pam">PAM</h4>

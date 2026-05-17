@@ -516,6 +516,7 @@ impl AlohaService {
                         req.headers(),
                         &query,
                         is_tls,
+                        &state.metrics,
                         &state.error_pages,
                     )
                     .await;
@@ -1414,7 +1415,7 @@ async fn handle_oidc_backchannel_logout(
 // aloha's own cookies; the redirect target depends on whether the
 // IdP-initiated path is available (see `build_logout_redirect`).
 fn handle_oidc_logout(
-    oidc: &crate::oidc::OidcProvider,
+    oidc: &Arc<crate::oidc::OidcProvider>,
     jwt: Option<&crate::jwt::JwtManager>,
     headers: &hyper::HeaderMap,
     is_tls: bool,
@@ -1423,9 +1424,17 @@ fn handle_oidc_logout(
     // id_token for use as id_token_hint.  Doing this unconditionally
     // means an attacker who replays an old logout URL cannot keep a
     // refresh entry alive past the user's intent to log out.
-    let id_token_hint =
-        cookie_value(headers, oidc.refresh_cookie_name())
-            .and_then(|sid| oidc.take_logout_session(&sid));
+    // Pop the entry and, when present, fire-and-forget revoke the
+    // refresh token at the IdP (RFC 7009).  Defence-in-depth: the
+    // end-session redirect terminates the IdP session but leaves
+    // the refresh token redeemable until its natural exp on IdPs
+    // that decouple session and token lifetimes.
+    let popped = cookie_value(headers, oidc.refresh_cookie_name())
+        .and_then(|sid| oidc.take_logout_session(&sid));
+    let id_token_hint = popped.as_ref().map(|(id, _)| id.clone());
+    if let Some((_, refresh_token)) = popped {
+        oidc.revoke_refresh_token(refresh_token);
+    }
 
     let location = build_logout_redirect(oidc, id_token_hint.as_deref());
 
@@ -1497,6 +1506,7 @@ async fn handle_oidc_callback(
     headers: &hyper::HeaderMap,
     query: &str,
     is_tls: bool,
+    metrics: &Metrics,
     error_pages: &ErrorPages,
 ) -> Response<BoxBody> {
     let Some(code) = query_param(query, "code") else {
@@ -1505,6 +1515,35 @@ async fn handle_oidc_callback(
     let Some(state) = query_param(query, "state") else {
         return response_status(400, Some(error_pages)).await;
     };
+    // RFC 9207: when the IdP includes an `iss` parameter on the
+    // authorization response, it MUST match our configured issuer
+    // (mix-up attack mitigation).  When `require_iss` is set,
+    // absence is also rejected; by default we honour the spec
+    // semantics of "verify when present, accept when absent" to
+    // stay compatible with pre-9207 IdPs.
+    let iss_param = query_param(query, "iss");
+    if let Some(iss) = iss_param.as_deref() {
+        let canonical = oidc.issuer();
+        if iss.trim_end_matches('/') != canonical {
+            metrics.oidc_callback_iss_mismatches.fetch_add(
+                1,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            tracing::warn!(
+                expected = %canonical,
+                got = %iss,
+                "oidc: callback iss mismatch"
+            );
+            return response_status(400, Some(error_pages)).await;
+        }
+    } else if oidc.require_iss() {
+        metrics.oidc_callback_iss_mismatches.fetch_add(
+            1,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        tracing::warn!("oidc: callback missing required iss param");
+        return response_status(400, Some(error_pages)).await;
+    }
     // CSRF: the state-id must also be carried by the browser as the
     // cookie set in `handle_oidc_login`.  A request that has one but
     // not the other was either replayed or cross-site.

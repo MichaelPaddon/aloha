@@ -425,6 +425,40 @@ fn parse_auth_backend(
                 );
             }
 
+            let revoke_on_logout =
+                child_bool(node, "revoke-on-logout").unwrap_or(true);
+            let require_iss =
+                child_bool(node, "require-iss").unwrap_or(false);
+
+            // RFC 8707 resources: repeatable `resource "..."` child.
+            // Validation: absolute URI with http/https scheme and no
+            // fragment (per the spec).
+            let resources: Vec<String> = node
+                .children()
+                .map(|doc| {
+                    doc.nodes()
+                        .iter()
+                        .filter(|n| n.name().value() == "resource")
+                        .flat_map(positional_strs)
+                        .collect()
+                })
+                .unwrap_or_default();
+            for r in &resources {
+                let scheme = r.split("://").next().unwrap_or("");
+                if !matches!(scheme, "https" | "http") {
+                    bail!(
+                        "{name}:{line}: auth oidc: resource \"{r}\" \
+                         must use http:// or https://"
+                    );
+                }
+                if r.contains('#') {
+                    bail!(
+                        "{name}:{line}: auth oidc: resource \"{r}\" \
+                         must not contain a #fragment (RFC 8707 §2)"
+                    );
+                }
+            }
+
             // The OIDC spec requires `offline_access` for refresh
             // tokens; quietly add it so operators don't have to
             // remember (mirrors how `openid` is injected above).
@@ -506,6 +540,9 @@ fn parse_auth_backend(
                 bearer,
                 bearer_audiences,
                 bearer_cache_size,
+                revoke_on_logout,
+                require_iss,
+                resources,
             })))
         }
         other => bail!(

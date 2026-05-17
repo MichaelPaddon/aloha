@@ -48,15 +48,18 @@ use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
-/// Provider-metadata extension carrying the `end_session_endpoint`
-/// URL.  The OIDC core spec puts this field in the RP-Initiated
-/// Logout 1.0 addendum, which is why `openidconnect`'s
-/// `CoreProviderMetadata` doesn't surface it -- the crate exposes
-/// the `AdditionalProviderMetadata` trait for exactly this case.
+/// Provider-metadata extension carrying URLs that aren't on the
+/// OIDC Core ProviderMetadata struct: RP-Initiated Logout 1.0's
+/// `end_session_endpoint` and OAuth 2.0 Token Revocation (RFC 7009)
+/// `revocation_endpoint`.  `openidconnect` exposes the
+/// `AdditionalProviderMetadata` trait specifically for fields like
+/// these.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct LogoutMetadata {
     #[serde(default)]
     end_session_endpoint: Option<url::Url>,
+    #[serde(default)]
+    revocation_endpoint: Option<url::Url>,
 }
 impl AdditionalProviderMetadata for LogoutMetadata {}
 
@@ -176,6 +179,11 @@ pub struct OidcProvider {
     // Without this, RP-initiated logout falls back to a local-only
     // cookie clear and a redirect to `post_logout_uri`.
     end_session_url: ArcSwap<Option<url::Url>>,
+    // IdP's `revocation_endpoint` (RFC 7009) if exposed during
+    // discovery.  Used by `revoke_refresh_token` to invalidate
+    // tokens server-side at logout.  When absent, revocation calls
+    // become no-ops.
+    revocation_url: ArcSwap<Option<url::Url>>,
     // Cached JWKS from the most recent successful discovery.  Used
     // by the back-channel logout endpoint to verify IdP-signed
     // logout_tokens directly, without re-fetching keys per request.
@@ -209,6 +217,7 @@ async fn run_discovery(
 ) -> Result<(
     CoreClient,
     Option<url::Url>,
+    Option<url::Url>,
     openidconnect::core::CoreJsonWebKeySet,
 )> {
     let issuer_url = IssuerUrl::new(cfg.issuer.clone())
@@ -222,12 +231,14 @@ async fn run_discovery(
 
     let end_session_url =
         metadata.additional_metadata().end_session_endpoint.clone();
+    let revocation_url =
+        metadata.additional_metadata().revocation_endpoint.clone();
     let jwks = metadata.jwks().clone();
 
     // Build the client from individual endpoints rather than
     // CoreClient::from_provider_metadata so we stay independent of
     // any future Core/Aloha-metadata divergence.
-    let client = CoreClient::new(
+    let mut client = CoreClient::new(
         ClientId::new(cfg.client_id.clone()),
         cfg.client_secret.clone().map(ClientSecret::new),
         metadata.issuer().clone(),
@@ -241,8 +252,13 @@ async fn run_discovery(
             format!("invalid redirect-uri: {}", cfg.redirect_uri)
         })?,
     );
+    if let Some(ref rev) = revocation_url {
+        client = client.set_revocation_uri(
+            openidconnect::RevocationUrl::from_url(rev.clone()),
+        );
+    }
 
-    Ok((client, end_session_url, jwks))
+    Ok((client, end_session_url, revocation_url, jwks))
 }
 
 impl OidcProvider {
@@ -264,6 +280,7 @@ impl OidcProvider {
             refresh_ttl: Duration::from_secs(cfg.refresh_ttl_secs),
             metrics,
             end_session_url: ArcSwap::new(Arc::new(None)),
+            revocation_url: ArcSwap::new(Arc::new(None)),
             jwks: ArcSwap::new(Arc::new(None)),
             seen_jtis: Mutex::new(HashMap::new()),
             bearer_cache: Mutex::new(lru::LruCache::new(
@@ -284,9 +301,10 @@ impl OidcProvider {
             loop {
                 let Some(p) = weak.upgrade() else { return };
                 match run_discovery(&p.cfg).await {
-                    Ok((client, end_session, jwks)) => {
+                    Ok((client, end_session, revocation, jwks)) => {
                         p.client.store(Arc::new(Some(Arc::new(client))));
                         p.end_session_url.store(Arc::new(end_session));
+                        p.revocation_url.store(Arc::new(revocation));
                         p.jwks.store(Arc::new(Some(Arc::new(jwks))));
                         p.metrics.oidc_discoveries.fetch_add(
                             1,
@@ -346,9 +364,10 @@ impl OidcProvider {
                 ticker.tick().await;
                 let Some(p) = weak.upgrade() else { return };
                 match run_discovery(&p.cfg).await {
-                    Ok((client, end_session, jwks)) => {
+                    Ok((client, end_session, revocation, jwks)) => {
                         p.client.store(Arc::new(Some(Arc::new(client))));
                         p.end_session_url.store(Arc::new(end_session));
+                        p.revocation_url.store(Arc::new(revocation));
                         p.jwks.store(Arc::new(Some(Arc::new(jwks))));
                         p.metrics.oidc_discoveries.fetch_add(
                             1,
@@ -513,6 +532,13 @@ impl OidcProvider {
         for scope in &self.cfg.scopes {
             req = req.add_scope(Scope::new(scope.clone()));
         }
+        // RFC 8707 resource indicators -- include `resource=<uri>`
+        // for each configured target so the IdP narrows the access
+        // token's `aud` accordingly.  Must also appear on the token
+        // exchange in `complete_login`.
+        for r in &self.cfg.resources {
+            req = req.add_extra_param("resource", r.clone());
+        }
         // Pass-through OIDC login hints.  `add_extra_param` URL-
         // encodes the value, so no further escaping is needed here.
         for (name, value) in hints.pairs() {
@@ -581,12 +607,92 @@ impl OidcProvider {
     }
 
     /// Drop the refresh entry matching `sid` and return its stored
-    /// `id_token`.  Called by the logout endpoint to (a) tear down
-    /// the server-side session and (b) recover the JWT to send back
-    /// to the IdP as `id_token_hint`.  Returns `None` when no entry
-    /// is present (e.g. the user opens the logout URL twice).
-    pub fn take_logout_session(&self, sid: &str) -> Option<String> {
-        self.refreshes.lock().unwrap().remove(sid).map(|e| e.id_token)
+    /// `id_token` and `refresh_token`.  The id_token is sent back
+    /// to the IdP as `id_token_hint` on the end-session redirect;
+    /// the refresh token is handed to `revoke_refresh_token` so
+    /// the IdP can invalidate it immediately (RFC 7009).  Returns
+    /// `None` when no entry is present (e.g. the user opens the
+    /// logout URL twice).
+    pub fn take_logout_session(
+        &self,
+        sid: &str,
+    ) -> Option<(String, RefreshToken)> {
+        self.refreshes
+            .lock()
+            .unwrap()
+            .remove(sid)
+            .map(|e| (e.id_token, e.refresh_token))
+    }
+
+    /// Configured issuer, normalised by stripping any trailing
+    /// slash so callers can compare with `iss` claim values
+    /// uniformly.  Used by both back-channel logout and the
+    /// callback's RFC 9207 iss-parameter check.
+    pub fn issuer(&self) -> &str {
+        self.cfg.issuer.trim_end_matches('/')
+    }
+
+    /// True when the callback endpoint must reject authorization
+    /// responses that lack an `iss` parameter (RFC 9207).
+    pub fn require_iss(&self) -> bool {
+        self.cfg.require_iss
+    }
+
+    /// Best-effort RFC 7009 token revocation.  Returns immediately;
+    /// the actual IdP call runs in a spawned task so the user-
+    /// facing logout response is not blocked on the IdP's
+    /// revocation endpoint.  Calls are no-ops when revocation is
+    /// disabled in config, when the IdP doesn't advertise a
+    /// revocation endpoint, or when the provider hasn't completed
+    /// discovery yet -- revocation is defense-in-depth, not a
+    /// correctness requirement.
+    pub fn revoke_refresh_token(
+        self: &Arc<Self>,
+        refresh_token: RefreshToken,
+    ) {
+        if !self.cfg.revoke_on_logout {
+            return;
+        }
+        let Some(client) = self.client() else { return };
+        // Move the client Arc and refresh token into the task so the
+        // RevocationRequest borrow is local to the spawned future.
+        let metrics = self.metrics.clone();
+        tokio::spawn(async move {
+            // The CoreClient only knows how to build a revocation
+            // request when set_revocation_uri was called at
+            // construction time, which we do iff discovery surfaced
+            // the endpoint.
+            let request = match client.revoke_token(refresh_token.into()) {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::debug!(
+                        error = %format!("{e:#}"),
+                        "oidc: revocation not configurable on this \
+                         IdP; skipping"
+                    );
+                    return;
+                }
+            };
+            match request.request_async(async_http_client).await {
+                Ok(()) => {
+                    metrics.oidc_revocations.fetch_add(
+                        1,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                    tracing::debug!("oidc: refresh token revoked");
+                }
+                Err(e) => {
+                    metrics.oidc_revocation_failures.fetch_add(
+                        1,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                    tracing::warn!(
+                        error = %format!("{e:#}"),
+                        "oidc: refresh token revocation failed"
+                    );
+                }
+            }
+        });
     }
 
     /// Exchange the authorisation code returned by the IdP for an ID
@@ -616,9 +722,17 @@ impl OidcProvider {
             bail!("OIDC state expired before callback");
         }
 
-        let token_response = client
+        // RFC 8707: forward the same `resource` indicators on the
+        // token exchange so the IdP's access-token `aud` narrowing
+        // applies here too (the spec requires the parameter on
+        // both legs of the flow).
+        let mut exchange = client
             .exchange_code(AuthorizationCode::new(code))
-            .set_pkce_verifier(entry.pkce_verifier)
+            .set_pkce_verifier(entry.pkce_verifier);
+        for r in &self.cfg.resources {
+            exchange = exchange.add_extra_param("resource", r.clone());
+        }
+        let token_response = exchange
             .request_async(async_http_client)
             .await
             .context("OIDC token exchange failed")?;
@@ -716,8 +830,13 @@ impl OidcProvider {
             entry.refresh_token.clone()
         };
 
-        let token_response = client
-            .exchange_refresh_token(&rt)
+        // RFC 8707: forward resources on refresh as well so the
+        // re-issued access token carries the same `aud` narrowing.
+        let mut exchange = client.exchange_refresh_token(&rt);
+        for r in &self.cfg.resources {
+            exchange = exchange.add_extra_param("resource", r.clone());
+        }
+        let token_response = exchange
             .request_async(async_http_client)
             .await
             .inspect_err(|_| {
@@ -1333,6 +1452,9 @@ pub(crate) mod tests {
             bearer: false,
             bearer_audiences: vec![],
             bearer_cache_size: 16,
+            revoke_on_logout: true,
+            require_iss: false,
+            resources: vec![],
         };
         let client = CoreClient::new(
             ClientId::new(cfg.client_id.clone()),
@@ -1356,6 +1478,7 @@ pub(crate) mod tests {
             states: Mutex::new(HashMap::new()),
             refreshes: Mutex::new(HashMap::new()),
             end_session_url: ArcSwap::new(Arc::new(None)),
+            revocation_url: ArcSwap::new(Arc::new(None)),
             jwks: ArcSwap::new(Arc::new(None)),
             seen_jtis: Mutex::new(HashMap::new()),
             bearer_cache: Mutex::new(lru::LruCache::new(
@@ -1402,6 +1525,9 @@ pub(crate) mod tests {
             bearer: false,
             bearer_audiences: vec![],
             bearer_cache_size: 16,
+            revoke_on_logout: true,
+            require_iss: false,
+            resources: vec![],
         };
         // OidcProvider::new spawns a tokio task, so we need a runtime.
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -1488,10 +1614,10 @@ pub(crate) mod tests {
                 idp_sid: None,
             },
         );
-        assert_eq!(
-            p.take_logout_session("sid").as_deref(),
-            Some("the-id-token"),
-        );
+        let (id_tok, refresh_tok) =
+            p.take_logout_session("sid").expect("first call");
+        assert_eq!(id_tok, "the-id-token");
+        assert_eq!(refresh_tok.secret(), "rt");
         // Second call returns None: pop semantics.
         assert!(p.take_logout_session("sid").is_none());
         assert_eq!(p.refresh_count(), 0);
@@ -1550,6 +1676,63 @@ pub(crate) mod tests {
         // must be gone afterwards.
         assert!(p.validate_bearer_token(token).is_err());
         assert!(p.bearer_cache.lock().unwrap().peek(&key).is_none());
+    }
+
+    #[test]
+    fn revoke_no_op_when_disabled_in_config() {
+        // With revoke_on_logout=false the spawn path must not even
+        // touch metrics.  Easy black-box check: arrange the no-op
+        // condition and confirm the counter stays at zero.
+        let p = provider_for_store(Duration::from_secs(60));
+        // The test helper builds cfg with revoke_on_logout=true;
+        // mutate just this field via an unsafe interior-mutability
+        // pattern would be heavy.  Instead build a sibling provider
+        // with the field flipped.
+        let mut cfg_disabled = p.cfg.clone();
+        cfg_disabled.revoke_on_logout = false;
+        let p_off = Arc::new(OidcProvider {
+            client: ArcSwap::new(Arc::new(p.client.load_full().as_ref().clone())),
+            state_ttl: Duration::from_secs(60),
+            refresh_ttl: Duration::from_secs(60),
+            metrics: Arc::new(crate::metrics::Metrics::new()),
+            cfg: cfg_disabled,
+            states: Mutex::new(HashMap::new()),
+            refreshes: Mutex::new(HashMap::new()),
+            end_session_url: ArcSwap::new(Arc::new(None)),
+            revocation_url: ArcSwap::new(Arc::new(None)),
+            jwks: ArcSwap::new(Arc::new(None)),
+            seen_jtis: Mutex::new(HashMap::new()),
+            bearer_cache: Mutex::new(lru::LruCache::new(
+                NonZeroUsize::new(16).unwrap(),
+            )),
+        });
+        // No tokio runtime needed: the early-return branch fires
+        // before any spawn.
+        p_off.revoke_refresh_token(RefreshToken::new("rt".into()));
+        assert_eq!(
+            p_off
+                .metrics
+                .oidc_revocations
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            p_off
+                .metrics
+                .oidc_revocation_failures
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+    }
+
+    #[test]
+    fn issuer_strips_trailing_slash() {
+        let mut p = provider_for_store(Duration::from_secs(60));
+        // Force a trailing slash on the configured issuer and
+        // confirm the accessor returns the trimmed form.
+        Arc::get_mut(&mut p).unwrap().cfg.issuer =
+            "https://idp.example/".into();
+        assert_eq!(p.issuer(), "https://idp.example");
     }
 
     #[test]

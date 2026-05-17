@@ -256,6 +256,22 @@ pub struct OidcConfig {
     /// (`Identity`, `exp`) pair, so the per-request cost on a cache
     /// hit is a hash + a map lookup.
     pub bearer_cache_size: usize,
+    /// When true (default), the logout endpoint additionally POSTs
+    /// the dropped refresh token to the IdP's
+    /// `revocation_endpoint` (RFC 7009).  Defense-in-depth on top
+    /// of the existing end-session redirect.
+    pub revoke_on_logout: bool,
+    /// When true, the callback endpoint rejects authorization
+    /// responses that lack an `iss` parameter (RFC 9207).  Default
+    /// is `false` -- aloha *verifies* `iss` when the IdP sends it
+    /// and rejects only on mismatch.
+    pub require_iss: bool,
+    /// RFC 8707 `resource` parameter values.  Each entry is
+    /// forwarded as `resource=<uri>` on the authorization request,
+    /// code exchange, and refresh-token exchange so the IdP can
+    /// narrow the access token's `aud` to the listed resources.
+    /// Empty by default.
+    pub resources: Vec<String>,
 }
 
 /// Configuration for the LDAP authentication back-end.

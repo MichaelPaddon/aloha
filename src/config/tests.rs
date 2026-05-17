@@ -4541,6 +4541,124 @@ fn oidc_refresh_defaults_off() {
 }
 
 #[test]
+fn oidc_oauth_extras_defaults() {
+    let cfg = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        server {
+            state-dir "/tmp/aloha-test"
+            auth jwt {
+                wrap oidc {
+                    issuer "https://accounts.example.com"
+                    client-id "abc"
+                    redirect-uri "https://app.example/cb"
+                }
+            }
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap();
+    let oc = match &cfg.server.auth {
+        Some(AuthBackend::Jwt { inner: Some(b), .. }) => match b.as_ref() {
+            AuthBackend::Oidc(c) => c,
+            _ => panic!("expected oidc"),
+        },
+        _ => panic!("expected jwt"),
+    };
+    assert!(oc.revoke_on_logout);
+    assert!(!oc.require_iss);
+    assert!(oc.resources.is_empty());
+}
+
+#[test]
+fn oidc_resource_collects_repeated_values() {
+    let cfg = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        server {
+            state-dir "/tmp/aloha-test"
+            auth jwt {
+                wrap oidc {
+                    issuer "https://accounts.example.com"
+                    client-id "abc"
+                    redirect-uri "https://app.example/cb"
+                    revoke-on-logout #false
+                    require-iss #true
+                    resource "https://api.example/v1"
+                    resource "https://api.example/v2"
+                }
+            }
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap();
+    let oc = match &cfg.server.auth {
+        Some(AuthBackend::Jwt { inner: Some(b), .. }) => match b.as_ref() {
+            AuthBackend::Oidc(c) => c,
+            _ => panic!("expected oidc"),
+        },
+        _ => panic!("expected jwt"),
+    };
+    assert!(!oc.revoke_on_logout);
+    assert!(oc.require_iss);
+    assert_eq!(
+        oc.resources,
+        vec![
+            "https://api.example/v1".to_string(),
+            "https://api.example/v2".to_string(),
+        ],
+    );
+}
+
+#[test]
+fn oidc_resource_rejects_fragment() {
+    let result = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        server {
+            state-dir "/tmp/aloha-test"
+            auth jwt {
+                wrap oidc {
+                    issuer "https://accounts.example.com"
+                    client-id "abc"
+                    redirect-uri "https://app.example/cb"
+                    resource "https://api.example/v1#frag"
+                }
+            }
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    );
+    let err = result.expect_err("resource with fragment must be rejected");
+    let msg = format!("{err:#}");
+    assert!(msg.contains("#fragment"), "got: {msg}");
+}
+
+#[test]
+fn oidc_resource_rejects_relative() {
+    let result = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        server {
+            state-dir "/tmp/aloha-test"
+            auth jwt {
+                wrap oidc {
+                    issuer "https://accounts.example.com"
+                    client-id "abc"
+                    redirect-uri "https://app.example/cb"
+                    resource "/api/v1"
+                }
+            }
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    );
+    assert!(result.is_err());
+}
+
+#[test]
 fn oidc_bearer_default_off() {
     let cfg = Config::parse(
         r#"
