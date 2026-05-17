@@ -35,11 +35,18 @@ use crate::auth::{Authenticator, Identity};
 pub enum JwtResult {
     /// Token is valid; contains the resolved identity.
     Valid(Identity),
-    /// Token present but failed validation: bad signature, wrong kid,
-    /// or malformed payload.
+    /// Token present but failed validation: bad signature or
+    /// malformed payload.  (A `kid` mismatch is NOT counted as
+    /// Invalid -- see `NotMine`.)
     Invalid,
     /// Token present and structurally valid, but past its `exp` claim.
     Expired,
+    /// Token present but its `kid` does not match aloha's key,
+    /// so it isn't ours to validate.  Treated by `validate()` as
+    /// "no token present" so callers fall through to other auth
+    /// paths (notably the OIDC bearer-token mode).  Folded to
+    /// `None` in the public `validate()` return.
+    NotMine,
 }
 
 const B64: base64::engine::general_purpose::GeneralPurpose =
@@ -140,7 +147,15 @@ impl JwtManager {
     /// "bad token" and only count the latter as a security event.
     pub fn validate(&self, headers: &hyper::HeaderMap) -> Option<JwtResult> {
         let token = extract_token(headers, &self.config.cookie_name)?;
-        Some(self.validate_token(&token))
+        // A `kid` mismatch isn't an aloha-side problem -- it just
+        // means the token was issued by someone else.  Fold to
+        // `None` so callers (notably the bearer-token path in
+        // listener.rs) can pick the same token up downstream
+        // without us recording a spurious jwt_failure.
+        match self.validate_token(&token) {
+            JwtResult::NotMine => None,
+            other => Some(other),
+        }
     }
 
     fn validate_token(&self, token: &str) -> JwtResult {
@@ -187,8 +202,8 @@ impl JwtManager {
         }
         if header.get("kid").and_then(|v| v.as_str()) != Some(self.kid.as_str())
         {
-            tracing::debug!("jwt: unknown kid in header");
-            return JwtResult::Invalid;
+            tracing::debug!("jwt: kid mismatch (not our token)");
+            return JwtResult::NotMine;
         }
 
         // Verify the ES256 signature over header.payload.
@@ -326,6 +341,13 @@ impl JwtManager {
     pub fn is_session_mode(&self) -> bool {
         self.inner.is_some()
     }
+
+    /// Cookie name carrying issued tokens.  Exposed so the OIDC
+    /// logout endpoint can emit a past-dated Set-Cookie matching
+    /// the name actually issued at login.
+    pub fn cookie_name(&self) -> &str {
+        &self.config.cookie_name
+    }
 }
 
 // -- Helpers -------------------------------------------------------
@@ -442,12 +464,37 @@ mod tests {
         );
         let got = match mgr.validate(&hdrs).expect("validate") {
             JwtResult::Valid(id) => id,
-            JwtResult::Invalid | JwtResult::Expired => {
+            JwtResult::Invalid | JwtResult::Expired | JwtResult::NotMine => {
                 panic!("expected Valid")
             }
         };
         assert_eq!(got.username, "alice");
         assert_eq!(got.groups, vec!["admins"]);
+    }
+
+    #[test]
+    fn kid_mismatch_returns_none_from_validate() {
+        // A token signed by a different aloha instance carries a
+        // different `kid` from ours; the public validate() must
+        // collapse that to None so callers don't record it as a
+        // failure (the bearer-token mode picks the token up
+        // downstream).
+        let tmp_a = TempDir::new().unwrap();
+        let mgr_a = test_manager(&tmp_a);
+        let alien_token = mgr_a.issue(&identity("alice")).unwrap();
+
+        let tmp_b = TempDir::new().unwrap();
+        let mgr_b = test_manager(&tmp_b);
+
+        let mut hdrs = hyper::HeaderMap::new();
+        hdrs.insert(
+            hyper::header::COOKIE,
+            format!("sess={alien_token}").parse().unwrap(),
+        );
+        assert!(
+            mgr_b.validate(&hdrs).is_none(),
+            "kid mismatch must be folded to None",
+        );
     }
 
     #[test]
@@ -463,7 +510,7 @@ mod tests {
         );
         let got = match mgr.validate(&hdrs).expect("validate via bearer") {
             JwtResult::Valid(id) => id,
-            JwtResult::Invalid | JwtResult::Expired => {
+            JwtResult::Invalid | JwtResult::Expired | JwtResult::NotMine => {
                 panic!("expected Valid")
             }
         };
@@ -586,13 +633,13 @@ mod tests {
         );
         let first = match mgr.validate(&hdrs).expect("first validate") {
             JwtResult::Valid(id) => id,
-            JwtResult::Invalid | JwtResult::Expired => {
+            JwtResult::Invalid | JwtResult::Expired | JwtResult::NotMine => {
                 panic!("expected Valid")
             }
         };
         let second = match mgr.validate(&hdrs).expect("second validate") {
             JwtResult::Valid(id) => id,
-            JwtResult::Invalid | JwtResult::Expired => {
+            JwtResult::Invalid | JwtResult::Expired | JwtResult::NotMine => {
                 panic!("expected Valid")
             }
         };

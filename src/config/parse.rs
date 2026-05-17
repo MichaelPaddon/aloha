@@ -2,7 +2,8 @@ use super::kdl::*;
 use super::{
     AuthBackend, BasicAuthConfig, CertificateDef, ErrorPageDef, GeoIpConfig,
     HandlerConfig, HeaderOpConfig, HealthConfig, LdapAuthConfig,
-    ListenerConfig, LocationConfig, PolicyRuleDef, ProxyProtocolVersion,
+    ListenerConfig, LocationConfig, OidcConfig, PolicyRuleDef,
+    ProxyProtocolVersion,
     ServerConfig, StreamMode, SubrequestAuthConfig, Timeouts, TlsConfig,
     TlsListenerConfig, TlsOptions, TlsVersion, UpstreamTlsConfig, VHostConfig,
     VHostName,
@@ -291,9 +292,262 @@ fn parse_auth_backend(
                 inner,
             })
         }
+        "oidc" => {
+            let issuer = req_child_str(node, "issuer")
+                .with_context(|| format!("{name}:{line}"))?;
+            let client_id = req_child_str(node, "client-id")
+                .with_context(|| format!("{name}:{line}"))?;
+            let redirect_uri = req_child_str(node, "redirect-uri")
+                .with_context(|| format!("{name}:{line}"))?;
+
+            // The secret may be inline (dev/test) or read from a file
+            // (production) so it never appears in the parsed AST.
+            // File form wins when both are present.
+            let inline_secret = child_str(node, "client-secret");
+            let secret_file = child_str(node, "client-secret-file");
+            let client_secret = match secret_file {
+                Some(path) => {
+                    let s = std::fs::read_to_string(&path).with_context(
+                        || {
+                            format!(
+                                "{name}:{line}: auth oidc: \
+                                 client-secret-file: reading {path}"
+                            )
+                        },
+                    )?;
+                    Some(s.trim().to_owned())
+                }
+                None => inline_secret,
+            };
+
+            // Issuer must be a https:// URL (RFC 8252 / OIDC Core 1.0)
+            // or http://localhost for local development.
+            if !(issuer.starts_with("https://")
+                || issuer.starts_with("http://localhost")
+                || issuer.starts_with("http://127.0.0.1"))
+            {
+                bail!(
+                    "{name}:{line}: auth oidc: issuer must be https:// \
+                     (http://localhost permitted for development)"
+                );
+            }
+
+            // Each `scope "..."` child contributes one scope; default
+            // to the OIDC-standard set when none are listed.  The
+            // mandatory `openid` scope is added implicitly below.
+            let mut scopes: Vec<String> = node
+                .children()
+                .map(|doc| {
+                    doc.nodes()
+                        .iter()
+                        .filter(|n| n.name().value() == "scope")
+                        .flat_map(positional_strs)
+                        .collect()
+                })
+                .unwrap_or_default();
+            if scopes.is_empty() {
+                scopes = vec![
+                    "openid".to_owned(),
+                    "profile".to_owned(),
+                    "email".to_owned(),
+                ];
+            } else if !scopes.iter().any(|s| s == "openid") {
+                scopes.insert(0, "openid".to_owned());
+            }
+
+            let username_claim = child_str(node, "username-claim")
+                .unwrap_or_else(|| "sub".to_owned());
+            let groups_claim = child_str(node, "groups-claim")
+                .unwrap_or_else(|| "groups".to_owned());
+            let login_path = child_str(node, "login-path")
+                .unwrap_or_else(|| "/.aloha/oidc/login".to_owned());
+            let callback_path = child_str(node, "callback-path")
+                .unwrap_or_else(|| "/.aloha/oidc/callback".to_owned());
+            let state_ttl_secs = child_i64(node, "state-ttl")
+                .map(|n| n as u64)
+                .unwrap_or(600);
+
+            let refresh = child_bool(node, "refresh").unwrap_or(false);
+            let refresh_ttl_secs = child_i64(node, "refresh-ttl")
+                .map(|n| n as u64)
+                .unwrap_or(86_400);
+            let refresh_cookie_name = child_str(node, "refresh-cookie")
+                .unwrap_or_else(|| "__aloha_oidc_refresh".to_owned());
+
+            let logout_path = child_str(node, "logout-path")
+                .unwrap_or_else(|| "/.aloha/oidc/logout".to_owned());
+            let post_logout_uri = child_str(node, "post-logout-uri")
+                .unwrap_or_else(|| "/".to_owned());
+            let idp_logout = child_bool(node, "idp-logout").unwrap_or(true);
+            let userinfo = child_bool(node, "userinfo").unwrap_or(false);
+            let discovery_refresh_secs = child_i64(node, "discovery-refresh")
+                .map(|n| n as u64)
+                .unwrap_or(3600);
+            let discovery_retry =
+                child_bool(node, "discovery-retry").unwrap_or(true);
+
+            let backchannel_logout_enabled =
+                child_bool(node, "backchannel-logout").unwrap_or(true);
+            let backchannel_logout_path =
+                child_str(node, "backchannel-logout-path").unwrap_or_else(
+                    || "/.aloha/oidc/backchannel-logout".to_owned(),
+                );
+            let backchannel_max_iat_skew_secs =
+                child_i64(node, "backchannel-max-iat-skew")
+                    .map(|n| n as u64)
+                    .unwrap_or(120);
+            let backchannel_jti_ttl_secs =
+                child_i64(node, "backchannel-jti-ttl")
+                    .map(|n| n as u64)
+                    .unwrap_or(300);
+
+            let bearer = child_bool(node, "bearer").unwrap_or(false);
+            // Each `bearer-audience "..."` child contributes one
+            // accepted audience.  Repeated nodes mirror the existing
+            // `scope` handling above.
+            let bearer_audiences: Vec<String> = node
+                .children()
+                .map(|doc| {
+                    doc.nodes()
+                        .iter()
+                        .filter(|n| n.name().value() == "bearer-audience")
+                        .flat_map(positional_strs)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let bearer_cache_size = child_i64(node, "bearer-cache-size")
+                .map(|n| n.max(1) as usize)
+                .unwrap_or(1024);
+            if bearer && bearer_audiences.is_empty() {
+                bail!(
+                    "{name}:{line}: auth oidc: bearer #true requires \
+                     at least one bearer-audience entry"
+                );
+            }
+
+            let revoke_on_logout =
+                child_bool(node, "revoke-on-logout").unwrap_or(true);
+            let require_iss =
+                child_bool(node, "require-iss").unwrap_or(false);
+
+            // RFC 8707 resources: repeatable `resource "..."` child.
+            // Validation: absolute URI with http/https scheme and no
+            // fragment (per the spec).
+            let resources: Vec<String> = node
+                .children()
+                .map(|doc| {
+                    doc.nodes()
+                        .iter()
+                        .filter(|n| n.name().value() == "resource")
+                        .flat_map(positional_strs)
+                        .collect()
+                })
+                .unwrap_or_default();
+            for r in &resources {
+                let scheme = r.split("://").next().unwrap_or("");
+                if !matches!(scheme, "https" | "http") {
+                    bail!(
+                        "{name}:{line}: auth oidc: resource \"{r}\" \
+                         must use http:// or https://"
+                    );
+                }
+                if r.contains('#') {
+                    bail!(
+                        "{name}:{line}: auth oidc: resource \"{r}\" \
+                         must not contain a #fragment (RFC 8707 §2)"
+                    );
+                }
+            }
+
+            // The OIDC spec requires `offline_access` for refresh
+            // tokens; quietly add it so operators don't have to
+            // remember (mirrors how `openid` is injected above).
+            if refresh && !scopes.iter().any(|s| s == "offline_access") {
+                scopes.push("offline_access".to_owned());
+            }
+
+            // All reserved paths must be absolute so request-URI
+            // comparison in listener.rs is straightforward.
+            for (k, p) in [
+                ("login-path", &login_path),
+                ("callback-path", &callback_path),
+                ("logout-path", &logout_path),
+                ("backchannel-logout-path", &backchannel_logout_path),
+            ] {
+                if !p.starts_with('/') {
+                    bail!(
+                        "{name}:{line}: auth oidc: {k} must be an \
+                         absolute path (start with '/')"
+                    );
+                }
+            }
+            // Reserved paths must be pairwise distinct so the
+            // dispatch order in listener.rs is unambiguous.
+            let paths = [
+                ("login-path", &login_path),
+                ("callback-path", &callback_path),
+                ("logout-path", &logout_path),
+                ("backchannel-logout-path", &backchannel_logout_path),
+            ];
+            for i in 0..paths.len() {
+                for j in (i + 1)..paths.len() {
+                    if paths[i].1 == paths[j].1 {
+                        bail!(
+                            "{name}:{line}: auth oidc: {} and {} \
+                             must differ",
+                            paths[i].0,
+                            paths[j].0,
+                        );
+                    }
+                }
+            }
+            // post-logout-uri must be a same-origin absolute path so
+            // a malicious caller can't trick us into redirecting to
+            // arbitrary hosts after logout.
+            if !post_logout_uri.starts_with('/')
+                || post_logout_uri.starts_with("//")
+            {
+                bail!(
+                    "{name}:{line}: auth oidc: post-logout-uri must be \
+                     a same-origin absolute path (start with single '/')"
+                );
+            }
+
+            Ok(AuthBackend::Oidc(Box::new(OidcConfig {
+                issuer,
+                client_id,
+                client_secret,
+                redirect_uri,
+                scopes,
+                username_claim,
+                groups_claim,
+                login_path,
+                callback_path,
+                state_ttl_secs,
+                refresh,
+                refresh_ttl_secs,
+                refresh_cookie_name,
+                logout_path,
+                post_logout_uri,
+                idp_logout,
+                userinfo,
+                discovery_refresh_secs,
+                discovery_retry,
+                backchannel_logout_enabled,
+                backchannel_logout_path,
+                backchannel_max_iat_skew_secs,
+                backchannel_jti_ttl_secs,
+                bearer,
+                bearer_audiences,
+                bearer_cache_size,
+                revoke_on_logout,
+                require_iss,
+                resources,
+            })))
+        }
         other => bail!(
             "{name}:{line}: unknown auth backend '{other}'; \
-             expected 'pam', 'ldap', 'subrequest', or 'jwt'"
+             expected 'pam', 'ldap', 'subrequest', 'jwt', or 'oidc'"
         ),
     }
 }

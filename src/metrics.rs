@@ -355,6 +355,47 @@ pub struct Metrics {
     pub jwt_expiries: AtomicU64,
     // JWT session cookies successfully issued.
     pub jwt_issued: AtomicU64,
+    // OIDC refresh-token exchanges that returned a fresh ID token
+    // (and therefore extended the user's session without a redirect).
+    pub oidc_refreshes: AtomicU64,
+    // OIDC refresh attempts the IdP rejected; typically means the
+    // session was revoked or the refresh token expired.
+    pub oidc_refresh_failures: AtomicU64,
+    // Total successful hits on the OIDC logout endpoint, whether
+    // they redirected through the IdP or fell back to local-only.
+    pub oidc_logouts: AtomicU64,
+    // Successful OIDC discoveries (initial + periodic refreshes).
+    pub oidc_discoveries: AtomicU64,
+    // Failed OIDC discovery attempts (network, parse, or unreachable
+    // issuer).  A failing initial discovery is retried; failures
+    // during periodic refresh leave the previous client in place.
+    pub oidc_discovery_failures: AtomicU64,
+    // /userinfo fetches that failed after login; the login still
+    // succeeds with the ID-token claim values as fallback.
+    pub oidc_userinfo_failures: AtomicU64,
+    // Back-channel logout tokens that successfully validated and
+    // were applied (regardless of how many sessions matched).
+    pub oidc_backchannel_logouts: AtomicU64,
+    // Back-channel logout requests rejected at any validation
+    // stage: bad form body, bad JWT, bad signature, bad claim, or
+    // replayed jti.
+    pub oidc_backchannel_failures: AtomicU64,
+    // Bearer (resource-server) tokens that successfully verified.
+    // Counts both fresh validations and would-be-fresh calls -- the
+    // LRU cache hit is separately surfaced as a debug log path.
+    pub oidc_bearer_validations: AtomicU64,
+    // Bearer tokens rejected at any validation stage: malformed
+    // JWT, bad signature, wrong issuer/audience, expired, etc.
+    pub oidc_bearer_failures: AtomicU64,
+    // RFC 7009 refresh-token revocations the IdP accepted.
+    pub oidc_revocations: AtomicU64,
+    // Revocation attempts the IdP rejected (network, 4xx, etc.).
+    // Logged but otherwise harmless: revocation is defence-in-depth.
+    pub oidc_revocation_failures: AtomicU64,
+    // Authorization-response callbacks rejected because the
+    // returned `iss` parameter (RFC 9207) did not match our
+    // configured issuer.  Mix-up attack mitigation.
+    pub oidc_callback_iss_mismatches: AtomicU64,
     // HTTP/3 counters.  Kept separate from the overall request counters
     // so operators can see the protocol split on the status page.
     pub quic_handshakes_total: AtomicU64,
@@ -391,6 +432,19 @@ impl Metrics {
             jwt_failures: AtomicU64::new(0),
             jwt_expiries: AtomicU64::new(0),
             jwt_issued: AtomicU64::new(0),
+            oidc_refreshes: AtomicU64::new(0),
+            oidc_refresh_failures: AtomicU64::new(0),
+            oidc_logouts: AtomicU64::new(0),
+            oidc_discoveries: AtomicU64::new(0),
+            oidc_discovery_failures: AtomicU64::new(0),
+            oidc_userinfo_failures: AtomicU64::new(0),
+            oidc_backchannel_logouts: AtomicU64::new(0),
+            oidc_backchannel_failures: AtomicU64::new(0),
+            oidc_bearer_validations: AtomicU64::new(0),
+            oidc_bearer_failures: AtomicU64::new(0),
+            oidc_revocations: AtomicU64::new(0),
+            oidc_revocation_failures: AtomicU64::new(0),
+            oidc_callback_iss_mismatches: AtomicU64::new(0),
             quic_handshakes_total: AtomicU64::new(0),
             quic_handshake_failures_total: AtomicU64::new(0),
             quic_connections_active: AtomicI64::new(0),

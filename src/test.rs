@@ -67,6 +67,7 @@ impl TestServer {
             health_enabled,
             error_pages: Arc::new(ErrorPages::new(HashMap::new())),
             jwt_manager: None,
+            oidc: None,
         });
         let (tx, rx) = watch::channel(false);
 

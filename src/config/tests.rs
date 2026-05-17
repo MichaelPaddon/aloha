@@ -4419,3 +4419,607 @@ fn cert_key_mode_invalid_is_error() {
     );
     assert!(result.is_err());
 }
+
+#[test]
+fn oidc_parses_inside_jwt_wrap() {
+    let cfg = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        server {
+            state-dir "/tmp/aloha-test"
+            auth jwt {
+                validity 3600
+                wrap oidc {
+                    issuer "https://accounts.example.com"
+                    client-id "abc"
+                    client-secret "shh"
+                    redirect-uri "https://app.example/.aloha/oidc/callback"
+                    scope "openid"
+                    scope "email"
+                    groups-claim "roles"
+                    username-claim "preferred_username"
+                }
+            }
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap();
+    let inner = match &cfg.server.auth {
+        Some(AuthBackend::Jwt { inner: Some(b), .. }) => b.as_ref(),
+        _ => panic!("expected Jwt with inner"),
+    };
+    let oc = match inner {
+        AuthBackend::Oidc(c) => c,
+        _ => panic!("expected inner Oidc"),
+    };
+    assert_eq!(oc.issuer, "https://accounts.example.com");
+    assert_eq!(oc.client_id, "abc");
+    assert_eq!(oc.client_secret.as_deref(), Some("shh"));
+    assert_eq!(oc.username_claim, "preferred_username");
+    assert_eq!(oc.groups_claim, "roles");
+    assert!(oc.scopes.contains(&"openid".to_owned()));
+    assert!(oc.scopes.contains(&"email".to_owned()));
+    assert_eq!(oc.login_path, "/.aloha/oidc/login");
+    assert_eq!(oc.callback_path, "/.aloha/oidc/callback");
+}
+
+#[test]
+fn oidc_outside_jwt_is_rejected() {
+    let result = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        server {
+            auth oidc {
+                issuer "https://accounts.example.com"
+                client-id "abc"
+                redirect-uri "https://app.example/cb"
+            }
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    );
+    let err = result.expect_err("oidc without jwt wrap must be rejected");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("auth oidc must be wrapped inside auth jwt"),
+        "expected wrap-required error, got: {msg}",
+    );
+}
+
+#[test]
+fn oidc_rejects_non_https_issuer() {
+    let result = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        server {
+            state-dir "/tmp/aloha-test"
+            auth jwt {
+                wrap oidc {
+                    issuer "http://evil.example.com"
+                    client-id "abc"
+                    redirect-uri "https://app.example/cb"
+                }
+            }
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn oidc_refresh_defaults_off() {
+    let cfg = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        server {
+            state-dir "/tmp/aloha-test"
+            auth jwt {
+                wrap oidc {
+                    issuer "https://accounts.example.com"
+                    client-id "abc"
+                    redirect-uri "https://app.example/cb"
+                }
+            }
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap();
+    let oc = match &cfg.server.auth {
+        Some(AuthBackend::Jwt { inner: Some(b), .. }) => match b.as_ref() {
+            AuthBackend::Oidc(c) => c,
+            _ => panic!("expected oidc"),
+        },
+        _ => panic!("expected jwt"),
+    };
+    assert!(!oc.refresh);
+    assert_eq!(oc.refresh_ttl_secs, 86_400);
+    assert_eq!(oc.refresh_cookie_name, "__aloha_oidc_refresh");
+    assert!(!oc.scopes.iter().any(|s| s == "offline_access"));
+}
+
+#[test]
+fn oidc_oauth_extras_defaults() {
+    let cfg = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        server {
+            state-dir "/tmp/aloha-test"
+            auth jwt {
+                wrap oidc {
+                    issuer "https://accounts.example.com"
+                    client-id "abc"
+                    redirect-uri "https://app.example/cb"
+                }
+            }
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap();
+    let oc = match &cfg.server.auth {
+        Some(AuthBackend::Jwt { inner: Some(b), .. }) => match b.as_ref() {
+            AuthBackend::Oidc(c) => c,
+            _ => panic!("expected oidc"),
+        },
+        _ => panic!("expected jwt"),
+    };
+    assert!(oc.revoke_on_logout);
+    assert!(!oc.require_iss);
+    assert!(oc.resources.is_empty());
+}
+
+#[test]
+fn oidc_resource_collects_repeated_values() {
+    let cfg = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        server {
+            state-dir "/tmp/aloha-test"
+            auth jwt {
+                wrap oidc {
+                    issuer "https://accounts.example.com"
+                    client-id "abc"
+                    redirect-uri "https://app.example/cb"
+                    revoke-on-logout #false
+                    require-iss #true
+                    resource "https://api.example/v1"
+                    resource "https://api.example/v2"
+                }
+            }
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap();
+    let oc = match &cfg.server.auth {
+        Some(AuthBackend::Jwt { inner: Some(b), .. }) => match b.as_ref() {
+            AuthBackend::Oidc(c) => c,
+            _ => panic!("expected oidc"),
+        },
+        _ => panic!("expected jwt"),
+    };
+    assert!(!oc.revoke_on_logout);
+    assert!(oc.require_iss);
+    assert_eq!(
+        oc.resources,
+        vec![
+            "https://api.example/v1".to_string(),
+            "https://api.example/v2".to_string(),
+        ],
+    );
+}
+
+#[test]
+fn oidc_resource_rejects_fragment() {
+    let result = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        server {
+            state-dir "/tmp/aloha-test"
+            auth jwt {
+                wrap oidc {
+                    issuer "https://accounts.example.com"
+                    client-id "abc"
+                    redirect-uri "https://app.example/cb"
+                    resource "https://api.example/v1#frag"
+                }
+            }
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    );
+    let err = result.expect_err("resource with fragment must be rejected");
+    let msg = format!("{err:#}");
+    assert!(msg.contains("#fragment"), "got: {msg}");
+}
+
+#[test]
+fn oidc_resource_rejects_relative() {
+    let result = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        server {
+            state-dir "/tmp/aloha-test"
+            auth jwt {
+                wrap oidc {
+                    issuer "https://accounts.example.com"
+                    client-id "abc"
+                    redirect-uri "https://app.example/cb"
+                    resource "/api/v1"
+                }
+            }
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn oidc_bearer_default_off() {
+    let cfg = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        server {
+            state-dir "/tmp/aloha-test"
+            auth jwt {
+                wrap oidc {
+                    issuer "https://accounts.example.com"
+                    client-id "abc"
+                    redirect-uri "https://app.example/cb"
+                }
+            }
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap();
+    let oc = match &cfg.server.auth {
+        Some(AuthBackend::Jwt { inner: Some(b), .. }) => match b.as_ref() {
+            AuthBackend::Oidc(c) => c,
+            _ => panic!("expected oidc"),
+        },
+        _ => panic!("expected jwt"),
+    };
+    assert!(!oc.bearer);
+    assert!(oc.bearer_audiences.is_empty());
+    assert_eq!(oc.bearer_cache_size, 1024);
+}
+
+#[test]
+fn oidc_bearer_requires_audience() {
+    let result = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        server {
+            state-dir "/tmp/aloha-test"
+            auth jwt {
+                wrap oidc {
+                    issuer "https://accounts.example.com"
+                    client-id "abc"
+                    redirect-uri "https://app.example/cb"
+                    bearer #true
+                }
+            }
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    );
+    let err = result.expect_err("bearer without audience must be rejected");
+    assert!(
+        format!("{err:#}").contains("bearer-audience"),
+        "got: {err:#}",
+    );
+}
+
+#[test]
+fn oidc_bearer_collects_repeated_audiences() {
+    let cfg = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        server {
+            state-dir "/tmp/aloha-test"
+            auth jwt {
+                wrap oidc {
+                    issuer "https://accounts.example.com"
+                    client-id "abc"
+                    redirect-uri "https://app.example/cb"
+                    bearer #true
+                    bearer-audience "https://api.example/v1"
+                    bearer-audience "https://api.example/v2"
+                    bearer-cache-size 32
+                }
+            }
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap();
+    let oc = match &cfg.server.auth {
+        Some(AuthBackend::Jwt { inner: Some(b), .. }) => match b.as_ref() {
+            AuthBackend::Oidc(c) => c,
+            _ => panic!("expected oidc"),
+        },
+        _ => panic!("expected jwt"),
+    };
+    assert!(oc.bearer);
+    assert_eq!(
+        oc.bearer_audiences,
+        vec![
+            "https://api.example/v1".to_string(),
+            "https://api.example/v2".to_string(),
+        ],
+    );
+    assert_eq!(oc.bearer_cache_size, 32);
+}
+
+#[test]
+fn oidc_backchannel_defaults() {
+    let cfg = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        server {
+            state-dir "/tmp/aloha-test"
+            auth jwt {
+                wrap oidc {
+                    issuer "https://accounts.example.com"
+                    client-id "abc"
+                    redirect-uri "https://app.example/cb"
+                }
+            }
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap();
+    let oc = match &cfg.server.auth {
+        Some(AuthBackend::Jwt { inner: Some(b), .. }) => match b.as_ref() {
+            AuthBackend::Oidc(c) => c,
+            _ => panic!("expected oidc"),
+        },
+        _ => panic!("expected jwt"),
+    };
+    assert!(oc.backchannel_logout_enabled);
+    assert_eq!(
+        oc.backchannel_logout_path,
+        "/.aloha/oidc/backchannel-logout"
+    );
+    assert_eq!(oc.backchannel_max_iat_skew_secs, 120);
+    assert_eq!(oc.backchannel_jti_ttl_secs, 300);
+}
+
+#[test]
+fn oidc_backchannel_path_must_differ() {
+    let result = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        server {
+            state-dir "/tmp/aloha-test"
+            auth jwt {
+                wrap oidc {
+                    issuer "https://accounts.example.com"
+                    client-id "abc"
+                    redirect-uri "https://app.example/cb"
+                    backchannel-logout-path "/.aloha/oidc/logout"
+                }
+            }
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    );
+    assert!(result.is_err(), "overlapping paths must be rejected");
+}
+
+#[test]
+fn oidc_operational_fields_default() {
+    let cfg = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        server {
+            state-dir "/tmp/aloha-test"
+            auth jwt {
+                wrap oidc {
+                    issuer "https://accounts.example.com"
+                    client-id "abc"
+                    redirect-uri "https://app.example/cb"
+                }
+            }
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap();
+    let oc = match &cfg.server.auth {
+        Some(AuthBackend::Jwt { inner: Some(b), .. }) => match b.as_ref() {
+            AuthBackend::Oidc(c) => c,
+            _ => panic!("expected oidc"),
+        },
+        _ => panic!("expected jwt"),
+    };
+    assert!(!oc.userinfo);
+    assert_eq!(oc.discovery_refresh_secs, 3600);
+    assert!(oc.discovery_retry);
+}
+
+#[test]
+fn oidc_discovery_refresh_zero_disables() {
+    let cfg = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        server {
+            state-dir "/tmp/aloha-test"
+            auth jwt {
+                wrap oidc {
+                    issuer "https://accounts.example.com"
+                    client-id "abc"
+                    redirect-uri "https://app.example/cb"
+                    discovery-refresh 0
+                    discovery-retry #false
+                    userinfo #true
+                }
+            }
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap();
+    let oc = match &cfg.server.auth {
+        Some(AuthBackend::Jwt { inner: Some(b), .. }) => match b.as_ref() {
+            AuthBackend::Oidc(c) => c,
+            _ => panic!("expected oidc"),
+        },
+        _ => panic!("expected jwt"),
+    };
+    assert_eq!(oc.discovery_refresh_secs, 0);
+    assert!(!oc.discovery_retry);
+    assert!(oc.userinfo);
+}
+
+#[test]
+fn oidc_logout_fields_default() {
+    let cfg = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        server {
+            state-dir "/tmp/aloha-test"
+            auth jwt {
+                wrap oidc {
+                    issuer "https://accounts.example.com"
+                    client-id "abc"
+                    redirect-uri "https://app.example/cb"
+                }
+            }
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap();
+    let oc = match &cfg.server.auth {
+        Some(AuthBackend::Jwt { inner: Some(b), .. }) => match b.as_ref() {
+            AuthBackend::Oidc(c) => c,
+            _ => panic!("expected oidc"),
+        },
+        _ => panic!("expected jwt"),
+    };
+    assert_eq!(oc.logout_path, "/.aloha/oidc/logout");
+    assert_eq!(oc.post_logout_uri, "/");
+    assert!(oc.idp_logout);
+}
+
+#[test]
+fn oidc_logout_path_rejected_when_overlaps_login() {
+    let result = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        server {
+            state-dir "/tmp/aloha-test"
+            auth jwt {
+                wrap oidc {
+                    issuer "https://accounts.example.com"
+                    client-id "abc"
+                    redirect-uri "https://app.example/cb"
+                    logout-path "/.aloha/oidc/login"
+                }
+            }
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    );
+    let err = result.expect_err("overlapping paths must be rejected");
+    let msg = format!("{err:#}");
+    assert!(msg.contains("must differ"), "got: {msg}");
+}
+
+#[test]
+fn oidc_post_logout_uri_rejects_off_origin() {
+    let result = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        server {
+            state-dir "/tmp/aloha-test"
+            auth jwt {
+                wrap oidc {
+                    issuer "https://accounts.example.com"
+                    client-id "abc"
+                    redirect-uri "https://app.example/cb"
+                    post-logout-uri "//evil.example/"
+                }
+            }
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn oidc_refresh_enabled_injects_offline_access_scope() {
+    let cfg = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        server {
+            state-dir "/tmp/aloha-test"
+            auth jwt {
+                wrap oidc {
+                    issuer "https://accounts.example.com"
+                    client-id "abc"
+                    redirect-uri "https://app.example/cb"
+                    refresh #true
+                    refresh-ttl 3600
+                    refresh-cookie "session_rt"
+                }
+            }
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap();
+    let oc = match &cfg.server.auth {
+        Some(AuthBackend::Jwt { inner: Some(b), .. }) => match b.as_ref() {
+            AuthBackend::Oidc(c) => c,
+            _ => panic!("expected oidc"),
+        },
+        _ => panic!("expected jwt"),
+    };
+    assert!(oc.refresh);
+    assert_eq!(oc.refresh_ttl_secs, 3600);
+    assert_eq!(oc.refresh_cookie_name, "session_rt");
+    assert!(
+        oc.scopes.iter().any(|s| s == "offline_access"),
+        "expected offline_access in scopes, got {:?}",
+        oc.scopes,
+    );
+}
+
+#[test]
+fn oidc_defaults_inject_openid_scope() {
+    let cfg = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        server {
+            state-dir "/tmp/aloha-test"
+            auth jwt {
+                wrap oidc {
+                    issuer "https://accounts.example.com"
+                    client-id "abc"
+                    redirect-uri "https://app.example/.aloha/oidc/callback"
+                }
+            }
+        }
+        vhost "h" { location "/" { static { root "."; } } }
+        "#,
+    )
+    .unwrap();
+    let oc = match &cfg.server.auth {
+        Some(AuthBackend::Jwt { inner: Some(b), .. }) => match b.as_ref() {
+            AuthBackend::Oidc(c) => c,
+            _ => panic!("expected oidc"),
+        },
+        _ => panic!("expected jwt"),
+    };
+    // Default scope set includes the mandatory `openid`.
+    assert!(oc.scopes.first().map(|s| s.as_str()) == Some("openid"));
+}

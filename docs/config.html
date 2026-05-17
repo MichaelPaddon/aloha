@@ -488,6 +488,39 @@
               <li><a href="#auth-ldap-timeout">timeout</a></li>
               <li><a href="#auth-ldap-url">url</a></li>
             </ul>
+            <li class="nav-parent"><a href="#auth-oidc">oidc<span class="nav-tog">›</span></a></li>
+            <ul class="nav-list sub3 nav-children">
+              <li><a href="#auth-oidc-issuer">issuer</a></li>
+              <li><a href="#auth-oidc-client-id">client-id</a></li>
+              <li><a href="#auth-oidc-client-secret">client-secret</a></li>
+              <li><a href="#auth-oidc-client-secret-file">client-secret-file</a></li>
+              <li><a href="#auth-oidc-redirect-uri">redirect-uri</a></li>
+              <li><a href="#auth-oidc-scope">scope</a></li>
+              <li><a href="#auth-oidc-username-claim">username-claim</a></li>
+              <li><a href="#auth-oidc-groups-claim">groups-claim</a></li>
+              <li><a href="#auth-oidc-login-path">login-path</a></li>
+              <li><a href="#auth-oidc-callback-path">callback-path</a></li>
+              <li><a href="#auth-oidc-state-ttl">state-ttl</a></li>
+              <li><a href="#auth-oidc-refresh">refresh</a></li>
+              <li><a href="#auth-oidc-refresh-ttl">refresh-ttl</a></li>
+              <li><a href="#auth-oidc-refresh-cookie">refresh-cookie</a></li>
+              <li><a href="#auth-oidc-logout-path">logout-path</a></li>
+              <li><a href="#auth-oidc-post-logout-uri">post-logout-uri</a></li>
+              <li><a href="#auth-oidc-idp-logout">idp-logout</a></li>
+              <li><a href="#auth-oidc-userinfo">userinfo</a></li>
+              <li><a href="#auth-oidc-discovery-refresh">discovery-refresh</a></li>
+              <li><a href="#auth-oidc-discovery-retry">discovery-retry</a></li>
+              <li><a href="#auth-oidc-backchannel-logout">backchannel-logout</a></li>
+              <li><a href="#auth-oidc-backchannel-logout-path">backchannel-logout-path</a></li>
+              <li><a href="#auth-oidc-backchannel-max-iat-skew">backchannel-max-iat-skew</a></li>
+              <li><a href="#auth-oidc-backchannel-jti-ttl">backchannel-jti-ttl</a></li>
+              <li><a href="#auth-oidc-bearer">bearer</a></li>
+              <li><a href="#auth-oidc-bearer-audience">bearer-audience</a></li>
+              <li><a href="#auth-oidc-bearer-cache-size">bearer-cache-size</a></li>
+              <li><a href="#auth-oidc-revoke-on-logout">revoke-on-logout</a></li>
+              <li><a href="#auth-oidc-require-iss">require-iss</a></li>
+              <li><a href="#auth-oidc-resource">resource</a></li>
+            </ul>
             <li class="nav-parent"><a href="#auth-pam">pam<span class="nav-tog">›</span></a></li>
             <ul class="nav-list sub3 nav-children">
               <li><a href="#auth-pam-service">service</a></li>
@@ -1094,7 +1127,8 @@
                   Credential back-end for first-time logins.
                   Accepts the same argument as a top-level
                   <code>auth</code> block: <code>pam</code>,
-                  <code>ldap</code>, or <code>subrequest</code>
+                  <code>ldap</code>, <code>subrequest</code>, or
+                  <a href="#auth-oidc"><code>oidc</code></a>
                   with their usual children.
                   Omit for standalone validation.</td>
             </tr>
@@ -1195,6 +1229,420 @@
           bind, which would otherwise grant access to any username.
         </span>
       </div>
+
+      <h4 id="auth-oidc">OIDC</h4>
+<pre><code><span class="kw">server</span> {
+    <span class="kw">state-dir</span> <span class="str">"/var/lib/aloha"</span>
+    <span class="kw">auth</span> <span class="kw">jwt</span> {
+        <span class="kw">validity</span> <span class="num">3600</span>
+        <span class="kw">wrap</span> <span class="kw">oidc</span> {
+            <span class="kw">issuer</span>             <span class="str">"https://accounts.example.com"</span>
+            <span class="kw">client-id</span>          <span class="str">"aloha"</span>
+            <span class="kw">client-secret-file</span> <span class="str">"/etc/aloha/oidc-secret"</span>
+            <span class="kw">redirect-uri</span>       <span class="str">"https://app.example/.aloha/oidc/callback"</span>
+
+            <span class="cm">// Optional:</span>
+            <span class="kw">scope</span>          <span class="str">"openid"</span> <span class="str">"profile"</span> <span class="str">"email"</span>
+            <span class="kw">groups-claim</span>   <span class="str">"groups"</span>
+            <span class="kw">username-claim</span> <span class="str">"sub"</span>
+        }
+    }
+}</code></pre>
+      <p>
+        Browser-driven single sign-on against any standards-compliant
+        OIDC identity provider (Google, Keycloak, Authelia, Okta, Entra,
+        &hellip;).  Uses the authorization-code flow with PKCE.
+        OIDC must be wrapped inside <a href="#auth-jwt">auth jwt</a> so
+        the post-login identity can be persisted as an aloha session
+        cookie; subsequent requests carry authentication via that
+        cookie and never round-trip to the IdP.
+      </p>
+      <p>
+        Two server-wide endpoints are reserved automatically (paths
+        configurable):
+      </p>
+      <ul>
+        <li><code>GET /.aloha/oidc/login</code> &mdash; generates the
+            PKCE challenge and CSRF state, then 302-redirects to the
+            IdP&rsquo;s authorisation endpoint.</li>
+        <li><code>GET /.aloha/oidc/callback</code> &mdash; validates
+            the state cookie, exchanges the code for an ID token,
+            issues the JWT session cookie, and 302-redirects to the
+            originally requested URL.</li>
+      </ul>
+      <p>
+        When OIDC is configured, anonymous browser clients that hit a
+        protected location are automatically redirected to the login
+        endpoint instead of receiving the basic-auth challenge.
+        API clients (no <code>Accept: text/html</code> or carrying an
+        <code>Authorization</code> header) keep the 401 response.
+      </p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Children</th><th>Type</th>
+              <th>Default</th><th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr id="auth-oidc-callback-path">
+              <td>callback-path</td><td>string</td>
+              <td><code>/.aloha/oidc/callback</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Path the IdP redirects to with the authorisation
+                  code.  Must match the path component of
+                  <code>redirect-uri</code>.</td>
+            </tr>
+            <tr id="auth-oidc-client-id">
+              <td>client-id</td><td>string</td><td>&mdash;</td>
+              <td><span class="badge badge-req">required</span>
+                  OAuth2 client identifier registered with the IdP.</td>
+            </tr>
+            <tr id="auth-oidc-client-secret">
+              <td>client-secret</td><td>string</td><td>&mdash;</td>
+              <td><span class="badge badge-opt">optional</span>
+                  OAuth2 client secret.  Prefer
+                  <code>client-secret-file</code> so the value never
+                  appears in the parsed configuration.</td>
+            </tr>
+            <tr id="auth-oidc-client-secret-file">
+              <td>client-secret-file</td><td>string</td><td>&mdash;</td>
+              <td><span class="badge badge-opt">optional</span>
+                  Path to a file containing the OAuth2 client secret.
+                  Trailing whitespace is stripped.  Takes precedence
+                  over an inline <code>client-secret</code>.</td>
+            </tr>
+            <tr id="auth-oidc-groups-claim">
+              <td>groups-claim</td><td>string</td><td><code>groups</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Name of the ID-token claim listing the user&rsquo;s
+                  groups.  Accepts a JSON array of strings or a
+                  single space-delimited string.</td>
+            </tr>
+            <tr id="auth-oidc-issuer">
+              <td>issuer</td><td>string</td><td>&mdash;</td>
+              <td><span class="badge badge-req">required</span>
+                  Base issuer URL.  Must use <code>https://</code>;
+                  <code>http://localhost</code> is permitted for
+                  development.  Discovery is performed at startup.</td>
+            </tr>
+            <tr id="auth-oidc-login-path">
+              <td>login-path</td><td>string</td>
+              <td><code>/.aloha/oidc/login</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Path on aloha that initiates the OIDC login flow.</td>
+            </tr>
+            <tr id="auth-oidc-redirect-uri">
+              <td>redirect-uri</td><td>string</td><td>&mdash;</td>
+              <td><span class="badge badge-req">required</span>
+                  Absolute URL registered with the IdP; must resolve
+                  back to <code>callback-path</code> on this server.</td>
+            </tr>
+            <tr id="auth-oidc-scope">
+              <td>scope</td><td>string&hellip;</td>
+              <td><code>openid profile email</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  One <code>scope "&hellip;"</code> child per requested
+                  scope.  The mandatory <code>openid</code> scope is
+                  added automatically when absent.</td>
+            </tr>
+            <tr id="auth-oidc-state-ttl">
+              <td>state-ttl</td><td>integer (s)</td><td><code>600</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Seconds an unfinished login (PKCE verifier + nonce +
+                  return URL) is held before eviction.</td>
+            </tr>
+            <tr id="auth-oidc-username-claim">
+              <td>username-claim</td><td>string</td><td><code>sub</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Name of the ID-token claim used as the authenticated
+                  user&rsquo;s username.  Falls back to <code>sub</code>
+                  when the named claim is absent.</td>
+            </tr>
+            <tr id="auth-oidc-refresh">
+              <td>refresh</td><td>boolean</td><td><code>#false</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Enable refresh-token support so that short-lived
+                  session cookies can be renewed without a full IdP
+                  round-trip.  When enabled, aloha implicitly requests
+                  the <code>offline_access</code> scope.</td>
+            </tr>
+            <tr id="auth-oidc-refresh-ttl">
+              <td>refresh-ttl</td><td>integer (s)</td>
+              <td><code>86400</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Sliding idle timeout for a refresh session.  Each
+                  successful refresh resets the timer; entries idle
+                  longer than this are evicted.</td>
+            </tr>
+            <tr id="auth-oidc-refresh-cookie">
+              <td>refresh-cookie</td><td>string</td>
+              <td><code>__aloha_oidc_refresh</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Name of the long-lived HttpOnly cookie carrying the
+                  opaque refresh-session id.</td>
+            </tr>
+            <tr id="auth-oidc-logout-path">
+              <td>logout-path</td><td>string</td>
+              <td><code>/.aloha/oidc/logout</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Path on aloha that terminates the session. A
+                  <code>GET</code> here clears the JWT and refresh
+                  cookies and (optionally) redirects through the
+                  IdP&rsquo;s end-session endpoint.</td>
+            </tr>
+            <tr id="auth-oidc-post-logout-uri">
+              <td>post-logout-uri</td><td>string</td>
+              <td><code>/</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Where the browser is sent after logout completes.
+                  Must be a same-origin absolute path; pre-register
+                  the corresponding absolute URL with the IdP if
+                  RP-initiated logout is enabled.</td>
+            </tr>
+            <tr id="auth-oidc-idp-logout">
+              <td>idp-logout</td><td>boolean</td><td><code>#true</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  When true and discovery exposed
+                  <code>end_session_endpoint</code>, the logout
+                  endpoint redirects through the IdP so the IdP-side
+                  session is terminated alongside aloha&rsquo;s.  Set
+                  to <code>#false</code> for IdPs that misbehave on
+                  logout &mdash; aloha then performs local-only
+                  logout (clears its own cookies and returns to
+                  <code>post-logout-uri</code>).</td>
+            </tr>
+            <tr id="auth-oidc-userinfo">
+              <td>userinfo</td><td>boolean</td><td><code>#false</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  When enabled, fetch the IdP&rsquo;s
+                  <code>/userinfo</code> endpoint after each token
+                  exchange and merge its claims with the ID token
+                  (UserInfo wins on non-empty values).  Required for
+                  IdPs that omit <code>groups</code> / <code>email</code>
+                  from the ID token; Google is the canonical
+                  example.  Adds one extra HTTP round-trip per login
+                  and per refresh.</td>
+            </tr>
+            <tr id="auth-oidc-discovery-refresh">
+              <td>discovery-refresh</td><td>integer (s)</td>
+              <td><code>3600</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Seconds between periodic re-runs of OIDC discovery.
+                  This is how aloha picks up JWKS rotation at the
+                  IdP without restart.  Set to <code>0</code> to
+                  disable periodic refresh (only the initial
+                  bootstrap runs).</td>
+            </tr>
+            <tr id="auth-oidc-discovery-retry">
+              <td>discovery-retry</td><td>boolean</td>
+              <td><code>#true</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  When true (default), discovery failures at startup
+                  do not abort aloha &mdash; the provider stays in a
+                  not-ready state and a background task retries with
+                  exponential backoff (capped at 5 minutes).  All
+                  OIDC endpoints return <code>503</code> with a
+                  <code>Retry-After</code> header until the first
+                  successful discovery.  Set to <code>#false</code>
+                  to restore fail-fast startup.</td>
+            </tr>
+            <tr id="auth-oidc-backchannel-logout">
+              <td>backchannel-logout</td><td>boolean</td>
+              <td><code>#true</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  When true (default), expose a
+                  <code>POST</code>-only endpoint that accepts
+                  signed <code>logout_token</code>s pushed by the
+                  IdP and tears down matching server-side refresh
+                  entries.  Spec: OpenID Connect Back-Channel Logout
+                  1.0.</td>
+            </tr>
+            <tr id="auth-oidc-backchannel-logout-path">
+              <td>backchannel-logout-path</td><td>string</td>
+              <td><code>/.aloha/oidc/backchannel-logout</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Path the IdP POSTs the <code>logout_token</code>
+                  to.  Register the corresponding absolute URL with
+                  the IdP&rsquo;s client settings.</td>
+            </tr>
+            <tr id="auth-oidc-backchannel-max-iat-skew">
+              <td>backchannel-max-iat-skew</td><td>integer (s)</td>
+              <td><code>120</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Maximum acceptable clock skew, in seconds, between
+                  the inbound logout-token&rsquo;s <code>iat</code>
+                  claim and the local clock.  Anything older is
+                  rejected as stale.</td>
+            </tr>
+            <tr id="auth-oidc-backchannel-jti-ttl">
+              <td>backchannel-jti-ttl</td><td>integer (s)</td>
+              <td><code>300</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  How long a successfully-applied logout-token&rsquo;s
+                  <code>jti</code> is remembered to reject replays.
+                  Should comfortably exceed
+                  <code>backchannel-max-iat-skew</code>.</td>
+            </tr>
+            <tr id="auth-oidc-bearer">
+              <td>bearer</td><td>boolean</td><td><code>#false</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Accept <code>Authorization: Bearer &lt;jwt&gt;</code>
+                  from API callers, validated against the IdP&rsquo;s
+                  JWKS as a parallel auth path alongside the browser
+                  session cookie.  Requires at least one
+                  <code>bearer-audience</code> entry.</td>
+            </tr>
+            <tr id="auth-oidc-bearer-audience">
+              <td>bearer-audience</td><td>string</td><td>&mdash;</td>
+              <td><span class="badge badge-opt">optional</span>
+                  Repeatable: each child contributes one accepted
+                  <code>aud</code> value.  A bearer token is rejected
+                  unless its <code>aud</code> claim contains at least
+                  one of the listed values.</td>
+            </tr>
+            <tr id="auth-oidc-bearer-cache-size">
+              <td>bearer-cache-size</td><td>integer</td>
+              <td><code>1024</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  LRU capacity for verified bearer tokens.  Cache
+                  hits skip the per-request signature verification
+                  until the token&rsquo;s own <code>exp</code>.</td>
+            </tr>
+            <tr id="auth-oidc-revoke-on-logout">
+              <td>revoke-on-logout</td><td>boolean</td>
+              <td><code>#true</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  When true (default), the logout endpoint
+                  additionally POSTs the dropped refresh token to
+                  the IdP&rsquo;s <code>revocation_endpoint</code>
+                  (RFC 7009).  Defence-in-depth on top of the
+                  end-session redirect.  The call is
+                  fire-and-forget &mdash; logout returns promptly
+                  even if the IdP&rsquo;s revocation endpoint is
+                  slow.</td>
+            </tr>
+            <tr id="auth-oidc-require-iss">
+              <td>require-iss</td><td>boolean</td>
+              <td><code>#false</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Mix-up attack mitigation (RFC 9207).  Aloha
+                  always rejects callbacks whose <code>iss</code>
+                  parameter is present but does not match the
+                  configured issuer.  With <code>require-iss
+                  #true</code> the callback also rejects
+                  responses that omit <code>iss</code> entirely.</td>
+            </tr>
+            <tr id="auth-oidc-resource">
+              <td>resource</td><td>string</td><td>&mdash;</td>
+              <td><span class="badge badge-opt">optional</span>
+                  Repeatable: each child contributes one RFC 8707
+                  <code>resource</code> value.  Forwarded on the
+                  authorization, code-exchange, and refresh
+                  requests so the IdP narrows the access
+                  token&rsquo;s <code>aud</code> to the listed
+                  resources.  Values must be absolute http(s) URLs
+                  without a <code>#fragment</code>.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        When <code>refresh</code> is enabled, the callback response
+        sets a second cookie alongside the session JWT: an opaque
+        session id that maps to an in-memory entry holding the IdP
+        refresh token.  On any request where the session JWT has
+        expired but the refresh cookie is still present, aloha calls
+        the IdP&rsquo;s token endpoint, issues a fresh JWT, and serves
+        the request without bouncing the browser through the login
+        redirect.  Refresh state is in-memory only; a server restart
+        forces users to re-log in.
+      </p>
+      <p>
+        <code>GET &lt;logout-path&gt;</code> tears the session down:
+        aloha drops the server-side refresh entry, emits past-dated
+        <code>Set-Cookie</code> headers that clear the JWT, refresh,
+        and login-state cookies, then issues a <code>302</code>.
+        With <code>idp-logout</code> enabled and an
+        <code>end_session_endpoint</code> in the IdP&rsquo;s
+        discovery document, the redirect carries
+        <code>id_token_hint</code>, <code>post_logout_redirect_uri</code>,
+        and <code>client_id</code> through the IdP so its session is
+        terminated too; otherwise the browser goes straight to
+        <code>post-logout-uri</code>.  Hitting the logout endpoint
+        without an active session is a safe no-op redirect.
+      </p>
+      <p>
+        <strong>Back-channel logout.</strong>  With
+        <code>backchannel-logout</code> enabled (the default), aloha
+        also exposes a <code>POST</code>-only endpoint that accepts
+        signed <code>logout_token</code> JWTs pushed by the IdP.
+        Each token is validated (signature against the cached JWKS,
+        <code>iss</code>/<code>aud</code>, <code>iat</code> within
+        <code>backchannel-max-iat-skew</code>, the back-channel-logout
+        <code>events</code> claim, presence of <code>sub</code> or
+        <code>sid</code>, absence of <code>nonce</code>, and
+        <code>jti</code> uniqueness within
+        <code>backchannel-jti-ttl</code>).  On success aloha removes
+        every refresh entry whose stored <code>sid</code> matches
+        (or every entry for the user when only <code>sub</code> was
+        sent).  This only tears down <em>server-side</em> state
+        &mdash; the user&rsquo;s in-flight JWT session cookie remains
+        valid until its own expiry, so operators who need fast
+        revocation should keep <code>validity</code> short.
+      </p>
+      <p>
+        <strong>Login-flow query passthrough.</strong>  The login
+        endpoint forwards the standard OIDC hints
+        <code>login_hint</code>, <code>prompt</code>,
+        <code>max_age</code>, <code>acr_values</code>, and
+        <code>ui_locales</code> to the IdP&rsquo;s authorisation URL
+        when they appear on the inbound query string (alongside
+        <code>return</code>).  Values are length-capped at 256 bytes
+        and restricted to printable ASCII.  Useful for SPAs that
+        need <code>prompt=none</code> silent re-auth, password-
+        manager deep links via <code>login_hint</code>, MFA
+        enforcement via <code>acr_values</code>, and localised
+        login pages via <code>ui_locales</code>.  See OIDC Core 1.0
+        &sect;3.1.2.1 for the canonical definitions.
+      </p>
+      <p>
+        <strong>Bearer-token resource-server mode.</strong>  With
+        <code>bearer</code> enabled, aloha accepts
+        <code>Authorization: Bearer &lt;jwt&gt;</code> from API
+        callers in addition to the browser session cookie.  Tokens
+        are validated against the IdP&rsquo;s cached JWKS
+        (signature, <code>iss</code>, <code>exp</code>,
+        <code>nbf</code>) and rejected unless the <code>aud</code>
+        claim contains at least one configured
+        <code>bearer-audience</code>.  Successful validations are
+        cached by <code>SHA-256(token)</code> under the configured
+        <code>bearer-cache-size</code>, so repeated requests with
+        the same token skip the crypto until the token&rsquo;s own
+        <code>exp</code>.  The resolved Identity uses the same
+        <code>username-claim</code> / <code>groups-claim</code>
+        configuration as the SSO flow, so access policies see one
+        consistent Identity shape regardless of which auth path
+        produced it.  Supports JWT-format tokens only; opaque
+        (introspection-required) tokens are not yet handled.
+      </p>
+      <p>
+        <strong>OAuth standards-track polish.</strong>  Three small
+        defensive measures sit alongside the main flow:
+        <code>revoke-on-logout</code> (RFC 7009) tells the IdP to
+        invalidate the refresh token at logout in addition to the
+        existing end-session redirect;
+        <code>require-iss</code> + the (always-on) <code>iss</code>
+        match on the callback (RFC 9207) protects against
+        mix-up attacks where a malicious site tricks a logged-in
+        user into completing an authorization flow against the
+        wrong IdP;
+        <code>resource</code> (RFC 8707) lets the relying party
+        narrow the access token&rsquo;s <code>aud</code> to one or
+        more specific protected resources, which pairs naturally
+        with bearer-token resource-server mode above.
+      </p>
 
       <h4 id="auth-pam">PAM</h4>
 <pre><code><span class="kw">server</span> {

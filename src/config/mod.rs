@@ -145,6 +145,133 @@ pub enum AuthBackend {
         validity_secs: u64,
         inner: Option<Box<AuthBackend>>,
     },
+    /// Single sign-on via an external OIDC identity provider.
+    /// Must be wrapped inside `auth jwt { wrap oidc { ... } }` so the
+    /// post-login identity can be persisted as a session cookie.
+    /// Boxed because `OidcConfig` is significantly larger than the
+    /// other variants and clippy flags the size disparity.
+    Oidc(Box<OidcConfig>),
+}
+
+/// Configuration for the OIDC SSO authentication back-end.
+///
+/// The provider is contacted at startup for discovery (`/.well-known/
+/// openid-configuration`) and JWKS fetch.  After a successful
+/// authorisation-code + PKCE login the identity is persisted as an
+/// aloha JWT session cookie via `JwtManager::make_set_cookie`.
+#[derive(Debug, Clone)]
+pub struct OidcConfig {
+    /// IdP issuer URL, e.g. `"https://accounts.google.com"`.
+    pub issuer: String,
+    /// OAuth2 client identifier registered with the IdP.
+    pub client_id: String,
+    /// OAuth2 client secret.  Prefer `client_secret_file` so the
+    /// secret never appears in the parsed AST.  `None` is permitted
+    /// for public clients (PKCE-only).
+    pub client_secret: Option<String>,
+    /// Redirect URI registered with the IdP; must match the
+    /// listener-facing URL that points at `callback_path`.
+    pub redirect_uri: String,
+    /// OAuth2 scopes requested at login.  `openid` is required.
+    pub scopes: Vec<String>,
+    /// ID-token claim from which to read the username.
+    /// Defaults to `"sub"`.
+    pub username_claim: String,
+    /// ID-token claim from which to read group membership.
+    /// Accepts a JSON array or a space-delimited string.
+    /// Defaults to `"groups"`.
+    pub groups_claim: String,
+    /// Path served by aloha that initiates the OIDC login flow.
+    /// Defaults to `"/.aloha/oidc/login"`.
+    pub login_path: String,
+    /// Path served by aloha that receives the IdP's authorisation
+    /// code callback.  Defaults to `"/.aloha/oidc/callback"`.
+    pub callback_path: String,
+    /// Seconds an unfinished login state (PKCE verifier, nonce,
+    /// return-to URL) is kept before being evicted.  Defaults to 600.
+    pub state_ttl_secs: u64,
+    /// When true, request `offline_access` from the IdP and persist
+    /// the resulting refresh token so the short-lived JWT session
+    /// cookie can be renewed without user interaction.
+    pub refresh: bool,
+    /// Seconds an idle refresh session is kept before eviction.
+    /// Sliding window: each successful refresh resets the timer.
+    /// Defaults to 86_400 (1 day).
+    pub refresh_ttl_secs: u64,
+    /// Cookie name carrying the opaque refresh session id.
+    /// Defaults to `__aloha_oidc_refresh`.
+    pub refresh_cookie_name: String,
+    /// Path served as the in-browser logout endpoint.
+    /// Defaults to `/.aloha/oidc/logout`.
+    pub logout_path: String,
+    /// Where to redirect the browser after logout completes.
+    /// Must be a same-origin absolute path; defaults to `/`.
+    pub post_logout_uri: String,
+    /// When true (default), the logout endpoint redirects through
+    /// the IdP's `end_session_endpoint` (RP-initiated logout) so the
+    /// IdP-side session is terminated alongside aloha's.  Set to
+    /// `#false` for IdPs that misbehave on logout; aloha then
+    /// performs a local-only logout (clears its own cookies).
+    pub idp_logout: bool,
+    /// When true, the callback (and refresh) fetches the IdP's
+    /// `/userinfo` endpoint and merges those claims with the ID
+    /// token, with UserInfo winning on non-empty values.  Necessary
+    /// for IdPs that omit `groups`/`email` from the ID token.
+    pub userinfo: bool,
+    /// Seconds between periodic re-discoveries (JWKS hot-swap).
+    /// `0` disables the periodic refresh; the initial bootstrap
+    /// still runs.  Defaults to 3600.
+    pub discovery_refresh_secs: u64,
+    /// When true (default), discovery failures at startup do not
+    /// abort aloha — the provider stays in a not-ready state and a
+    /// background task retries with exponential backoff.  Set to
+    /// `#false` to restore strict fail-fast startup.
+    pub discovery_retry: bool,
+    /// When true (default), expose a POST endpoint that accepts
+    /// signed `logout_token`s pushed by the IdP and tears down any
+    /// matching server-side refresh entries.  Spec: OpenID Connect
+    /// Back-Channel Logout 1.0.
+    pub backchannel_logout_enabled: bool,
+    /// Path that receives the IdP's POSTed `logout_token`.
+    /// Defaults to `/.aloha/oidc/backchannel-logout`.
+    pub backchannel_logout_path: String,
+    /// Maximum acceptable `iat` skew on inbound logout-tokens, in
+    /// seconds.  Defaults to 120.  Anything older is rejected as
+    /// stale to limit replay surface.
+    pub backchannel_max_iat_skew_secs: u64,
+    /// Seconds a seen `jti` is remembered to reject replays.
+    /// Defaults to 300; should be larger than the iat-skew window.
+    pub backchannel_jti_ttl_secs: u64,
+    /// Accept `Authorization: Bearer <jwt>` from API callers,
+    /// validated against the IdP's JWKS as an alternative to the
+    /// session cookie.  Requires `bearer_audiences` to be non-empty.
+    pub bearer: bool,
+    /// Audience values an inbound bearer token's `aud` claim may
+    /// carry.  Required when `bearer` is true.  Multiple values
+    /// are supported -- resource servers often accept tokens for
+    /// more than one audience.
+    pub bearer_audiences: Vec<String>,
+    /// LRU capacity for verified bearer tokens.  Defaults to 1024.
+    /// Each cached entry is a `SHA-256(token)` key mapped to an
+    /// (`Identity`, `exp`) pair, so the per-request cost on a cache
+    /// hit is a hash + a map lookup.
+    pub bearer_cache_size: usize,
+    /// When true (default), the logout endpoint additionally POSTs
+    /// the dropped refresh token to the IdP's
+    /// `revocation_endpoint` (RFC 7009).  Defense-in-depth on top
+    /// of the existing end-session redirect.
+    pub revoke_on_logout: bool,
+    /// When true, the callback endpoint rejects authorization
+    /// responses that lack an `iss` parameter (RFC 9207).  Default
+    /// is `false` -- aloha *verifies* `iss` when the IdP sends it
+    /// and rejects only on mismatch.
+    pub require_iss: bool,
+    /// RFC 8707 `resource` parameter values.  Each entry is
+    /// forwarded as `resource=<uri>` on the authorization request,
+    /// code exchange, and refresh-token exchange so the IdP can
+    /// narrow the access token's `aud` to the listed resources.
+    /// Empty by default.
+    pub resources: Vec<String>,
 }
 
 /// Configuration for the LDAP authentication back-end.
@@ -702,6 +829,24 @@ impl Config {
                 "server.state-dir is required when auth jwt is \
                  configured"
             );
+        }
+        // OIDC must be wrapped inside JWT so the post-login identity
+        // can be persisted as a session cookie.  An OIDC backend used
+        // standalone would have nowhere to record the authenticated
+        // principal after the callback completes.
+        match &self.server.auth {
+            Some(AuthBackend::Oidc(_)) => bail!(
+                "auth oidc must be wrapped inside auth jwt; \
+                 use:  auth jwt {{ wrap oidc {{ ... }} }}"
+            ),
+            Some(AuthBackend::Jwt { inner, .. }) => {
+                if let Some(b) = inner.as_deref()
+                    && matches!(b, AuthBackend::Jwt { .. })
+                {
+                    bail!("auth jwt cannot wrap another auth jwt");
+                }
+            }
+            _ => {}
         }
         // Certificate names must be unique.
         {
