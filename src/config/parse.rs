@@ -1709,41 +1709,77 @@ fn parse_handler(
             let connect_timeout_secs =
                 prop_or_child_i64(node, "connect-timeout")
                     .map(|n| n as u64);
-            // Load-balancer knobs.
-            let lb_policy = match prop_or_child_str(node, "lb-policy")
-                .as_deref()
-            {
-                None | Some("") | Some("round-robin") => {
-                    crate::config::LbPolicy::RoundRobin
-                }
-                Some("least-conn") => crate::config::LbPolicy::LeastConn,
-                Some("random") => crate::config::LbPolicy::Random,
-                Some("ip-hash") => crate::config::LbPolicy::IpHash,
-                Some("header-hash") => crate::config::LbPolicy::HeaderHash,
-                Some(other) => bail!(
-                    "{name}:{line}: unknown lb-policy {other:?}; \
-                     expected round-robin, least-conn, random, ip-hash, \
-                     or header-hash"
+            // Load-balancer knobs.  `lb-policy "header-hash"` takes
+            // an additional `header="<name>"` property on the same
+            // node so the dependency is visually colocated.
+            let lb_node = node.children().and_then(|d| {
+                d.nodes()
+                    .iter()
+                    .find(|n| n.name().value() == "lb-policy")
+            });
+            let (lb_policy, lb_hash_header) = match lb_node {
+                None => (
+                    crate::config::LbPolicy::RoundRobin,
+                    None::<String>,
                 ),
+                Some(n) => {
+                    let policy_str = arg_str(n, 0).unwrap_or_default();
+                    let policy = match policy_str.as_str() {
+                        "" | "round-robin" => {
+                            crate::config::LbPolicy::RoundRobin
+                        }
+                        "least-conn" => crate::config::LbPolicy::LeastConn,
+                        "random" => crate::config::LbPolicy::Random,
+                        "ip-hash" => crate::config::LbPolicy::IpHash,
+                        "header-hash" => {
+                            crate::config::LbPolicy::HeaderHash
+                        }
+                        other => bail!(
+                            "{name}:{}: unknown lb-policy {other:?}; \
+                             expected round-robin, least-conn, random, \
+                             ip-hash, or header-hash",
+                            node_line(src, n)
+                        ),
+                    };
+                    let header = n
+                        .get("header")
+                        .and_then(|e| e.as_string())
+                        .map(String::from);
+                    if policy == crate::config::LbPolicy::HeaderHash
+                        && header.as_deref().map(str::is_empty)
+                            .unwrap_or(true)
+                    {
+                        bail!(
+                            "{name}:{}: lb-policy \"header-hash\" \
+                             requires header=\"<name>\" property",
+                            node_line(src, n)
+                        );
+                    }
+                    if policy != crate::config::LbPolicy::HeaderHash
+                        && header.is_some()
+                    {
+                        bail!(
+                            "{name}:{}: header=\"...\" is only valid \
+                             with lb-policy \"header-hash\"",
+                            node_line(src, n)
+                        );
+                    }
+                    (policy, header)
+                }
             };
-            let lb_hash_header =
-                prop_or_child_str(node, "lb-hash-header");
-            if lb_policy == crate::config::LbPolicy::HeaderHash
-                && lb_hash_header.as_deref().map(str::is_empty)
-                    .unwrap_or(true)
-            {
-                bail!(
-                    "{name}:{line}: lb-policy \"header-hash\" requires \
-                     lb-hash-header to be set"
-                );
-            }
-            // health-check { path "/..."; interval N; timeout N;
-            //                expect N; unhealthy-after N; healthy-after N }
-            let health_check: Option<crate::config::HealthCheckConfig> = {
+            // active-health {
+            //     path "/..."
+            //     interval N; timeout N
+            //     expect-status N
+            //     unhealthy-after N; healthy-after N
+            // }
+            let active_health: Option<
+                crate::config::ActiveHealthConfig,
+            > = {
                 let hc_node = node.children().and_then(|d| {
                     d.nodes()
                         .iter()
-                        .find(|n| n.name().value() == "health-check")
+                        .find(|n| n.name().value() == "active-health")
                 });
                 match hc_node {
                     None => None,
@@ -1759,7 +1795,7 @@ fn parse_handler(
                                 .map(|n| n as u64)
                                 .unwrap_or(2);
                         let expect_status =
-                            prop_or_child_i64(hc, "expect")
+                            prop_or_child_i64(hc, "expect-status")
                                 .map(|n| n as u16)
                                 .unwrap_or(200);
                         let unhealthy_after =
@@ -1770,7 +1806,7 @@ fn parse_handler(
                             prop_or_child_i64(hc, "healthy-after")
                                 .map(|n| n as u32)
                                 .unwrap_or(1);
-                        Some(crate::config::HealthCheckConfig {
+                        Some(crate::config::ActiveHealthConfig {
                             path,
                             interval_secs,
                             timeout_secs,
@@ -1800,7 +1836,11 @@ fn parse_handler(
                     },
                 }
             };
-            // retry { max N; on-status "502 503 504" }
+            // retry { max N; on-status 502 503 504 }
+            //
+            // `on-status` takes variadic positional integers; when
+            // `max > 0` the list MUST be non-empty so it is explicit
+            // which response codes trigger a retry.
             let retry = {
                 let r_node = node.children().and_then(|d| {
                     d.nodes()
@@ -1813,14 +1853,34 @@ fn parse_handler(
                         let max = prop_or_child_i64(r, "max")
                             .map(|n| n as u32)
                             .unwrap_or(0);
-                        let on_status: Vec<u16> =
-                            prop_or_child_str(r, "on-status")
-                                .map(|s| {
-                                    s.split_whitespace()
-                                        .filter_map(|t| t.parse::<u16>().ok())
-                                        .collect()
-                                })
-                                .unwrap_or_default();
+                        let on_status: Vec<u16> = r
+                            .children()
+                            .and_then(|d| {
+                                d.nodes()
+                                    .iter()
+                                    .find(|n| n.name().value() == "on-status")
+                            })
+                            .map(|n| {
+                                n.entries()
+                                    .iter()
+                                    .filter(|e| e.name().is_none())
+                                    .filter_map(|e| {
+                                        e.value()
+                                            .as_integer()
+                                            .map(|v| v as u16)
+                                    })
+                                    .collect::<Vec<u16>>()
+                            })
+                            .unwrap_or_default();
+                        if max > 0 && on_status.is_empty() {
+                            bail!(
+                                "{name}:{}: retry max={max} requires \
+                                 on-status to list which status codes \
+                                 trigger a retry (e.g. \
+                                 `on-status 502 503 504`)",
+                                node_line(src, r)
+                            );
+                        }
                         crate::config::RetryConfig { max, on_status }
                     }
                 }
@@ -1829,7 +1889,7 @@ fn parse_handler(
                 upstreams,
                 lb_policy,
                 lb_hash_header,
-                health_check,
+                active_health,
                 passive_health,
                 retry,
                 strip_prefix,

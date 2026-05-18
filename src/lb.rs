@@ -6,7 +6,7 @@
 // select one for a request, plus `record_success` / `record_failure`
 // for the request path to feed passive ejection.
 //
-// `spawn_health_check_task` runs an active health probe loop against a
+// `spawn_active_health_task` runs an active health probe loop against a
 // caller-supplied `HealthProber` (the real implementation in
 // `handler/proxy.rs` wraps the existing `ProxyClient`; tests can use
 // a closure-driven mock).
@@ -15,7 +15,7 @@
 // handler so it can be unit-tested in isolation.
 
 use crate::config::{
-    HealthCheckConfig, LbPolicy, PassiveHealthConfig, UpstreamConfig,
+    ActiveHealthConfig, LbPolicy, PassiveHealthConfig, UpstreamConfig,
 };
 use crate::metrics::Metrics;
 use async_trait::async_trait;
@@ -284,7 +284,7 @@ pub trait HealthProber: Send + Sync + 'static {
     async fn probe(
         &self,
         url: &str,
-        cfg: &HealthCheckConfig,
+        cfg: &ActiveHealthConfig,
     ) -> bool;
 }
 
@@ -294,9 +294,9 @@ pub trait HealthProber: Send + Sync + 'static {
 /// Returns the `JoinHandle` so callers can abort it on shutdown.  A
 /// `cfg.interval_secs == 0` is treated as "disabled" — no task is
 /// spawned and the function returns `None`.
-pub fn spawn_health_check_task(
+pub fn spawn_active_health_task(
     pool: Arc<UpstreamPool>,
-    cfg: HealthCheckConfig,
+    cfg: ActiveHealthConfig,
     prober: Arc<dyn HealthProber>,
     metrics: Option<Arc<Metrics>>,
 ) -> Option<tokio::task::JoinHandle<()>> {
@@ -646,7 +646,7 @@ mod tests {
         async fn probe(
             &self,
             url: &str,
-            _cfg: &HealthCheckConfig,
+            _cfg: &ActiveHealthConfig,
         ) -> bool {
             if url == "http://h0/" {
                 *self.good.lock().unwrap()
@@ -667,7 +667,7 @@ mod tests {
         let good = Arc::new(std::sync::Mutex::new(true));
         // interval_secs is u64; we want sub-second ticks for fast
         // tests.  Use the lower-level builder here.
-        let cfg = HealthCheckConfig {
+        let cfg = ActiveHealthConfig {
             path: "/healthz".into(),
             interval_secs: 0, // sentinel: we'll spawn manually
             timeout_secs: 1,
@@ -678,7 +678,7 @@ mod tests {
         // interval_secs=0 disables the helper; spawn our own short
         // loop instead.
         assert!(
-            spawn_health_check_task(
+            spawn_active_health_task(
                 pool.clone(),
                 cfg.clone(),
                 Arc::new(FlippingProber { good: good.clone() }),

@@ -625,8 +625,7 @@
               <li><a href="#handler-proxy-strip-prefix">strip-prefix</a></li>
               <li><a href="#handler-proxy-upstream">upstream</a></li>
               <li><a href="#handler-proxy-lb-policy">lb-policy</a></li>
-              <li><a href="#handler-proxy-lb-hash-header">lb-hash-header</a></li>
-              <li><a href="#handler-proxy-health-check">health-check</a></li>
+              <li><a href="#handler-proxy-active-health">active-health</a></li>
               <li><a href="#handler-proxy-passive-health">passive-health</a></li>
               <li><a href="#handler-proxy-retry">retry</a></li>
             </ul>
@@ -2954,13 +2953,23 @@
 
         <span class="kw">lb-policy</span> <span class="str">"least-conn"</span>
 
-        <span class="kw">health-check</span> {
-            <span class="kw">path</span>     <span class="str">"/healthz"</span>
-            <span class="kw">interval</span> <span class="num">10</span>
-            <span class="kw">expect</span>   <span class="num">200</span>
+        <span class="kw">active-health</span> {
+            <span class="kw">path</span>          <span class="str">"/healthz"</span>
+            <span class="kw">interval</span>      <span class="num">10</span>
+            <span class="kw">expect-status</span> <span class="num">200</span>
         }
         <span class="kw">passive-health</span> { <span class="kw">eject-after</span> <span class="num">3</span>; <span class="kw">eject-for</span> <span class="num">30</span> }
-        <span class="kw">retry</span> { <span class="kw">max</span> <span class="num">2</span>; <span class="kw">on-status</span> <span class="str">"502 503 504"</span> }
+        <span class="kw">retry</span> { <span class="kw">max</span> <span class="num">2</span>; <span class="kw">on-status</span> <span class="num">502</span> <span class="num">503</span> <span class="num">504</span> }
+    }
+}
+
+<span class="cm">// Header-hashed affinity: the request header to hash sits on the</span>
+<span class="cm">// same node as the policy.</span>
+<span class="kw">location</span> <span class="str">"/api/"</span> {
+    <span class="kw">proxy</span> {
+        <span class="kw">upstream</span> <span class="str">"http://a:8080"</span>
+        <span class="kw">upstream</span> <span class="str">"http://b:8080"</span>
+        <span class="kw">lb-policy</span> <span class="str">"header-hash"</span> <span class="kw">header=</span><span class="str">"X-Session-Id"</span>
     }
 }</code></pre>
 
@@ -2986,7 +2995,7 @@
                   picker (useful for parking).</td>
             </tr>
             <tr id="handler-proxy-lb-policy">
-              <td>lb-policy</td>
+              <td>lb-policy &hellip; header=<em>name</em></td>
               <td><code>round-robin</code> | <code>least-conn</code> |
                   <code>random</code> | <code>ip-hash</code> |
                   <code>header-hash</code></td>
@@ -2995,21 +3004,14 @@
                   Picker policy. <code>ip-hash</code> sends all
                   requests from one peer IP to the same upstream
                   (sticky sessions without cookies).
-                  <code>header-hash</code> hashes a configurable
-                  request header; falls back to round-robin when
-                  the header is absent.</td>
+                  <code>header-hash</code> requires a
+                  <code>header=&quot;X-Name&quot;</code> property on
+                  the same node; it hashes that header to select an
+                  upstream, falling back to round-robin when the
+                  header is absent on a given request.</td>
             </tr>
-            <tr id="handler-proxy-lb-hash-header">
-              <td>lb-hash-header</td>
-              <td>string</td>
-              <td>&mdash;</td>
-              <td><span class="badge badge-req">required</span> when
-                  <code>lb-policy "header-hash"</code>.  Request
-                  header whose value is hashed to select an
-                  upstream.  Case-insensitive.</td>
-            </tr>
-            <tr id="handler-proxy-health-check">
-              <td>health-check { &hellip; }</td>
+            <tr id="handler-proxy-active-health">
+              <td>active-health { &hellip; }</td>
               <td>block</td><td>&mdash;</td>
               <td><span class="badge badge-opt">optional</span>
                   Active health-check tuning.  Children:
@@ -3017,8 +3019,9 @@
                   <code>interval</code> seconds (default
                   <code>10</code>; <code>0</code> disables),
                   <code>timeout</code> seconds (default
-                  <code>2</code>), <code>expect</code> status
-                  (default <code>200</code>),
+                  <code>2</code>),
+                  <code>expect-status</code> (default
+                  <code>200</code>),
                   <code>unhealthy-after</code> (default
                   <code>2</code>), <code>healthy-after</code>
                   (default <code>1</code>).  Probes use a separate
@@ -3041,11 +3044,15 @@
               <td>block</td><td>&mdash;</td>
               <td><span class="badge badge-opt">optional</span>
                   Children: <code>max</code> additional attempts
-                  (default <code>0</code>), <code>on-status</code>
-                  whitespace-separated status codes that trigger a
-                  retry (empty = retry any 5xx).  When
-                  <code>max&gt;0</code> the request body is buffered
-                  up-front so it can be replayed across attempts.</td>
+                  (default <code>0</code>); <code>on-status</code>
+                  followed by one or more status codes
+                  (e.g. <code>on-status 502 503 504</code>) that
+                  trigger a retry.  <code>on-status</code> is
+                  <em>required</em> whenever <code>max&gt;0</code>
+                  so it is explicit which response codes should
+                  retry.  When retry is enabled the request body is
+                  buffered up-front so it can be replayed across
+                  attempts.</td>
             </tr>
           </tbody>
         </table>

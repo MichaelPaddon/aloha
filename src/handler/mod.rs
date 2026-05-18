@@ -56,7 +56,7 @@ impl Handler {
                 upstreams,
                 lb_policy,
                 lb_hash_header,
-                health_check,
+                active_health,
                 passive_health,
                 retry,
                 strip_prefix,
@@ -90,12 +90,12 @@ impl Handler {
                 // configured.  Probes use a minimal hyper-util client
                 // (separate from the pooled request-path client) so a
                 // probe stall can never wedge real traffic.
-                if let Some(hc) = health_check {
+                if let Some(hc) = active_health {
                     let prober: Arc<dyn crate::lb::HealthProber> =
                         Arc::new(proxy::HttpHealthProber::new(
                             skip_verify,
                         )?);
-                    crate::lb::spawn_health_check_task(
+                    crate::lb::spawn_active_health_task(
                         h.pool().clone(),
                         hc.clone(),
                         prober,

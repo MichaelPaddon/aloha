@@ -469,9 +469,9 @@ pub enum LbPolicy {
 }
 
 /// Active health-check tuning.  Present only when the operator wrote
-/// a `health-check { }` block.
+/// an `active-health { }` block.
 #[derive(Debug, Clone)]
-pub struct HealthCheckConfig {
+pub struct ActiveHealthConfig {
     pub path: String,
     pub interval_secs: u64,
     pub timeout_secs: u64,
@@ -704,11 +704,13 @@ pub enum HandlerConfig {
         // Picker policy when more than one upstream is present.  Default
         // is round-robin.
         lb_policy: LbPolicy,
-        // Required when `lb_policy == HeaderHash`; otherwise unused.
+        // Required when `lb_policy == HeaderHash`; parsed from the
+        // `header=` property on the same `lb-policy` node.  Otherwise
+        // unused.
         lb_hash_header: Option<String>,
         // Optional active probe.  `None` disables active health checks
         // entirely; otherwise a background task probes each upstream.
-        health_check: Option<HealthCheckConfig>,
+        active_health: Option<ActiveHealthConfig>,
         // Passive eject-on-error tuning.  Always present (with defaults
         // that mean "never eject" when no failures occur).
         passive_health: PassiveHealthConfig,

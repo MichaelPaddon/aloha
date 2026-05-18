@@ -754,13 +754,9 @@ impl ProxyHandler {
     }
 
     fn should_retry(&self, status: u16) -> bool {
-        if !(500..600).contains(&status) {
-            return false;
-        }
-        if self.retry_on_status.is_empty() {
-            // Default: retry any 5xx when retry is enabled.
-            return true;
-        }
+        // The parser enforces non-empty `on-status` when retry is
+        // enabled, so we can rely on the allowlist without a
+        // fallback case.
         self.retry_on_status.contains(&status)
     }
 }
@@ -808,7 +804,7 @@ impl crate::lb::HealthProber for HttpHealthProber {
     async fn probe(
         &self,
         url: &str,
-        cfg: &crate::config::HealthCheckConfig,
+        cfg: &crate::config::ActiveHealthConfig,
     ) -> bool {
         // Build `url + cfg.path`; treat unix: upstreams as always
         // healthy since we don't have a UDS health-probe client wired.
@@ -2116,7 +2112,7 @@ mod tests {
             crate::config::PassiveHealthConfig::default(),
             crate::config::RetryConfig {
                 max: 1,
-                on_status: vec![],
+                on_status: vec![503],
             },
             false,
             None,

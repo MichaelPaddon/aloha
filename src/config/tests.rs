@@ -3790,7 +3790,7 @@ fn proxy_positional_plus_upstream_children_combine() {
 }
 
 #[test]
-fn proxy_header_hash_requires_header() {
+fn proxy_header_hash_requires_header_property() {
     let err = Config::parse(
         r#"
         listener { bind "[::]:80" }
@@ -3808,13 +3808,13 @@ fn proxy_header_hash_requires_header() {
     .unwrap_err()
     .to_string();
     assert!(
-        err.contains("header-hash") && err.contains("lb-hash-header"),
-        "expected header-hash needs lb-hash-header; got: {err}"
+        err.contains("header-hash") && err.contains("header="),
+        "expected header-hash needs header= property; got: {err}"
     );
 }
 
 #[test]
-fn proxy_health_check_defaults_fill_in() {
+fn proxy_header_hash_with_header_property_parses() {
     let cfg = Config::parse(
         r#"
         listener { bind "[::]:80" }
@@ -3822,7 +3822,8 @@ fn proxy_health_check_defaults_fill_in() {
             location "/" {
                 proxy {
                     upstream "http://a:8080"
-                    health-check { path "/healthz" }
+                    upstream "http://b:8080"
+                    lb-policy "header-hash" header="X-Session-Id"
                 }
             }
         }
@@ -3831,7 +3832,60 @@ fn proxy_health_check_defaults_fill_in() {
     .unwrap();
     match &cfg.vhosts[0].locations[0].handler {
         HandlerConfig::Proxy {
-            health_check: Some(hc),
+            lb_policy,
+            lb_hash_header,
+            ..
+        } => {
+            assert_eq!(*lb_policy, crate::config::LbPolicy::HeaderHash);
+            assert_eq!(lb_hash_header.as_deref(), Some("X-Session-Id"));
+        }
+        _ => panic!("expected Proxy handler"),
+    }
+}
+
+#[test]
+fn proxy_header_property_rejected_for_non_header_hash_policy() {
+    let err = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        vhost h {
+            location "/" {
+                proxy {
+                    upstream "http://a:8080"
+                    upstream "http://b:8080"
+                    lb-policy "round-robin" header="X-Foo"
+                }
+            }
+        }
+        "#,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err.contains("only valid with lb-policy \"header-hash\""),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn proxy_active_health_defaults_fill_in() {
+    let cfg = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        vhost h {
+            location "/" {
+                proxy {
+                    upstream "http://a:8080"
+                    active-health { path "/healthz" }
+                }
+            }
+        }
+        "#,
+    )
+    .unwrap();
+    match &cfg.vhosts[0].locations[0].handler {
+        HandlerConfig::Proxy {
+            active_health: Some(hc),
             ..
         } => {
             assert_eq!(hc.path, "/healthz");
@@ -3841,7 +3895,7 @@ fn proxy_health_check_defaults_fill_in() {
             assert_eq!(hc.unhealthy_after, 2);
             assert_eq!(hc.healthy_after, 1);
         }
-        _ => panic!("expected Proxy handler with health-check"),
+        _ => panic!("expected Proxy handler with active-health"),
     }
 }
 
@@ -3861,7 +3915,7 @@ fn proxy_passive_health_and_retry_parse() {
                     }
                     retry {
                         max 2
-                        on-status "502 503 504"
+                        on-status 502 503 504
                     }
                 }
             }
@@ -3882,6 +3936,30 @@ fn proxy_passive_health_and_retry_parse() {
         }
         _ => panic!("expected Proxy handler"),
     }
+}
+
+#[test]
+fn proxy_retry_requires_on_status_when_enabled() {
+    let err = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        vhost h {
+            location "/" {
+                proxy {
+                    upstream "http://a:8080"
+                    upstream "http://b:8080"
+                    retry { max 2 }
+                }
+            }
+        }
+        "#,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err.contains("retry max=2 requires on-status"),
+        "got: {err}"
+    );
 }
 
 #[test]
