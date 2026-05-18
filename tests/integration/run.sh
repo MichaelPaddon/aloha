@@ -56,6 +56,8 @@ source "$TESTS_DIR/suite_http3.sh"
 source "$TESTS_DIR/suite_proxy_h3.sh"
 # shellcheck source=suite_proxy_trust.sh
 source "$TESTS_DIR/suite_proxy_trust.sh"
+# shellcheck source=suite_proxy_lb.sh
+source "$TESTS_DIR/suite_proxy_lb.sh"
 
 # --- main -----------------------------------------------------------
 
@@ -99,6 +101,10 @@ suite_proxy_h3_autoupgrade
 suite_proxy_h3_altsvc_expires
 suite_proxy_skip_verify
 suite_proxy_connect_timeout
+suite_proxy_lb_round_robin
+suite_proxy_lb_header_hash
+suite_proxy_lb_retry
+suite_proxy_lb_active_health
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

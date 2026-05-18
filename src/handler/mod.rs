@@ -53,7 +53,12 @@ impl Handler {
                 *strip_prefix,
             ))),
             HandlerConfig::Proxy {
-                upstream,
+                upstreams,
+                lb_policy,
+                lb_hash_header,
+                active_health,
+                passive_health,
+                retry,
                 strip_prefix,
                 proxy_protocol,
                 scheme,
@@ -66,8 +71,12 @@ impl Handler {
                     .as_ref()
                     .map(|t| t.skip_verify)
                     .unwrap_or(false);
-                let mut h = proxy::ProxyHandler::new(
-                    upstream,
+                let h = proxy::ProxyHandler::new_pool(
+                    upstreams,
+                    lb_policy.clone(),
+                    lb_hash_header.clone(),
+                    passive_health.clone(),
+                    retry.clone(),
                     *strip_prefix,
                     *proxy_protocol,
                     *scheme,
@@ -75,8 +84,24 @@ impl Handler {
                     *pool_max_idle,
                     skip_verify,
                     *connect_timeout_secs,
+                    metrics.clone(),
                 )?;
-                h.set_metrics(metrics.clone());
+                // Active health-check task: spawn one per pool when
+                // configured.  Probes use a minimal hyper-util client
+                // (separate from the pooled request-path client) so a
+                // probe stall can never wedge real traffic.
+                if let Some(hc) = active_health {
+                    let prober: Arc<dyn crate::lb::HealthProber> =
+                        Arc::new(proxy::HttpHealthProber::new(
+                            skip_verify,
+                        )?);
+                    crate::lb::spawn_active_health_task(
+                        h.pool().clone(),
+                        hc.clone(),
+                        prober,
+                        Some(metrics.clone()),
+                    );
+                }
                 Ok(Handler::Proxy(Box::new(h)))
             }
             HandlerConfig::Redirect { to, code } => Ok(Handler::Redirect {

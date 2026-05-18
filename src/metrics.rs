@@ -407,6 +407,14 @@ pub struct Metrics {
     // incrementing this counter, so the ratio of requests / handshakes
     // is a direct read of pool effectiveness.
     pub quic_outbound_handshakes_total: AtomicU64,
+    // Reverse-proxy load-balancer counters.  All are zero when no
+    // proxy location uses a multi-upstream pool.
+    pub proxy_lb_picks: AtomicU64,
+    pub proxy_lb_no_upstream: AtomicU64,
+    pub proxy_lb_retries: AtomicU64,
+    pub proxy_lb_ejections: AtomicU64,
+    pub proxy_lb_health_failures: AtomicU64,
+    pub proxy_lb_health_recoveries: AtomicU64,
     // Ring-buffer archives (all written by tick_loop only).
     fine: Mutex<FineHistory>,
     paths: Mutex<PathData>,
@@ -450,6 +458,12 @@ impl Metrics {
             quic_connections_active: AtomicI64::new(0),
             quic_requests_total: AtomicU64::new(0),
             quic_outbound_handshakes_total: AtomicU64::new(0),
+            proxy_lb_picks: AtomicU64::new(0),
+            proxy_lb_no_upstream: AtomicU64::new(0),
+            proxy_lb_retries: AtomicU64::new(0),
+            proxy_lb_ejections: AtomicU64::new(0),
+            proxy_lb_health_failures: AtomicU64::new(0),
+            proxy_lb_health_recoveries: AtomicU64::new(0),
             fine: Mutex::new(FineHistory::new()),
             paths: Mutex::new(PathData {
                 slots: (0..FINE_SLOTS).map(|_| HashMap::new()).collect(),

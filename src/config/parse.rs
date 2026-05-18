@@ -1587,23 +1587,62 @@ fn parse_handler(
             })
         }
         "proxy" => {
-            // Upstream: positional, upstream="..." property, or
-            // upstream child.
-            let upstream = arg_str(node, 0)
-                .or_else(|| prop_or_child_str(node, "upstream"))
-                .ok_or_else(|| {
-                    anyhow!(
-                        "{name}:{line}: proxy handler requires an upstream URL"
-                    )
-                })?;
+            // Collect upstreams from:
+            //   1. positional `proxy "url"` form (legacy)
+            //   2. property `proxy upstream="url"` (legacy)
+            //   3. each `upstream "url" [weight=N]` child node (new)
+            //
+            // (1) and (2) are mutually exclusive with each other but
+            // both can coexist with (3).  At least one entry is
+            // required.
+            let mut upstreams: Vec<crate::config::UpstreamConfig> = Vec::new();
+            if let Some(u) = arg_str(node, 0) {
+                upstreams.push(crate::config::UpstreamConfig {
+                    url: u,
+                    weight: 1,
+                });
+            } else if let Some(u) =
+                node.get("upstream").and_then(|e| e.as_string())
+            {
+                upstreams.push(crate::config::UpstreamConfig {
+                    url: u.to_string(),
+                    weight: 1,
+                });
+            }
+            if let Some(doc) = node.children() {
+                for child in doc.nodes() {
+                    if child.name().value() != "upstream" {
+                        continue;
+                    }
+                    let url = req_arg_str(child, 0).with_context(|| {
+                        format!(
+                            "{name}:{}: upstream requires a URL",
+                            node_line(src, child)
+                        )
+                    })?;
+                    let weight = child
+                        .get("weight")
+                        .and_then(|e| e.as_integer())
+                        .map(|n| n as u32)
+                        .unwrap_or(1);
+                    upstreams.push(crate::config::UpstreamConfig {
+                        url,
+                        weight,
+                    });
+                }
+            }
+            if upstreams.is_empty() {
+                bail!(
+                    "{name}:{line}: proxy handler requires at least one \
+                     upstream"
+                );
+            }
             let strip_prefix =
                 prop_or_child_bool(node, "strip-prefix").unwrap_or(false);
             let proxy_protocol = prop_or_child_str(node, "proxy-protocol")
                 .map(|v| parse_proxy_protocol(&v, name, line))
                 .transpose()?;
-            // Optional `scheme "h3"` selects HTTP/3 over QUIC for the
-            // upstream leg.  Unset / "auto" / "" all preserve the
-            // existing h1/h2 ALPN-negotiated behaviour.
+            // `scheme "h3"` requires every upstream to be https://.
             let scheme = match prop_or_child_str(node, "scheme")
                 .as_deref()
             {
@@ -1611,11 +1650,14 @@ fn parse_handler(
                     crate::config::ProxyUpstreamScheme::Auto
                 }
                 Some("h3") | Some("http3") => {
-                    if !upstream.starts_with("https://") {
-                        bail!(
-                            "{name}:{line}: proxy scheme=h3 requires \
-                             an https:// upstream (got {upstream:?})"
-                        );
+                    for u in &upstreams {
+                        if !u.url.starts_with("https://") {
+                            bail!(
+                                "{name}:{line}: proxy scheme=h3 requires \
+                                 an https:// upstream (got {:?})",
+                                u.url
+                            );
+                        }
                     }
                     crate::config::ProxyUpstreamScheme::H3
                 }
@@ -1629,7 +1671,8 @@ fn parse_handler(
                     .map(|n| n as u64);
             let pool_max_idle = prop_or_child_i64(node, "pool-max-idle")
                 .map(|n| n as u32);
-            // Same `tls { skip-verify }` shape as stream-proxy.
+            // Same `tls { skip-verify }` shape as stream-proxy; applies
+            // to every upstream in the pool.
             let upstream_tls: Option<UpstreamTlsConfig> = node
                 .children()
                 .and_then(|doc| {
@@ -1648,14 +1691,17 @@ fn parse_handler(
                                 })
                         })
                         .unwrap_or(false);
-                    if skip_verify
-                        && !upstream.starts_with("https://")
-                    {
-                        bail!(
-                            "{name}:{line}: proxy 'tls' is only \
-                             meaningful for https:// upstreams \
-                             (got {upstream:?})"
-                        );
+                    if skip_verify {
+                        for u in &upstreams {
+                            if !u.url.starts_with("https://") {
+                                bail!(
+                                    "{name}:{line}: proxy 'tls' is only \
+                                     meaningful for https:// upstreams \
+                                     (got {:?})",
+                                    u.url
+                                );
+                            }
+                        }
                     }
                     Ok(UpstreamTlsConfig { skip_verify })
                 })
@@ -1663,8 +1709,189 @@ fn parse_handler(
             let connect_timeout_secs =
                 prop_or_child_i64(node, "connect-timeout")
                     .map(|n| n as u64);
+            // Load-balancer knobs.  `lb-policy "header-hash"` takes
+            // an additional `header="<name>"` property on the same
+            // node so the dependency is visually colocated.
+            let lb_node = node.children().and_then(|d| {
+                d.nodes()
+                    .iter()
+                    .find(|n| n.name().value() == "lb-policy")
+            });
+            let (lb_policy, lb_hash_header) = match lb_node {
+                None => (
+                    crate::config::LbPolicy::RoundRobin,
+                    None::<String>,
+                ),
+                Some(n) => {
+                    let policy_str = arg_str(n, 0).unwrap_or_default();
+                    let policy = match policy_str.as_str() {
+                        "" | "round-robin" => {
+                            crate::config::LbPolicy::RoundRobin
+                        }
+                        "least-conn" => crate::config::LbPolicy::LeastConn,
+                        "random" => crate::config::LbPolicy::Random,
+                        "ip-hash" => crate::config::LbPolicy::IpHash,
+                        "header-hash" => {
+                            crate::config::LbPolicy::HeaderHash
+                        }
+                        other => bail!(
+                            "{name}:{}: unknown lb-policy {other:?}; \
+                             expected round-robin, least-conn, random, \
+                             ip-hash, or header-hash",
+                            node_line(src, n)
+                        ),
+                    };
+                    let header = n
+                        .get("header")
+                        .and_then(|e| e.as_string())
+                        .map(String::from);
+                    if policy == crate::config::LbPolicy::HeaderHash
+                        && header.as_deref().map(str::is_empty)
+                            .unwrap_or(true)
+                    {
+                        bail!(
+                            "{name}:{}: lb-policy \"header-hash\" \
+                             requires header=\"<name>\" property",
+                            node_line(src, n)
+                        );
+                    }
+                    if policy != crate::config::LbPolicy::HeaderHash
+                        && header.is_some()
+                    {
+                        bail!(
+                            "{name}:{}: header=\"...\" is only valid \
+                             with lb-policy \"header-hash\"",
+                            node_line(src, n)
+                        );
+                    }
+                    (policy, header)
+                }
+            };
+            // active-health {
+            //     path "/..."
+            //     interval N; timeout N
+            //     expect-status N
+            //     unhealthy-after N; healthy-after N
+            // }
+            let active_health: Option<
+                crate::config::ActiveHealthConfig,
+            > = {
+                let hc_node = node.children().and_then(|d| {
+                    d.nodes()
+                        .iter()
+                        .find(|n| n.name().value() == "active-health")
+                });
+                match hc_node {
+                    None => None,
+                    Some(hc) => {
+                        let path = prop_or_child_str(hc, "path")
+                            .unwrap_or_else(|| "/".to_string());
+                        let interval_secs =
+                            prop_or_child_i64(hc, "interval")
+                                .map(|n| n as u64)
+                                .unwrap_or(10);
+                        let timeout_secs =
+                            prop_or_child_i64(hc, "timeout")
+                                .map(|n| n as u64)
+                                .unwrap_or(2);
+                        let expect_status =
+                            prop_or_child_i64(hc, "expect-status")
+                                .map(|n| n as u16)
+                                .unwrap_or(200);
+                        let unhealthy_after =
+                            prop_or_child_i64(hc, "unhealthy-after")
+                                .map(|n| n as u32)
+                                .unwrap_or(2);
+                        let healthy_after =
+                            prop_or_child_i64(hc, "healthy-after")
+                                .map(|n| n as u32)
+                                .unwrap_or(1);
+                        Some(crate::config::ActiveHealthConfig {
+                            path,
+                            interval_secs,
+                            timeout_secs,
+                            expect_status,
+                            unhealthy_after,
+                            healthy_after,
+                        })
+                    }
+                }
+            };
+            // passive-health { eject-after N; eject-for N }
+            let passive_health = {
+                let ph_node = node.children().and_then(|d| {
+                    d.nodes()
+                        .iter()
+                        .find(|n| n.name().value() == "passive-health")
+                });
+                match ph_node {
+                    None => crate::config::PassiveHealthConfig::default(),
+                    Some(ph) => crate::config::PassiveHealthConfig {
+                        eject_after: prop_or_child_i64(ph, "eject-after")
+                            .map(|n| n as u32)
+                            .unwrap_or(u32::MAX),
+                        eject_for_secs: prop_or_child_i64(ph, "eject-for")
+                            .map(|n| n as u64)
+                            .unwrap_or(30),
+                    },
+                }
+            };
+            // retry { max N; on-status 502 503 504 }
+            //
+            // `on-status` takes variadic positional integers; when
+            // `max > 0` the list MUST be non-empty so it is explicit
+            // which response codes trigger a retry.
+            let retry = {
+                let r_node = node.children().and_then(|d| {
+                    d.nodes()
+                        .iter()
+                        .find(|n| n.name().value() == "retry")
+                });
+                match r_node {
+                    None => crate::config::RetryConfig::default(),
+                    Some(r) => {
+                        let max = prop_or_child_i64(r, "max")
+                            .map(|n| n as u32)
+                            .unwrap_or(0);
+                        let on_status: Vec<u16> = r
+                            .children()
+                            .and_then(|d| {
+                                d.nodes()
+                                    .iter()
+                                    .find(|n| n.name().value() == "on-status")
+                            })
+                            .map(|n| {
+                                n.entries()
+                                    .iter()
+                                    .filter(|e| e.name().is_none())
+                                    .filter_map(|e| {
+                                        e.value()
+                                            .as_integer()
+                                            .map(|v| v as u16)
+                                    })
+                                    .collect::<Vec<u16>>()
+                            })
+                            .unwrap_or_default();
+                        if max > 0 && on_status.is_empty() {
+                            bail!(
+                                "{name}:{}: retry max={max} requires \
+                                 on-status to list which status codes \
+                                 trigger a retry (e.g. \
+                                 `on-status 502 503 504`)",
+                                node_line(src, r)
+                            );
+                        }
+                        crate::config::RetryConfig { max, on_status }
+                    }
+                }
+            };
             Ok(HandlerConfig::Proxy {
-                upstream,
+                upstreams,
+                lb_policy,
+                lb_hash_header,
+                active_health,
+                passive_health,
+                retry,
                 strip_prefix,
                 proxy_protocol,
                 scheme,

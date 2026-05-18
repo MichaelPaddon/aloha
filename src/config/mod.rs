@@ -445,6 +445,71 @@ pub struct ListenerConfig {
     pub quic_transport: Option<QuicTransport>,
 }
 
+/// One backend in a reverse-proxy upstream pool.  A pool with a single
+/// entry behaves exactly like the pre-LB single-upstream proxy.
+#[derive(Debug, Clone)]
+pub struct UpstreamConfig {
+    pub url: String,
+    /// Relative pick weight; defaults to 1.  `0` excludes the upstream
+    /// from selection (useful for temporarily parking a backend).
+    pub weight: u32,
+}
+
+/// Picker policy for multi-upstream proxy locations.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum LbPolicy {
+    #[default]
+    RoundRobin,
+    LeastConn,
+    Random,
+    IpHash,
+    /// Hashes the named request header.  Falls back to round-robin
+    /// when the header is absent on a given request.
+    HeaderHash,
+}
+
+/// Active health-check tuning.  Present only when the operator wrote
+/// an `active-health { }` block.
+#[derive(Debug, Clone)]
+pub struct ActiveHealthConfig {
+    pub path: String,
+    pub interval_secs: u64,
+    pub timeout_secs: u64,
+    /// Expected response status; defaults to 200.  Treated as exact.
+    pub expect_status: u16,
+    pub unhealthy_after: u32,
+    pub healthy_after: u32,
+}
+
+/// Passive (error-driven) ejection tuning.  Defaults disable ejection
+/// (`eject_after = u32::MAX`) so an operator opts in explicitly.
+#[derive(Debug, Clone)]
+pub struct PassiveHealthConfig {
+    pub eject_after: u32,
+    pub eject_for_secs: u64,
+}
+
+impl Default for PassiveHealthConfig {
+    fn default() -> Self {
+        // `eject_after = u32::MAX` is effectively "never eject" without
+        // requiring a separate Option layer.
+        PassiveHealthConfig {
+            eject_after: u32::MAX,
+            eject_for_secs: 30,
+        }
+    }
+}
+
+/// Retry tuning.  `max == 0` (default) means "no retry"; positive
+/// values are the number of *additional* attempts beyond the first.
+#[derive(Debug, Clone, Default)]
+pub struct RetryConfig {
+    pub max: u32,
+    /// Response status codes that trigger a retry, in addition to
+    /// connect/IO failures (which always trigger).  Empty by default.
+    pub on_status: Vec<u16>,
+}
+
 /// Wire protocol used by the reverse proxy to reach its upstream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ProxyUpstreamScheme {
@@ -632,7 +697,25 @@ pub enum HandlerConfig {
         strip_prefix: bool,
     },
     Proxy {
-        upstream: String,
+        // One entry per backend.  A single positional `proxy "url"` form
+        // still parses (yielding a 1-entry Vec); multi-upstream load
+        // balancing kicks in when there are two or more entries.
+        upstreams: Vec<UpstreamConfig>,
+        // Picker policy when more than one upstream is present.  Default
+        // is round-robin.
+        lb_policy: LbPolicy,
+        // Required when `lb_policy == HeaderHash`; parsed from the
+        // `header=` property on the same `lb-policy` node.  Otherwise
+        // unused.
+        lb_hash_header: Option<String>,
+        // Optional active probe.  `None` disables active health checks
+        // entirely; otherwise a background task probes each upstream.
+        active_health: Option<ActiveHealthConfig>,
+        // Passive eject-on-error tuning.  Always present (with defaults
+        // that mean "never eject" when no failures occur).
+        passive_health: PassiveHealthConfig,
+        // Retry tuning.  `retry.max == 0` (default) disables retry.
+        retry: RetryConfig,
         strip_prefix: bool,
         proxy_protocol: Option<ProxyProtocolVersion>,
         // Wire protocol used to talk to the upstream.  `Auto` (default)
