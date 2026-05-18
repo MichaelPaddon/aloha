@@ -23,7 +23,9 @@ and access control — all from a single readable `aloha.kdl` file.
 
 **Routing & backends**
 - Virtual hosts: exact and regex hostname matching
-- Reverse proxy with connection pooling
+- Reverse proxy with connection pooling and multi-upstream load
+  balancing (round-robin, least-conn, ip-hash, header-hash, random)
+- Active and passive health checks; configurable retries
 - FastCGI, SCGI, and CGI backends
 - TCP proxy with HAProxy PROXY protocol v1/v2
 - HTTP redirects
@@ -180,6 +182,46 @@ location "/api/" {
   upstream doesn't keep state on either side.
 
 Default is 90 seconds (matches hyper-util's default).
+
+### Multi-upstream load balancing
+
+A `proxy` block can list more than one `upstream`; the proxy picks
+one per request via the configured `lb-policy`:
+
+```kdl
+location "/api/" {
+    proxy {
+        upstream "http://a:8080"
+        upstream "http://b:8080" weight=2
+        upstream "http://c:8080"
+
+        lb-policy "least-conn"          // round-robin | least-conn |
+                                        // random | ip-hash | header-hash
+
+        active-health {
+            path          "/healthz"
+            interval      10
+            expect-status 200
+        }
+        passive-health { eject-after 3; eject-for 30 }
+        retry { max 2; on-status 502 503 504 }
+    }
+}
+```
+
+`weight=N` (default 1) scales the share of picks; `0` parks an
+upstream.  `lb-policy "header-hash"` carries the request header to
+hash as a property on the same node, e.g. `lb-policy "header-hash"
+header="X-Session-Id"`, and falls back to round-robin when the
+header is absent on a given request.
+
+The `active-health { }` block enables a background probe; the
+`passive-health { }` block ejects an upstream after N consecutive
+request errors for the configured duration.  `retry max=N`
+re-issues failed attempts against the next picked upstream and
+requires an explicit `on-status` list of status codes that should
+trigger a retry.  When retry is enabled the request body is
+buffered up-front so it can be replayed across attempts.
 
 ### HAProxy PROXY protocol over QUIC — out of scope
 

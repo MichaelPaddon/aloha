@@ -153,9 +153,10 @@ Full configuration reference:
 .UE
 .
 .SH BUGS
-HTTPS backends are not yet supported by the reverse proxy handler.
-.PP
-OAuth/OIDC is not yet implemented.
+HAProxy PROXY protocol over QUIC is not supported; the wire format
+is still an IETF draft.  Terminate QUIC at HAProxy and forward
+HTTP/1.1 or HTTP/2 over TCP to aloha if source-IP preservation on
+HTTP/3 traffic is required.
 .
 .SH AUTHOR
 Michael Paddon <6d7770@gmail.com>

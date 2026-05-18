@@ -11,7 +11,9 @@ control.
  .
  Routing and backends:
   * Virtual hosts with exact and regex hostname matching
-  * Reverse proxy with connection pooling
+  * Reverse proxy with connection pooling and multi-upstream load
+    balancing (round-robin, least-conn, ip-hash, header-hash, random)
+  * Active and passive health checks; configurable retries
   * FastCGI, SCGI, and CGI backends
   * TCP proxy with HAProxy PROXY protocol v1/v2
   * HTTP redirects
