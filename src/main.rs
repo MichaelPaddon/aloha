@@ -15,6 +15,7 @@ mod headers;
 #[cfg(unix)]
 mod inherit;
 mod jwt;
+mod lb;
 mod listener;
 mod metrics;
 mod oidc;
