@@ -54,11 +54,11 @@ impl Handler {
             ))),
             HandlerConfig::Proxy {
                 upstreams,
-                lb_policy: _,
-                lb_hash_header: _,
-                health_check: _,
-                passive_health: _,
-                retry: _,
+                lb_policy,
+                lb_hash_header,
+                health_check,
+                passive_health,
+                retry,
                 strip_prefix,
                 proxy_protocol,
                 scheme,
@@ -67,21 +67,16 @@ impl Handler {
                 upstream_tls,
                 connect_timeout_secs,
             } => {
-                // Step-1 wiring: build only the first upstream and call
-                // the existing single-upstream ProxyHandler.  The LB
-                // pool and retry/health logic land in a later commit;
-                // until then a multi-upstream configuration falls back
-                // to the first entry so existing single-upstream behavior
-                // is preserved byte-for-byte.
-                let primary = upstreams.first().ok_or_else(|| {
-                    anyhow::anyhow!("proxy handler has no upstreams")
-                })?;
                 let skip_verify = upstream_tls
                     .as_ref()
                     .map(|t| t.skip_verify)
                     .unwrap_or(false);
-                let mut h = proxy::ProxyHandler::new(
-                    &primary.url,
+                let h = proxy::ProxyHandler::new_pool(
+                    upstreams,
+                    lb_policy.clone(),
+                    lb_hash_header.clone(),
+                    passive_health.clone(),
+                    retry.clone(),
                     *strip_prefix,
                     *proxy_protocol,
                     *scheme,
@@ -89,8 +84,24 @@ impl Handler {
                     *pool_max_idle,
                     skip_verify,
                     *connect_timeout_secs,
+                    metrics.clone(),
                 )?;
-                h.set_metrics(metrics.clone());
+                // Active health-check task: spawn one per pool when
+                // configured.  Probes use a minimal hyper-util client
+                // (separate from the pooled request-path client) so a
+                // probe stall can never wedge real traffic.
+                if let Some(hc) = health_check {
+                    let prober: Arc<dyn crate::lb::HealthProber> =
+                        Arc::new(proxy::HttpHealthProber::new(
+                            skip_verify,
+                        )?);
+                    crate::lb::spawn_health_check_task(
+                        h.pool().clone(),
+                        hc.clone(),
+                        prober,
+                        Some(metrics.clone()),
+                    );
+                }
                 Ok(Handler::Proxy(Box::new(h)))
             }
             HandlerConfig::Redirect { to, code } => Ok(Handler::Redirect {

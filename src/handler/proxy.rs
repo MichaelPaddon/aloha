@@ -489,7 +489,376 @@ static HOP_BY_HOP: &[&str] = &[
     "upgrade",
 ];
 
+/// Reverse-proxy handler.  Owns a Vec of per-upstream clients
+/// ([`InnerProxyClient`]) plus an [`UpstreamPool`] that picks one per
+/// request.  A single-upstream configuration produces a 1-element pool
+/// and behaves identically to the pre-LB code path.
 pub struct ProxyHandler {
+    /// One inner per upstream; index-aligned with `pool.upstreams()`.
+    inners: Vec<InnerProxyClient>,
+    /// Picker + per-upstream health state.
+    pool: Arc<crate::lb::UpstreamPool>,
+    /// Retry config; `max == 0` disables retries.
+    retry: crate::config::RetryConfig,
+    /// Status codes that trigger a retry attempt.  Empty means "any
+    /// 5xx".  Stored as a HashSet for O(1) membership.
+    retry_on_status: std::collections::HashSet<u16>,
+    /// Held so request-path counter increments can land somewhere.
+    metrics: Option<Arc<crate::metrics::Metrics>>,
+}
+
+impl ProxyHandler {
+    /// Single-upstream constructor.  Retained as the entry point for
+    /// tests and for the simple `proxy "url"` form; multi-upstream
+    /// pools are built via [`ProxyHandler::new_pool`].
+    pub fn new(
+        upstream_str: &str,
+        strip_prefix: bool,
+        proxy_protocol: Option<ProxyProtocolVersion>,
+        scheme: crate::config::ProxyUpstreamScheme,
+        pool_idle_timeout_secs: Option<u64>,
+        pool_max_idle: Option<u32>,
+        skip_verify: bool,
+        connect_timeout_secs: Option<u64>,
+    ) -> anyhow::Result<Self> {
+        let inner = InnerProxyClient::new(
+            upstream_str,
+            strip_prefix,
+            proxy_protocol,
+            scheme,
+            pool_idle_timeout_secs,
+            pool_max_idle,
+            skip_verify,
+            connect_timeout_secs,
+        )?;
+        let upstreams = vec![Arc::new(crate::lb::Upstream::new(
+            upstream_str.to_string(),
+            1,
+        ))];
+        let pool = Arc::new(crate::lb::UpstreamPool::new(
+            upstreams,
+            crate::config::LbPolicy::RoundRobin,
+            None,
+            crate::config::PassiveHealthConfig::default(),
+            None,
+        ));
+        Ok(ProxyHandler {
+            inners: vec![inner],
+            pool,
+            retry: crate::config::RetryConfig::default(),
+            retry_on_status: std::collections::HashSet::new(),
+            metrics: None,
+        })
+    }
+
+    /// Multi-upstream constructor.  Consumes the parsed proxy config
+    /// fields and builds one `InnerProxyClient` per upstream plus the
+    /// shared [`UpstreamPool`].  All upstreams share the same TLS,
+    /// pool, scheme, and proxy-protocol settings (those knobs live on
+    /// the outer `proxy` block, not on individual `upstream` children).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_pool(
+        upstreams_cfg: &[crate::config::UpstreamConfig],
+        lb_policy: crate::config::LbPolicy,
+        lb_hash_header: Option<String>,
+        passive: crate::config::PassiveHealthConfig,
+        retry: crate::config::RetryConfig,
+        strip_prefix: bool,
+        proxy_protocol: Option<ProxyProtocolVersion>,
+        scheme: crate::config::ProxyUpstreamScheme,
+        pool_idle_timeout_secs: Option<u64>,
+        pool_max_idle: Option<u32>,
+        skip_verify: bool,
+        connect_timeout_secs: Option<u64>,
+        metrics: Arc<crate::metrics::Metrics>,
+    ) -> anyhow::Result<Self> {
+        if upstreams_cfg.is_empty() {
+            anyhow::bail!("proxy pool requires at least one upstream");
+        }
+        let mut inners = Vec::with_capacity(upstreams_cfg.len());
+        for u in upstreams_cfg {
+            inners.push(InnerProxyClient::new(
+                &u.url,
+                strip_prefix,
+                proxy_protocol,
+                scheme,
+                pool_idle_timeout_secs,
+                pool_max_idle,
+                skip_verify,
+                connect_timeout_secs,
+            )?);
+        }
+        let upstream_handles = crate::lb::build_upstreams(upstreams_cfg);
+        let pool = Arc::new(crate::lb::UpstreamPool::new(
+            upstream_handles,
+            lb_policy,
+            lb_hash_header,
+            passive,
+            Some(metrics.clone()),
+        ));
+        let retry_on_status: std::collections::HashSet<u16> =
+            retry.on_status.iter().copied().collect();
+        let mut handler = ProxyHandler {
+            inners,
+            pool,
+            retry,
+            retry_on_status,
+            metrics: Some(metrics.clone()),
+        };
+        handler.set_metrics(metrics);
+        Ok(handler)
+    }
+
+    pub fn set_metrics(&mut self, metrics: Arc<crate::metrics::Metrics>) {
+        self.metrics = Some(metrics.clone());
+        for inner in &mut self.inners {
+            inner.set_metrics(metrics.clone());
+        }
+    }
+
+    /// Shared reference to the upstream pool.  Used by the status
+    /// page to render per-upstream health and by main.rs to spawn the
+    /// active health-check task.
+    pub fn pool(&self) -> &Arc<crate::lb::UpstreamPool> {
+        &self.pool
+    }
+
+    /// Test/back-compat accessor for the first inner's upstream URI.
+    /// Kept for legacy single-upstream unit tests; multi-upstream
+    /// callers should use `pool().upstreams()` instead.
+    #[cfg(test)]
+    pub fn upstream(&self) -> &Uri {
+        &self.inners[0].upstream
+    }
+
+    /// Test-only delegator: build the backend request via the first
+    /// inner's prepare_backend_request.  Multi-upstream callers go
+    /// through `serve()` directly.
+    #[cfg(test)]
+    pub fn prepare_backend_request(
+        &self,
+        req: Request<ReqBody>,
+        matched_prefix: &str,
+    ) -> anyhow::Result<Request<UpstreamBody>> {
+        self.inners[0].prepare_backend_request(req, matched_prefix)
+    }
+
+    pub async fn serve(
+        &self,
+        req: Request<ReqBody>,
+        matched_prefix: &str,
+    ) -> HttpResponse {
+        let peer_ip = req
+            .extensions()
+            .get::<SocketAddr>()
+            .map(|a| a.ip());
+        let max_attempts = self.retry.max.saturating_add(1).max(1);
+
+        // Fast path: no retry configured.  Skip body buffering and
+        // pick once.  Single-upstream pools always land here.
+        if max_attempts == 1 {
+            let ctx = crate::lb::PickCtx {
+                peer_ip,
+                headers: req.headers(),
+            };
+            let Some(upstream) = self.pool.pick(&ctx) else {
+                return response_502();
+            };
+            let idx = self.upstream_index(&upstream);
+            let _guard = upstream.in_flight_guard();
+            let resp = self.inners[idx].serve(req, matched_prefix).await;
+            self.record_outcome(&upstream, resp.status().as_u16());
+            return resp;
+        }
+
+        // Retry-enabled path.  We must replay the body across
+        // attempts, so collect it up-front.  For requests with an
+        // empty body this is essentially free.
+        let (parts, body) = req.into_parts();
+        use http_body_util::BodyExt;
+        let collected = match body.collect().await {
+            Ok(c) => c.to_bytes(),
+            Err(e) => {
+                tracing::error!(
+                    "proxy: reading request body for retry failed: {e}"
+                );
+                return response_502();
+            }
+        };
+
+        let mut last_resp: Option<HttpResponse> = None;
+        for attempt in 0..max_attempts {
+            let ctx = crate::lb::PickCtx {
+                peer_ip,
+                headers: &parts.headers,
+            };
+            let Some(upstream) = self.pool.pick(&ctx) else {
+                break;
+            };
+            let idx = self.upstream_index(&upstream);
+            let _guard = upstream.in_flight_guard();
+            // Rebuild the request with a fresh body cloned from the
+            // buffer.  Bytes is reference-counted so the clone is
+            // cheap.
+            let body: ReqBody = http_body_util::Full::new(
+                collected.clone(),
+            )
+            .map_err(|never| match never {})
+            .boxed_unsync();
+            let attempt_req = Request::from_parts(parts.clone(), body);
+            let resp = self.inners[idx]
+                .serve(attempt_req, matched_prefix)
+                .await;
+            let status = resp.status().as_u16();
+            self.record_outcome(&upstream, status);
+            let trigger = self.should_retry(status);
+            if trigger && attempt + 1 < max_attempts {
+                if let Some(m) = &self.metrics {
+                    m.proxy_lb_retries.fetch_add(
+                        1,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                }
+                last_resp = Some(resp);
+                continue;
+            }
+            return resp;
+        }
+        last_resp.unwrap_or_else(response_502)
+    }
+
+    fn upstream_index(
+        &self,
+        target: &Arc<crate::lb::Upstream>,
+    ) -> usize {
+        // pool.pick() returns one of our Arcs, so ptr-eq is reliable.
+        self.pool
+            .upstreams()
+            .iter()
+            .position(|u| Arc::ptr_eq(u, target))
+            .expect("upstream from pool exists in pool.upstreams")
+    }
+
+    fn record_outcome(
+        &self,
+        upstream: &crate::lb::Upstream,
+        status: u16,
+    ) {
+        if (500..600).contains(&status) {
+            self.pool.record_failure(upstream);
+        } else {
+            self.pool.record_success(upstream);
+        }
+    }
+
+    fn should_retry(&self, status: u16) -> bool {
+        if !(500..600).contains(&status) {
+            return false;
+        }
+        if self.retry_on_status.is_empty() {
+            // Default: retry any 5xx when retry is enabled.
+            return true;
+        }
+        self.retry_on_status.contains(&status)
+    }
+}
+
+/// Minimal hyper-util-backed health prober.  One probe-client is
+/// shared across every upstream in a pool; concurrency is bounded by
+/// `cfg.timeout_secs` so a stalled backend can't pile up probes.
+///
+/// Kept separate from the per-upstream `ProxyClient` so a probe
+/// stall (slow accept(), TLS handshake delay) can never wedge real
+/// traffic on its connection pool.
+pub(crate) struct HttpHealthProber {
+    client: Client<HttpsConnector<HttpConnector>, UpstreamBody>,
+}
+
+impl HttpHealthProber {
+    pub(crate) fn new(skip_verify: bool) -> anyhow::Result<Self> {
+        let mut http_conn = HttpConnector::new();
+        http_conn.enforce_http(false);
+        let builder = if skip_verify {
+            let crypto = rustls::ClientConfig::builder()
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(
+                    SkipServerVerification,
+                ))
+                .with_no_client_auth();
+            hyper_rustls::HttpsConnectorBuilder::new()
+                .with_tls_config(crypto)
+        } else {
+            hyper_rustls::HttpsConnectorBuilder::new().with_webpki_roots()
+        };
+        let connector = builder
+            .https_or_http()
+            .enable_http1()
+            .enable_http2()
+            .wrap_connector(http_conn);
+        let client =
+            Client::builder(TokioExecutor::new()).build(connector);
+        Ok(HttpHealthProber { client })
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::lb::HealthProber for HttpHealthProber {
+    async fn probe(
+        &self,
+        url: &str,
+        cfg: &crate::config::HealthCheckConfig,
+    ) -> bool {
+        // Build `url + cfg.path`; treat unix: upstreams as always
+        // healthy since we don't have a UDS health-probe client wired.
+        if url.starts_with("unix:") {
+            return true;
+        }
+        let probe_uri = match build_probe_uri(url, &cfg.path) {
+            Some(u) => u,
+            None => return false,
+        };
+        use http_body_util::BodyExt;
+        let body: UpstreamBody = http_body_util::Empty::<bytes::Bytes>::new()
+            .map_err(|never| match never {})
+            .boxed_unsync();
+        let req = match Request::builder()
+            .method("GET")
+            .uri(probe_uri)
+            .body(body)
+        {
+            Ok(r) => r,
+            Err(_) => return false,
+        };
+        let fut = self.client.request(req);
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(cfg.timeout_secs.max(1)),
+            fut,
+        )
+        .await
+        {
+            Ok(Ok(resp)) => resp.status().as_u16() == cfg.expect_status,
+            _ => false,
+        }
+    }
+}
+
+/// Concatenate `upstream` + `path` into a probe URI.  Strips an
+/// existing trailing slash on the upstream and a leading slash on
+/// the path before joining so the result is exactly one slash.
+fn build_probe_uri(upstream: &str, path: &str) -> Option<Uri> {
+    let base = upstream.trim_end_matches('/');
+    let suffix = if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("/{path}")
+    };
+    format!("{base}{suffix}").parse::<Uri>().ok()
+}
+
+/// Per-upstream client and per-upstream state.  One `InnerProxyClient`
+/// is built per backend URL; the outer [`ProxyHandler`] holds a Vec of
+/// them plus the [`UpstreamPool`] that picks one per request.
+pub(crate) struct InnerProxyClient {
     // The client maintains a connection pool keyed by authority.
     // Stored in Arc<Handler> by the router, so it is shared across
     // all requests to this location.
@@ -586,8 +955,8 @@ fn parse_alt_svc_h3(value: &str) -> Option<(u16, u64)> {
     None
 }
 
-impl ProxyHandler {
-    pub fn new(
+impl InnerProxyClient {
+    pub(crate) fn new(
         upstream_str: &str,
         strip_prefix: bool,
         proxy_protocol: Option<ProxyProtocolVersion>,
@@ -751,13 +1120,13 @@ impl ProxyHandler {
     /// increment the outbound handshake counter.  A no-op for h1/h2 +
     /// Unix variants; metrics for those flow through the request
     /// pipeline elsewhere.
-    pub fn set_metrics(&mut self, metrics: Arc<crate::metrics::Metrics>) {
+    pub(crate) fn set_metrics(&mut self, metrics: Arc<crate::metrics::Metrics>) {
         if let ProxyClient::H3(h) = &mut self.client {
             h.metrics = Some(metrics);
         }
     }
 
-    pub async fn serve(
+    pub(crate) async fn serve(
         &self,
         req: Request<ReqBody>,
         matched_prefix: &str,
@@ -1287,14 +1656,14 @@ mod tests {
         // The internal URI collapses to localhost so that Host header
         // is a sensible value for the backend.
         let h = h.unwrap();
-        assert_eq!(h.upstream.host(), Some("localhost"));
+        assert_eq!(h.upstream().host(), Some("localhost"));
     }
 
     #[cfg(unix)]
     #[test]
     fn new_unix_upstream_uses_http_localhost_uri() {
         let h = ProxyHandler::new("unix:/run/app.sock", false, None, crate::config::ProxyUpstreamScheme::Auto, None, None, false, None).unwrap();
-        assert_eq!(h.upstream.scheme_str(), Some("http"));
+        assert_eq!(h.upstream().scheme_str(), Some("http"));
     }
 
     #[test]
@@ -1692,5 +2061,181 @@ mod tests {
         // resetting to `Version::default()` we let hyper-util decide
         // based on the upstream's ALPN.
         assert_eq!(backend.version(), hyper::Version::default());
+    }
+
+    // -- Multi-upstream retry tests --------------------------------
+
+    /// Spawn a single-shot mock backend that returns `status` for one
+    /// request and shuts down.  Returns the bound address.
+    async fn spawn_mock(status: u16) -> SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut s = stream;
+                    let mut buf = [0u8; 1024];
+                    // Drain the request line + headers.
+                    let _ = s.read(&mut buf).await;
+                    let body = format!(
+                        "HTTP/1.1 {status} X\r\ncontent-length: 0\r\n\r\n"
+                    );
+                    let _ = s.write_all(body.as_bytes()).await;
+                });
+            }
+        });
+        addr
+    }
+
+    #[tokio::test]
+    async fn retry_falls_through_to_next_upstream() {
+        let bad = spawn_mock(503).await;
+        let good = spawn_mock(200).await;
+        let metrics = Arc::new(crate::metrics::Metrics::new());
+        let h = ProxyHandler::new_pool(
+            &[
+                crate::config::UpstreamConfig {
+                    url: format!("http://{bad}"),
+                    weight: 1,
+                },
+                crate::config::UpstreamConfig {
+                    url: format!("http://{good}"),
+                    weight: 1,
+                },
+            ],
+            crate::config::LbPolicy::RoundRobin,
+            None,
+            crate::config::PassiveHealthConfig::default(),
+            crate::config::RetryConfig {
+                max: 1,
+                on_status: vec![],
+            },
+            false,
+            None,
+            crate::config::ProxyUpstreamScheme::Auto,
+            None,
+            None,
+            false,
+            None,
+            metrics.clone(),
+        )
+        .unwrap();
+        let req = hyper::Request::builder()
+            .method("GET")
+            .uri("/")
+            .header("host", "example.com")
+            .body(
+                http_body_util::Empty::<bytes::Bytes>::new()
+                    .map_err(|never| match never {})
+                    .boxed_unsync(),
+            )
+            .unwrap();
+        let resp = h.serve(req, "/").await;
+        assert_eq!(resp.status().as_u16(), 200);
+        assert_eq!(
+            metrics
+                .proxy_lb_retries
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_max_zero_returns_503_unchanged() {
+        let bad = spawn_mock(503).await;
+        let metrics = Arc::new(crate::metrics::Metrics::new());
+        let h = ProxyHandler::new_pool(
+            &[crate::config::UpstreamConfig {
+                url: format!("http://{bad}"),
+                weight: 1,
+            }],
+            crate::config::LbPolicy::RoundRobin,
+            None,
+            crate::config::PassiveHealthConfig::default(),
+            crate::config::RetryConfig {
+                max: 0,
+                on_status: vec![],
+            },
+            false,
+            None,
+            crate::config::ProxyUpstreamScheme::Auto,
+            None,
+            None,
+            false,
+            None,
+            metrics.clone(),
+        )
+        .unwrap();
+        let req = hyper::Request::builder()
+            .method("GET")
+            .uri("/")
+            .header("host", "example.com")
+            .body(
+                http_body_util::Empty::<bytes::Bytes>::new()
+                    .map_err(|never| match never {})
+                    .boxed_unsync(),
+            )
+            .unwrap();
+        let resp = h.serve(req, "/").await;
+        assert_eq!(resp.status().as_u16(), 503);
+        assert_eq!(
+            metrics
+                .proxy_lb_retries
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_on_status_respects_allowlist() {
+        // Backend returns 500; retry on-status only retries 502/504.
+        let backend = spawn_mock(500).await;
+        let metrics = Arc::new(crate::metrics::Metrics::new());
+        let h = ProxyHandler::new_pool(
+            &[crate::config::UpstreamConfig {
+                url: format!("http://{backend}"),
+                weight: 1,
+            }],
+            crate::config::LbPolicy::RoundRobin,
+            None,
+            crate::config::PassiveHealthConfig::default(),
+            crate::config::RetryConfig {
+                max: 2,
+                on_status: vec![502, 504],
+            },
+            false,
+            None,
+            crate::config::ProxyUpstreamScheme::Auto,
+            None,
+            None,
+            false,
+            None,
+            metrics.clone(),
+        )
+        .unwrap();
+        let req = hyper::Request::builder()
+            .method("GET")
+            .uri("/")
+            .header("host", "example.com")
+            .body(
+                http_body_util::Empty::<bytes::Bytes>::new()
+                    .map_err(|never| match never {})
+                    .boxed_unsync(),
+            )
+            .unwrap();
+        let resp = h.serve(req, "/").await;
+        assert_eq!(resp.status().as_u16(), 500);
+        assert_eq!(
+            metrics
+                .proxy_lb_retries
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
     }
 }
