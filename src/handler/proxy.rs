@@ -511,6 +511,8 @@ impl ProxyHandler {
     /// Single-upstream constructor.  Retained as the entry point for
     /// tests and for the simple `proxy "url"` form; multi-upstream
     /// pools are built via [`ProxyHandler::new_pool`].
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         upstream_str: &str,
         strip_prefix: bool,

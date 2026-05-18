@@ -624,6 +624,11 @@
               <li><a href="#handler-proxy-proxy-protocol">proxy-protocol</a></li>
               <li><a href="#handler-proxy-strip-prefix">strip-prefix</a></li>
               <li><a href="#handler-proxy-upstream">upstream</a></li>
+              <li><a href="#handler-proxy-lb-policy">lb-policy</a></li>
+              <li><a href="#handler-proxy-lb-hash-header">lb-hash-header</a></li>
+              <li><a href="#handler-proxy-health-check">health-check</a></li>
+              <li><a href="#handler-proxy-passive-health">passive-health</a></li>
+              <li><a href="#handler-proxy-retry">retry</a></li>
             </ul>
             <li class="nav-parent"><a href="#handler-redirect">redirect<span class="nav-tog">›</span></a></li>
             <ul class="nav-list sub3 nav-children">
@@ -2931,6 +2936,129 @@
         traffic, terminate QUIC at HAProxy and forward decrypted
         HTTP/1.1 or HTTP/2 to aloha with PROXY protocol v2 over
         TCP.
+      </p>
+
+      <h4 id="handler-proxy-lb">Multi-upstream load balancing</h4>
+      <p>
+        <code>upstream</code> may appear multiple times to declare a
+        pool of backends.  The proxy picks one per request via the
+        configured <code>lb-policy</code> and can eject failing
+        upstreams (passively on request errors, actively via a
+        background probe) and retry against the next.
+      </p>
+<pre><code><span class="kw">location</span> <span class="str">"/api/"</span> {
+    <span class="kw">proxy</span> {
+        <span class="kw">upstream</span> <span class="str">"http://a:8080"</span>
+        <span class="kw">upstream</span> <span class="str">"http://b:8080"</span> <span class="kw">weight=</span><span class="num">2</span>
+        <span class="kw">upstream</span> <span class="str">"http://c:8080"</span>
+
+        <span class="kw">lb-policy</span> <span class="str">"least-conn"</span>
+
+        <span class="kw">health-check</span> {
+            <span class="kw">path</span>     <span class="str">"/healthz"</span>
+            <span class="kw">interval</span> <span class="num">10</span>
+            <span class="kw">expect</span>   <span class="num">200</span>
+        }
+        <span class="kw">passive-health</span> { <span class="kw">eject-after</span> <span class="num">3</span>; <span class="kw">eject-for</span> <span class="num">30</span> }
+        <span class="kw">retry</span> { <span class="kw">max</span> <span class="num">2</span>; <span class="kw">on-status</span> <span class="str">"502 503 504"</span> }
+    }
+}</code></pre>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Children</th><th>Type</th>
+              <th>Default</th><th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr id="handler-proxy-upstream-weight">
+              <td>upstream &hellip; weight=<em>N</em></td>
+              <td>integer</td>
+              <td><code>1</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Relative pick weight for this upstream.  Heavier
+                  upstreams take a proportionally larger share of
+                  round-robin / random picks and a higher
+                  load-tolerance share under <code>least-conn</code>.
+                  <code>0</code> excludes the upstream from the
+                  picker (useful for parking).</td>
+            </tr>
+            <tr id="handler-proxy-lb-policy">
+              <td>lb-policy</td>
+              <td><code>round-robin</code> | <code>least-conn</code> |
+                  <code>random</code> | <code>ip-hash</code> |
+                  <code>header-hash</code></td>
+              <td><code>round-robin</code></td>
+              <td><span class="badge badge-opt">optional</span>
+                  Picker policy. <code>ip-hash</code> sends all
+                  requests from one peer IP to the same upstream
+                  (sticky sessions without cookies).
+                  <code>header-hash</code> hashes a configurable
+                  request header; falls back to round-robin when
+                  the header is absent.</td>
+            </tr>
+            <tr id="handler-proxy-lb-hash-header">
+              <td>lb-hash-header</td>
+              <td>string</td>
+              <td>&mdash;</td>
+              <td><span class="badge badge-req">required</span> when
+                  <code>lb-policy "header-hash"</code>.  Request
+                  header whose value is hashed to select an
+                  upstream.  Case-insensitive.</td>
+            </tr>
+            <tr id="handler-proxy-health-check">
+              <td>health-check { &hellip; }</td>
+              <td>block</td><td>&mdash;</td>
+              <td><span class="badge badge-opt">optional</span>
+                  Active health-check tuning.  Children:
+                  <code>path</code> (default <code>/</code>),
+                  <code>interval</code> seconds (default
+                  <code>10</code>; <code>0</code> disables),
+                  <code>timeout</code> seconds (default
+                  <code>2</code>), <code>expect</code> status
+                  (default <code>200</code>),
+                  <code>unhealthy-after</code> (default
+                  <code>2</code>), <code>healthy-after</code>
+                  (default <code>1</code>).  Probes use a separate
+                  hyper-util client so a stall can never wedge real
+                  traffic.</td>
+            </tr>
+            <tr id="handler-proxy-passive-health">
+              <td>passive-health { &hellip; }</td>
+              <td>block</td><td>&mdash;</td>
+              <td><span class="badge badge-opt">optional</span>
+                  Children: <code>eject-after</code> consecutive
+                  request errors before ejection (default: never),
+                  <code>eject-for</code> seconds the upstream stays
+                  out (default <code>30</code>).  An ejected
+                  upstream is skipped by the picker until the
+                  deadline passes.</td>
+            </tr>
+            <tr id="handler-proxy-retry">
+              <td>retry { &hellip; }</td>
+              <td>block</td><td>&mdash;</td>
+              <td><span class="badge badge-opt">optional</span>
+                  Children: <code>max</code> additional attempts
+                  (default <code>0</code>), <code>on-status</code>
+                  whitespace-separated status codes that trigger a
+                  retry (empty = retry any 5xx).  When
+                  <code>max&gt;0</code> the request body is buffered
+                  up-front so it can be replayed across attempts.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        Retry is enabled by setting <code>retry max=</code><em>N</em>
+        with <em>N&gt;0</em>.  Because aloha must be able to replay
+        the request body across attempts, enabling retry causes the
+        body to be collected into memory before the first attempt.
+        For requests with no body (GET / HEAD / empty POST) this is
+        effectively free; for large request bodies it is a real cost
+        and operators should leave <code>retry max=0</code> (the
+        default).
       </p>
 
       <!-- redirect -->

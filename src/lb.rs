@@ -148,15 +148,6 @@ impl UpstreamPool {
         }
     }
 
-    /// Number of upstreams in the pool (regardless of health).
-    pub fn len(&self) -> usize {
-        self.upstreams.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.upstreams.is_empty()
-    }
-
     /// Read-only view of every upstream; for the status page.
     pub fn upstreams(&self) -> &[Arc<Upstream>] {
         &self.upstreams
@@ -234,15 +225,10 @@ impl UpstreamPool {
             best = Some(match best {
                 None => candidate,
                 Some(cur) => {
-                    if candidate.0 < cur.0 {
-                        candidate
-                    } else if candidate.0 == cur.0
-                        && (i.wrapping_add(salt) & 1) == 0
-                    {
-                        candidate
-                    } else {
-                        cur
-                    }
+                    let take = candidate.0 < cur.0
+                        || (candidate.0 == cur.0
+                            && (i.wrapping_add(salt) & 1) == 0);
+                    if take { candidate } else { cur }
                 }
             });
         }
