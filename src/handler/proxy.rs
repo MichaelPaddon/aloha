@@ -2236,4 +2236,322 @@ mod tests {
             0
         );
     }
+
+    /// Mock that reads the entire request body and echoes its bytes
+    /// in the response body, while replying with `status` for the
+    /// status line.  Used to prove body replay during retry.
+    async fn spawn_echo_mock(status: u16) -> SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut s, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = Vec::new();
+                    // Read until we see headers terminator, then read
+                    // Content-Length bytes.  Tiny, request-shaped
+                    // parser sufficient for the test.
+                    let mut hdrs = Vec::new();
+                    let mut tmp = [0u8; 1024];
+                    loop {
+                        let Ok(n) = s.read(&mut tmp).await else {
+                            return;
+                        };
+                        if n == 0 {
+                            return;
+                        }
+                        hdrs.extend_from_slice(&tmp[..n]);
+                        if hdrs.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    // Find Content-Length and body start.
+                    let split =
+                        hdrs.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+                    let head =
+                        String::from_utf8_lossy(&hdrs[..split]).to_string();
+                    let len: usize = head
+                        .lines()
+                        .find_map(|l| {
+                            let l = l.to_ascii_lowercase();
+                            l.strip_prefix("content-length:")
+                                .map(|v| v.trim().parse().unwrap_or(0))
+                        })
+                        .unwrap_or(0);
+                    let mut body = hdrs[split + 4..].to_vec();
+                    while body.len() < len {
+                        let Ok(n) = s.read(&mut tmp).await else {
+                            return;
+                        };
+                        if n == 0 {
+                            break;
+                        }
+                        body.extend_from_slice(&tmp[..n]);
+                    }
+                    body.truncate(len);
+                    let line = format!(
+                        "HTTP/1.1 {status} X\r\nContent-Length: {}\r\n\
+                         Connection: close\r\n\r\n",
+                        body.len()
+                    );
+                    buf.extend_from_slice(line.as_bytes());
+                    buf.extend_from_slice(&body);
+                    let _ = s.write_all(&buf).await;
+                });
+            }
+        });
+        addr
+    }
+
+    #[tokio::test]
+    async fn retry_replays_post_body_to_next_upstream() {
+        // First backend echoes the body but returns 503; second
+        // echoes and returns 200.  The 200 response body must equal
+        // the original request body -- proving the buffered body
+        // survived both attempts.
+        let bad = spawn_echo_mock(503).await;
+        let good = spawn_echo_mock(200).await;
+        let metrics = Arc::new(crate::metrics::Metrics::new());
+        let h = ProxyHandler::new_pool(
+            &[
+                crate::config::UpstreamConfig {
+                    url: format!("http://{bad}"),
+                    weight: 1,
+                },
+                crate::config::UpstreamConfig {
+                    url: format!("http://{good}"),
+                    weight: 1,
+                },
+            ],
+            crate::config::LbPolicy::RoundRobin,
+            None,
+            crate::config::PassiveHealthConfig::default(),
+            crate::config::RetryConfig {
+                max: 1,
+                on_status: vec![503],
+            },
+            false,
+            None,
+            crate::config::ProxyUpstreamScheme::Auto,
+            None,
+            None,
+            false,
+            None,
+            metrics.clone(),
+        )
+        .unwrap();
+
+        let body_bytes = bytes::Bytes::from_static(b"replay-me-please");
+        let req = hyper::Request::builder()
+            .method("POST")
+            .uri("/")
+            .header("host", "example.com")
+            .header("content-length", body_bytes.len().to_string())
+            .body(
+                http_body_util::Full::new(body_bytes.clone())
+                    .map_err(|never| match never {})
+                    .boxed_unsync(),
+            )
+            .unwrap();
+        let resp = h.serve(req, "/").await;
+        assert_eq!(resp.status().as_u16(), 200);
+        let collected =
+            resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            collected, body_bytes,
+            "second backend should have received the same body"
+        );
+    }
+
+    #[tokio::test]
+    async fn pool_returns_502_when_every_upstream_ejected() {
+        // eject-after=1 with two upstreams that both always fail.
+        // Two requests are enough to eject both; the third gets a
+        // 502 since pick() returns None.
+        let a = spawn_mock(503).await;
+        let b = spawn_mock(503).await;
+        let metrics = Arc::new(crate::metrics::Metrics::new());
+        let h = ProxyHandler::new_pool(
+            &[
+                crate::config::UpstreamConfig {
+                    url: format!("http://{a}"),
+                    weight: 1,
+                },
+                crate::config::UpstreamConfig {
+                    url: format!("http://{b}"),
+                    weight: 1,
+                },
+            ],
+            crate::config::LbPolicy::RoundRobin,
+            None,
+            crate::config::PassiveHealthConfig {
+                eject_after: 1,
+                eject_for_secs: 60,
+            },
+            crate::config::RetryConfig::default(),
+            false,
+            None,
+            crate::config::ProxyUpstreamScheme::Auto,
+            None,
+            None,
+            false,
+            None,
+            metrics.clone(),
+        )
+        .unwrap();
+        let mk_req = || {
+            hyper::Request::builder()
+                .method("GET")
+                .uri("/")
+                .header("host", "example.com")
+                .body(
+                    http_body_util::Empty::<bytes::Bytes>::new()
+                        .map_err(|never| match never {})
+                        .boxed_unsync(),
+                )
+                .unwrap()
+        };
+        // First two requests hit upstreams and eject them.
+        let _ = h.serve(mk_req(), "/").await;
+        let _ = h.serve(mk_req(), "/").await;
+        // Third: every upstream ejected -> pool.pick returns None.
+        let resp = h.serve(mk_req(), "/").await;
+        assert_eq!(resp.status().as_u16(), 502);
+        assert!(
+            metrics
+                .proxy_lb_ejections
+                .load(std::sync::atomic::Ordering::Relaxed)
+                >= 2
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_recovers_from_connect_refused() {
+        // Reserve a port then drop the listener so connects to it
+        // fail.  A small TOCTOU race exists (something else could
+        // grab the port) but in practice this is reliable on test
+        // hosts.
+        let dead_addr = {
+            let l = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .unwrap();
+            l.local_addr().unwrap()
+        };
+        let good = spawn_mock(200).await;
+        let metrics = Arc::new(crate::metrics::Metrics::new());
+        let h = ProxyHandler::new_pool(
+            &[
+                crate::config::UpstreamConfig {
+                    url: format!("http://{dead_addr}"),
+                    weight: 1,
+                },
+                crate::config::UpstreamConfig {
+                    url: format!("http://{good}"),
+                    weight: 1,
+                },
+            ],
+            crate::config::LbPolicy::RoundRobin,
+            None,
+            crate::config::PassiveHealthConfig::default(),
+            crate::config::RetryConfig {
+                max: 1,
+                // Connect errors surface as 502 inside the inner.
+                on_status: vec![502],
+            },
+            false,
+            None,
+            crate::config::ProxyUpstreamScheme::Auto,
+            None,
+            None,
+            false,
+            None,
+            metrics.clone(),
+        )
+        .unwrap();
+        let req = hyper::Request::builder()
+            .method("GET")
+            .uri("/")
+            .header("host", "example.com")
+            .body(
+                http_body_util::Empty::<bytes::Bytes>::new()
+                    .map_err(|never| match never {})
+                    .boxed_unsync(),
+            )
+            .unwrap();
+        let resp = h.serve(req, "/").await;
+        assert_eq!(resp.status().as_u16(), 200);
+        assert_eq!(
+            metrics
+                .proxy_lb_retries
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+    }
+
+    // -- HealthProber and build_probe_uri --------------------------
+
+    #[test]
+    fn build_probe_uri_handles_slashes() {
+        // Base + path: trailing slashes on base and leading slashes
+        // on path are normalised so the result has exactly one
+        // separator.
+        let cases = [
+            ("http://h", "/healthz", "http://h/healthz"),
+            ("http://h/", "/healthz", "http://h/healthz"),
+            ("http://h", "healthz", "http://h/healthz"),
+            ("http://h/", "healthz", "http://h/healthz"),
+            ("http://h:8080", "/h", "http://h:8080/h"),
+        ];
+        for (base, path, want) in cases {
+            let got = build_probe_uri(base, path).unwrap();
+            assert_eq!(got.to_string(), want, "base={base} path={path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn http_health_prober_returns_true_for_expected_status() {
+        let addr = spawn_mock(200).await;
+        let p = HttpHealthProber::new(false).unwrap();
+        let cfg = crate::config::ActiveHealthConfig {
+            path: "/h".into(),
+            interval_secs: 0,
+            timeout_secs: 2,
+            expect_status: 200,
+            unhealthy_after: 1,
+            healthy_after: 1,
+        };
+        let ok = crate::lb::HealthProber::probe(
+            &p,
+            &format!("http://{addr}"),
+            &cfg,
+        )
+        .await;
+        assert!(ok);
+    }
+
+    #[tokio::test]
+    async fn http_health_prober_returns_false_for_wrong_status() {
+        let addr = spawn_mock(500).await;
+        let p = HttpHealthProber::new(false).unwrap();
+        let cfg = crate::config::ActiveHealthConfig {
+            path: "/h".into(),
+            interval_secs: 0,
+            timeout_secs: 2,
+            expect_status: 200,
+            unhealthy_after: 1,
+            healthy_after: 1,
+        };
+        let ok = crate::lb::HealthProber::probe(
+            &p,
+            &format!("http://{addr}"),
+            &cfg,
+        )
+        .await;
+        assert!(!ok);
+    }
 }

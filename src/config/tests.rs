@@ -3939,6 +3939,32 @@ fn proxy_passive_health_and_retry_parse() {
 }
 
 #[test]
+fn proxy_scheme_h3_rejects_when_any_upstream_is_http() {
+    // First upstream is https, second is http; scheme=h3 requires
+    // every upstream to be https.
+    let err = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        vhost h {
+            location "/" {
+                proxy {
+                    upstream "https://a:8443"
+                    upstream "http://b:8080"
+                    scheme "h3"
+                }
+            }
+        }
+        "#,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err.contains("scheme=h3") && err.contains("https"),
+        "expected scheme=h3 to reject non-https upstreams; got: {err}"
+    );
+}
+
+#[test]
 fn proxy_retry_requires_on_status_when_enabled() {
     let err = Config::parse(
         r#"

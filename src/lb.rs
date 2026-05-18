@@ -625,6 +625,42 @@ mod tests {
     }
 
     #[test]
+    fn passive_ejection_lifts_after_deadline_expires() {
+        // Drive an upstream past the eject threshold, then back-date
+        // its `ejected_until_ms` so the deadline is in the past.  The
+        // picker should treat the upstream as available again.
+        let pool = make_pool(&[1, 1], LbPolicy::RoundRobin);
+        let (_h, ctx) = empty_ctx();
+        pool.record_failure(&pool.upstreams()[0]);
+        pool.record_failure(&pool.upstreams()[0]);
+        // Force the ejection deadline into the past.
+        pool.upstreams()[0]
+            .ejected_until_ms
+            .store(1, Ordering::Relaxed);
+        // Round-robin should now visit both upstreams again.
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..6 {
+            seen.insert(pool.pick(&ctx).unwrap().url.clone());
+        }
+        assert_eq!(seen.len(), 2);
+    }
+
+    #[test]
+    fn random_policy_spreads_across_upstreams() {
+        let pool = make_pool(&[1, 1, 1], LbPolicy::Random);
+        let (_h, ctx) = empty_ctx();
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..200 {
+            seen.insert(pool.pick(&ctx).unwrap().url.clone());
+        }
+        assert_eq!(
+            seen.len(),
+            3,
+            "random picker visited only {seen:?}; expected all three"
+        );
+    }
+
+    #[test]
     fn least_conn_skips_ejected() {
         let pool = make_pool(&[1, 1], LbPolicy::LeastConn);
         let (_h, ctx) = empty_ctx();
