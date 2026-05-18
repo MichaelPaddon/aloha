@@ -53,7 +53,12 @@ impl Handler {
                 *strip_prefix,
             ))),
             HandlerConfig::Proxy {
-                upstream,
+                upstreams,
+                lb_policy: _,
+                lb_hash_header: _,
+                health_check: _,
+                passive_health: _,
+                retry: _,
                 strip_prefix,
                 proxy_protocol,
                 scheme,
@@ -62,12 +67,21 @@ impl Handler {
                 upstream_tls,
                 connect_timeout_secs,
             } => {
+                // Step-1 wiring: build only the first upstream and call
+                // the existing single-upstream ProxyHandler.  The LB
+                // pool and retry/health logic land in a later commit;
+                // until then a multi-upstream configuration falls back
+                // to the first entry so existing single-upstream behavior
+                // is preserved byte-for-byte.
+                let primary = upstreams.first().ok_or_else(|| {
+                    anyhow::anyhow!("proxy handler has no upstreams")
+                })?;
                 let skip_verify = upstream_tls
                     .as_ref()
                     .map(|t| t.skip_verify)
                     .unwrap_or(false);
                 let mut h = proxy::ProxyHandler::new(
-                    upstream,
+                    &primary.url,
                     *strip_prefix,
                     *proxy_protocol,
                     *scheme,

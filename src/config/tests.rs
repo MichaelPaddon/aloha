@@ -1132,12 +1132,14 @@ fn proxy_positional_form_parses() {
     )
     .unwrap();
     if let HandlerConfig::Proxy {
-        upstream,
+        upstreams,
         strip_prefix,
         ..
     } = &cfg.vhosts[0].locations[0].handler
     {
-        assert_eq!(upstream, "http://localhost:3000");
+        assert_eq!(upstreams.len(), 1);
+        assert_eq!(upstreams[0].url, "http://localhost:3000");
+        assert_eq!(upstreams[0].weight, 1);
         assert!(*strip_prefix);
     } else {
         panic!("expected Proxy handler");
@@ -3719,6 +3721,164 @@ fn proxy_scheme_h3_parses() {
     match h {
         HandlerConfig::Proxy { scheme, .. } => {
             assert_eq!(*scheme, ProxyUpstreamScheme::H3);
+        }
+        _ => panic!("expected Proxy handler"),
+    }
+}
+
+#[test]
+fn proxy_multi_upstream_weights_parse() {
+    let cfg = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        vhost h {
+            location "/" {
+                proxy {
+                    upstream "http://a:8080"
+                    upstream "http://b:8080" weight=2
+                    upstream "http://c:8080" weight=3
+                    lb-policy "least-conn"
+                }
+            }
+        }
+        "#,
+    )
+    .unwrap();
+    match &cfg.vhosts[0].locations[0].handler {
+        HandlerConfig::Proxy {
+            upstreams,
+            lb_policy,
+            ..
+        } => {
+            assert_eq!(upstreams.len(), 3);
+            assert_eq!(upstreams[0].url, "http://a:8080");
+            assert_eq!(upstreams[0].weight, 1);
+            assert_eq!(upstreams[1].url, "http://b:8080");
+            assert_eq!(upstreams[1].weight, 2);
+            assert_eq!(upstreams[2].url, "http://c:8080");
+            assert_eq!(upstreams[2].weight, 3);
+            assert_eq!(*lb_policy, crate::config::LbPolicy::LeastConn);
+        }
+        _ => panic!("expected Proxy handler"),
+    }
+}
+
+#[test]
+fn proxy_positional_plus_upstream_children_combine() {
+    // Legacy positional + new `upstream` children: both contribute.
+    let cfg = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        vhost h {
+            location "/" {
+                proxy "http://a:8080" {
+                    upstream "http://b:8080"
+                }
+            }
+        }
+        "#,
+    )
+    .unwrap();
+    match &cfg.vhosts[0].locations[0].handler {
+        HandlerConfig::Proxy { upstreams, .. } => {
+            assert_eq!(upstreams.len(), 2);
+            assert_eq!(upstreams[0].url, "http://a:8080");
+            assert_eq!(upstreams[1].url, "http://b:8080");
+        }
+        _ => panic!("expected Proxy handler"),
+    }
+}
+
+#[test]
+fn proxy_header_hash_requires_header() {
+    let err = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        vhost h {
+            location "/" {
+                proxy {
+                    upstream "http://a:8080"
+                    upstream "http://b:8080"
+                    lb-policy "header-hash"
+                }
+            }
+        }
+        "#,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err.contains("header-hash") && err.contains("lb-hash-header"),
+        "expected header-hash needs lb-hash-header; got: {err}"
+    );
+}
+
+#[test]
+fn proxy_health_check_defaults_fill_in() {
+    let cfg = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        vhost h {
+            location "/" {
+                proxy {
+                    upstream "http://a:8080"
+                    health-check { path "/healthz" }
+                }
+            }
+        }
+        "#,
+    )
+    .unwrap();
+    match &cfg.vhosts[0].locations[0].handler {
+        HandlerConfig::Proxy {
+            health_check: Some(hc),
+            ..
+        } => {
+            assert_eq!(hc.path, "/healthz");
+            assert_eq!(hc.interval_secs, 10);
+            assert_eq!(hc.timeout_secs, 2);
+            assert_eq!(hc.expect_status, 200);
+            assert_eq!(hc.unhealthy_after, 2);
+            assert_eq!(hc.healthy_after, 1);
+        }
+        _ => panic!("expected Proxy handler with health-check"),
+    }
+}
+
+#[test]
+fn proxy_passive_health_and_retry_parse() {
+    let cfg = Config::parse(
+        r#"
+        listener { bind "[::]:80" }
+        vhost h {
+            location "/" {
+                proxy {
+                    upstream "http://a:8080"
+                    upstream "http://b:8080"
+                    passive-health {
+                        eject-after 3
+                        eject-for 60
+                    }
+                    retry {
+                        max 2
+                        on-status "502 503 504"
+                    }
+                }
+            }
+        }
+        "#,
+    )
+    .unwrap();
+    match &cfg.vhosts[0].locations[0].handler {
+        HandlerConfig::Proxy {
+            passive_health,
+            retry,
+            ..
+        } => {
+            assert_eq!(passive_health.eject_after, 3);
+            assert_eq!(passive_health.eject_for_secs, 60);
+            assert_eq!(retry.max, 2);
+            assert_eq!(retry.on_status, vec![502, 503, 504]);
         }
         _ => panic!("expected Proxy handler"),
     }
